@@ -33,11 +33,17 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+pydantic = ["pydantic>=2"]
+redis = ["redis>=5"]
+all = [
+  "kvtsjl[pydantic,redis]",
+]
 dev = [
   "pytest>=8",
   "pytest-cov>=5",
   "ruff>=0.6",
   "mypy>=1.11",
+  "kvtsjl[all]",
 ]
 
 [project.urls]

@@ -10,9 +10,19 @@ A typed, composable Python facade for key-value storage. Decouples domain schema
 
 ```bash
 pip install kvtsjl
+pip install 'kvtsjl[pydantic]'   # kvtsjl.serde.pydantic
+pip install 'kvtsjl[redis]'      # kvtsjl.backends.redis
+pip install 'kvtsjl[all]'        # every optional integration
 ```
 
-Optional backend extras (e.g. `redis`, `chroma`, `gcs`) will be added as those integrations ship.
+| Extra | Purpose |
+|-------|---------|
+| `pydantic` | `from kvtsjl.serde.pydantic import for_pydantic, …` |
+| `redis` | `from kvtsjl.backends.redis import RedisKvStore` |
+| `all` | All optional integrations (not test/lint tools) |
+| `dev` | Tests, lint, type-check (+ `all`) |
+
+More extras (e.g. `chroma`, `gcs`) will land as those integrations ship; add them to `all` when they do.
 
 ## Development
 
