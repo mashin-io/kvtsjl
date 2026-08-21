@@ -69,7 +69,7 @@ def supports_prefix_scan(layout: KeyLayout) -> bool:
 
 
 def layout_encode_for_fs(layout: KeyLayout, key_blob: str | bytes) -> str:
-    """Filename or relative path under a collection dir for a leaf/in-key blob."""
+    """Relative path / object-key suffix under a collection prefix for a KBLOB."""
     if layout is KeyLayout.HASHED:
         return hash_blob(key_blob)
     if layout is KeyLayout.HIERARCHICAL:
@@ -86,7 +86,9 @@ def layout_decode_for_fs(
 ) -> str | bytes:
     """Invert ``layout_encode_for_fs`` for reversible layouts (``LITERAL`` only)."""
     if layout is not KeyLayout.LITERAL:
-        raise ValueError(f"layout {layout!r} is not reversible from a filesystem path")
+        raise ValueError(
+            f"layout {layout!r} is not reversible from a relative path / object key"
+        )
     encoded = rel.replace("\\", "/")
     if blob_type is bytes:
         return decode_literal_bytes(encoded)

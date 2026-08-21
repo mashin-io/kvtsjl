@@ -1,9 +1,10 @@
 """KV store backends.
 
-Optional backends (e.g. Redis) are imported from their modules after installing
-the matching extra::
+Optional backends are imported from their modules after installing the matching
+extra::
 
     from kvtsjl.backends.redis import RedisKvStore
+    from kvtsjl.backends.s3 import S3KvStore
 """
 
 from __future__ import annotations

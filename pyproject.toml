@@ -35,8 +35,9 @@ dependencies = []
 [project.optional-dependencies]
 pydantic = ["pydantic>=2"]
 redis = ["redis>=5"]
+s3 = ["boto3>=1.34"]
 all = [
-  "kvtsjl[pydantic,redis]",
+  "kvtsjl[pydantic,redis,s3]",
 ]
 dev = [
   "pytest>=8",
