@@ -9,7 +9,11 @@ from urllib.parse import quote, unquote
 
 
 class KeyLayout(str, Enum):
-    """How a leaf KBLOB is mapped to a physical storage key segment."""
+    """Physicalization policy for how a composed logical key lands on the medium.
+
+    Not a substitute for ``Scope``: scope + leaf are logical; this enum chooses
+    the physical encoding (literal segment, hash, nested path parts).
+    """
 
     LITERAL = "literal"
     HASHED = "hashed"
@@ -78,7 +82,7 @@ def layout_encode_for_fs(layout: KeyLayout, key_blob: str | bytes) -> str:
 
 
 def layout_decode_for_fs(
-    layout: KeyLayout, rel: str, *, blob_type: type[str] | type[bytes]
+    layout: KeyLayout, rel: str, *, blob_type: type[str | bytes]
 ) -> str | bytes:
     """Invert ``layout_encode_for_fs`` for reversible layouts (``LITERAL`` only)."""
     if layout is not KeyLayout.LITERAL:

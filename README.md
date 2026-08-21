@@ -22,8 +22,6 @@ pip install 'kvtsjl[all]'        # every optional integration
 | `all` | All optional integrations (not test/lint tools) |
 | `dev` | Tests, lint, type-check (+ `all`) |
 
-More extras (e.g. `chroma`, `gcs`) will land as those integrations ship; add them to `all` when they do.
-
 ## Development
 
 ```bash

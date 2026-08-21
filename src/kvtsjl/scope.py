@@ -1,4 +1,4 @@
-"""Orthogonal scope partitions for a KvSet."""
+"""Logical key-prefix scopes (kind/id segments) for a KvSet."""
 
 from __future__ import annotations
 
@@ -7,13 +7,23 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class ScopeSegment:
+    """One ``kind`` / ``id`` pair in a logical key prefix."""
+
     kind: str
     id: str
 
 
 @dataclass(frozen=True, slots=True)
 class Scope:
-    """Ordered named segments — physical in-key prefix under a collection binding."""
+    """Ordered kind/id segments — a **logical** in-key prefix under the collection binding.
+
+    Scope is not a second addressing axis: it is ergonomic key composition. The
+    leaf ``K`` and these segments together form the logical in-key; backends /
+    ``KeyLayout`` choose how that material is physicalized (flat string, HASH
+    field, nested directories, …).
+
+    Build free-form prefixes with ``Scope.of(...)``, ``extend``, ``child``, or ``/``.
+    """
 
     segments: tuple[ScopeSegment, ...] = ()
 
@@ -26,34 +36,36 @@ class Scope:
             )
         )
 
-    def extend(self, kind: str, id: str) -> Scope:
-        return Scope(segments=self.segments + (ScopeSegment(kind=kind, id=str(id)),))
-
-    def child(self, **kinds_to_ids: str) -> Scope:
-        extra = tuple(ScopeSegment(kind=k, id=str(v)) for k, v in kinds_to_ids.items())
-        return Scope(segments=self.segments + extra)
-
-    def path_display(self) -> str:
-        if not self.segments:
-            return ""
-        return "/".join(f"{s.kind}/{s.id}" for s in self.segments)
-
     @classmethod
     def empty(cls) -> Scope:
         return cls()
 
-    @classmethod
-    def tenant(cls, tenant_id: str) -> Scope:
-        return cls.of(tenant=tenant_id)
+    def extend(self, kind: str, id: str) -> Scope:
+        """Append one kind/id segment."""
+        return Scope(segments=self.segments + (ScopeSegment(kind=kind, id=str(id)),))
 
-    @classmethod
-    def user(cls, tenant_id: str, user_id: str) -> Scope:
-        return cls.of(tenant=tenant_id, user=user_id)
+    def child(self, **kinds_to_ids: str) -> Scope:
+        """Append segments from kwargs (insertion order)."""
+        extra = tuple(ScopeSegment(kind=k, id=str(v)) for k, v in kinds_to_ids.items())
+        return Scope(segments=self.segments + extra)
 
-    @classmethod
-    def session(cls, tenant_id: str, user_id: str, session_id: str) -> Scope:
-        return cls.of(tenant=tenant_id, user=user_id, session=session_id)
+    def __truediv__(
+        self, other: ScopeSegment | tuple[str, str] | Scope
+    ) -> Scope:
+        """Path-like append: ``scope / ("kind", "id")`` or ``scope / other_scope``."""
+        if isinstance(other, Scope):
+            return Scope(segments=self.segments + other.segments)
+        if isinstance(other, ScopeSegment):
+            return self.extend(other.kind, other.id)
+        kind, seg_id = other
+        return self.extend(kind, seg_id)
 
-    @classmethod
-    def turn(cls, tenant_id: str, user_id: str, session_id: str, turn_id: str) -> Scope:
-        return cls.of(tenant=tenant_id, user=user_id, session=session_id, turn=turn_id)
+    def path_display(self) -> str:
+        """Human-readable ``kind/id/...`` view (not a storage path)."""
+        if not self.segments:
+            return ""
+        return "/".join(f"{s.kind}/{s.id}" for s in self.segments)
+
+
+# Alias for callers who think in prefixes rather than "scope".
+KeyPrefix = Scope

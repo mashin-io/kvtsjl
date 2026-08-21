@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from kvtsjl.backends import (
     FilesystemKvStore,
     MemoryKvStore,
@@ -33,7 +31,7 @@ from kvtsjl.namespace import (
     NativeStrCollectionBinder,
     PhysicalRef,
 )
-from kvtsjl.scope import Scope, ScopeSegment
+from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
 from kvtsjl.serde import SerDe
 from kvtsjl.store import KvStore
 from kvtsjl.ttl import TtlPolicy
@@ -47,6 +45,7 @@ __all__ = [
     "FallbackReadKvStore",
     "FilesystemKvStore",
     "KeyLayout",
+    "KeyPrefix",
     "KeyPrefixBinder",
     "KvSet",
     "KvSetRef",
@@ -64,7 +63,6 @@ __all__ = [
     "NativeStrCollectionBinder",
     "PhysicalRef",
     "ReadonlyKvStore",
-    "RedisKvStore",
     "ScanQuery",
     "Scope",
     "ScopeSegment",
@@ -73,11 +71,3 @@ __all__ = [
     "TtlPolicy",
     "__version__",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    if name == "RedisKvStore":
-        from kvtsjl.backends.redis import RedisKvStore as _RedisKvStore
-
-        return _RedisKvStore
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

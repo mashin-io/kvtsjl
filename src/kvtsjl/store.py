@@ -199,6 +199,7 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
     def scoped(
         self, scope: Scope | None = None, **kinds_to_ids: str
     ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+        """Narrow to a longer logical key prefix (appends scope segments)."""
         if scope is not None and kinds_to_ids:
             raise KvStoreScopeError("pass scope= or kwargs, not both")
         if scope is None:
@@ -206,6 +207,12 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
         else:
             scope = Scope(segments=self.scope.segments + scope.segments)
         return self._clone_with_scope(scope)
+
+    def prefixed(
+        self, scope: Scope | None = None, **kinds_to_ids: str
+    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+        """Alias of ``scoped`` — scope is a logical key prefix."""
+        return self.scoped(scope, **kinds_to_ids)
 
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
         raise NotImplementedError(
