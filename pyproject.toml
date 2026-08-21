@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kvtsjl"
+version = "0.1.0"
+description = "A typed, composable Python facade for key-value storage. Decouples domain schemas from persistence backends with orthogonal scope partitioning and layered wrappers (fallback, mirror, tiering). Features an abstract multi-indexing layer—attach custom exact, sparse, dense, or semantic vector indices per store for unified search and hydration."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+authors = [
+  { name = "mashin-io" },
+]
+keywords = [
+  "kv",
+  "key-value",
+  "store",
+  "cache",
+  "indexing",
+  "vector-search",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-cov>=5",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/mashin-io/kvtsjl"
+Repository = "https://github.com/mashin-io/kvtsjl"
+Issues = "https://github.com/mashin-io/kvtsjl/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kvtsjl"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/kvtsjl" = "kvtsjl"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/README.md",
+  "/LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["kvtsjl"]
+mypy_path = "src"
