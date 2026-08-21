@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from botocore.exceptions import ClientError
 
@@ -36,27 +36,8 @@ from kvtsjl.namespace import (
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvStore
 
-
-class S3Client(Protocol):
-    """Subset of the boto3 S3 client used by ``S3KvStore``."""
-
-    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
-
-    def put_object(
-        self, *, Bucket: str, Key: str, Body: bytes
-    ) -> Mapping[str, object]: ...
-
-    def delete_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
-
-    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
-
-    def list_objects_v2(
-        self,
-        *,
-        Bucket: str,
-        Prefix: str = "",
-        ContinuationToken: str = "",
-    ) -> Mapping[str, object]: ...
+if TYPE_CHECKING:
+    from mypy_boto3_s3 import S3Client
 
 
 def _safe_name(name: str) -> str:

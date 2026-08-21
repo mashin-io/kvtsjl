@@ -58,21 +58,21 @@ class ReadonlyKvStore[K, V, KBLOB, VBLOB, COLL](
         return self
 
 
-class FallbackReadKvStore[K, V, KBLOB, VBLOB, COLL](
+class FallbackReadKvStore[K, V, KBLOB, VBLOB, COLL, SEC_COLL](
     _DelegatingKvStore[K, V, KBLOB, VBLOB, COLL]
 ):
     """Read primary then secondary; writes go to primary only. Scan: primary only."""
 
-    def __init__[COLL2](
+    def __init__(
         self,
         primary: KvStore[K, V, KBLOB, VBLOB, COLL],
-        secondary: KvStore[K, V, KBLOB, VBLOB, COLL2],
+        secondary: KvStore[K, V, KBLOB, VBLOB, SEC_COLL],
         *,
         promote: bool = True,
     ) -> None:
         super().__init__(primary)
         self._primary = primary
-        self._secondary: KvStore[K, V, KBLOB, VBLOB, COLL2] = secondary
+        self._secondary = secondary
         self._promote = promote
 
     def get(self, key: K) -> V | None:
@@ -124,19 +124,19 @@ class FallbackReadKvStore[K, V, KBLOB, VBLOB, COLL](
         )
 
 
-class MirrorKvStore[K, V, KBLOB, VBLOB, COLL](
+class MirrorKvStore[K, V, KBLOB, VBLOB, COLL, SEC_COLL](
     _DelegatingKvStore[K, V, KBLOB, VBLOB, COLL]
 ):
     """Reads/scans from primary; writes/deletes go to both (secondary best-effort)."""
 
-    def __init__[COLL2](
+    def __init__(
         self,
         primary: KvStore[K, V, KBLOB, VBLOB, COLL],
-        secondary: KvStore[K, V, KBLOB, VBLOB, COLL2],
+        secondary: KvStore[K, V, KBLOB, VBLOB, SEC_COLL],
     ) -> None:
         super().__init__(primary)
         self._primary = primary
-        self._secondary: KvStore[K, V, KBLOB, VBLOB, COLL2] = secondary
+        self._secondary = secondary
 
     def get(self, key: K) -> V | None:
         return self._primary.get(key)

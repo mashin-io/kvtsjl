@@ -8,9 +8,7 @@ Install with::
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from typing import cast
-
-import redis
+from typing import TYPE_CHECKING, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported
@@ -25,7 +23,15 @@ from kvtsjl.namespace import (
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvStore
 
+if TYPE_CHECKING:
+    from redis import Redis
+
 RedisWire = str | bytes
+# Matches redis-py ``EncodableT`` for ``hset(..., mapping=)`` (Mapping is invariant).
+_RedisHSetMapping = Mapping[
+    str | bytes | bytearray | memoryview | int | float,
+    str | bytes | bytearray | memoryview | int | float,
+]
 
 
 def _as_redis_key(blob: object, *, what: str) -> RedisWire:
@@ -52,7 +58,7 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
     def __init__(
         self,
         kvset: KvSet[K, V, KBLOB, VBLOB],
-        client: redis.Redis,
+        client: Redis,
         *,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, COLL] | None = None,
@@ -73,7 +79,7 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
     def flat(
         cls,
         kvset: KvSet[K, V, KBLOB, VBLOB],
-        client: redis.Redis,
+        client: Redis,
         *,
         scope: Scope | None = None,
         batch_size: int = 500,
@@ -90,7 +96,7 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
     def hash_collection(
         cls,
         kvset: KvSet[K, V, KBLOB, VBLOB],
-        client: redis.Redis,
+        client: Redis,
         *,
         scope: Scope | None = None,
         batch_size: int = 500,
@@ -179,7 +185,10 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
             if self._use_hash:
                 mapping = {self._pk(k): self._serialize_value(v) for k, v in chunk}
                 if mapping:
-                    self._client.hset(self._collection_key(), mapping=mapping)
+                    self._client.hset(
+                        self._collection_key(),
+                        mapping=cast(_RedisHSetMapping, mapping),
+                    )
                     if ttl is not None:
                         self._client.expire(self._collection_key(), ttl)
             else:
@@ -235,7 +244,8 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
                     match=match,
                     count=page_size,
                 )
-                for field, raw in pairs.items():
+                fields = cast(Mapping[RedisWire, RedisWire], pairs)
+                for field, raw in fields.items():
                     pk = self._field_as_kblob(field, prefix)
                     if not ops.startswith(pk, prefix):
                         continue
@@ -266,14 +276,15 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
                 continue
             if query.include_values:
                 values = self._client.mget(keys)
-                for rk, raw in zip(keys, values, strict=True):
+                for i, rk in enumerate(keys):
+                    value_blob: RedisWire | None = values[i]
                     pk = self._field_as_kblob(rk, prefix)
                     if not ops.startswith(pk, prefix):
                         continue
                     decoded = self._decode_key_from_physical(pk)
-                    if decoded is None or raw is None:
+                    if decoded is None or value_blob is None:
                         continue
-                    yield decoded, self._deserialize_value(raw)
+                    yield decoded, self._deserialize_value(value_blob)
             else:
                 for rk in keys:
                     pk = self._field_as_kblob(rk, prefix)

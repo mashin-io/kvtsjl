@@ -32,6 +32,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
 pytest --cov=kvtsjl --cov-report=term-missing
+pyright
 ```
 
 Optional markers use in-process simulators: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory fake bucket (no Docker/cloud required).

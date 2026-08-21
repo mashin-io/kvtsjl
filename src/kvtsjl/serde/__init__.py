@@ -44,42 +44,42 @@ class SerDe[T, BLOB]:
         except Exception as exc:
             raise KvStoreSerDeError(f"deserialize failed: {exc}") from exc
 
-    @classmethod
-    def identity[U](cls, blob_type: type[U]) -> SerDe[U, U]:
-        return cls(
+    @staticmethod
+    def identity[U](blob_type: type[U]) -> SerDe[U, U]:
+        return SerDe[U, U](
             serializer=lambda x: x,
             deserializer=lambda x: x,
             blob_type=blob_type,
         )
 
-    @classmethod
-    def utf8_bytes(cls) -> SerDe[str, bytes]:
-        return cls(
+    @staticmethod
+    def utf8_bytes() -> SerDe[str, bytes]:
+        return SerDe[str, bytes](
             serializer=lambda s: s.encode("utf-8"),
             deserializer=lambda b: b.decode("utf-8"),
             blob_type=bytes,
         )
 
-    @classmethod
-    def safe_str(cls) -> SerDe[str, str]:
+    @staticmethod
+    def safe_str() -> SerDe[str, str]:
         """Identity for string KBLOB (path/redis-safe encoding is layout's job)."""
-        return cls(
+        return SerDe[str, str](
             serializer=lambda s: s,
             deserializer=lambda s: s,
             blob_type=str,
         )
 
-    @classmethod
-    def json_str(cls) -> SerDe[JsonValue, str]:
-        return cls(
+    @staticmethod
+    def json_str() -> SerDe[JsonValue, str]:
+        return SerDe[JsonValue, str](
             serializer=lambda v: json.dumps(v, separators=(",", ":"), default=str),
             deserializer=json.loads,
             blob_type=str,
         )
 
-    @classmethod
-    def json_bytes(cls) -> SerDe[JsonValue, bytes]:
-        return cls(
+    @staticmethod
+    def json_bytes() -> SerDe[JsonValue, bytes]:
+        return SerDe[JsonValue, bytes](
             serializer=lambda v: json.dumps(
                 v, separators=(",", ":"), default=str
             ).encode("utf-8"),
@@ -87,9 +87,9 @@ class SerDe[T, BLOB]:
             blob_type=bytes,
         )
 
-    @classmethod
-    def pickle_bytes[U](cls) -> SerDe[U, bytes]:
-        return cls(
+    @staticmethod
+    def pickle_bytes[U](_value_type: type[U]) -> SerDe[U, bytes]:
+        return SerDe[U, bytes](
             serializer=pickle.dumps,
             deserializer=pickle.loads,
             blob_type=bytes,

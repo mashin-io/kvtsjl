@@ -54,50 +54,48 @@ class KvSet[K, V, KBLOB, VBLOB]:
             scope_schema=scope_schema,
         )
 
-    @classmethod
-    def with_str_keys(
-        cls,
+    @staticmethod
+    def with_str_keys[KK, VV, VVBLOB](
         name: str,
         *,
         version: int | str = 1,
-        key_serde: SerDe[K, str],
-        value_serde: SerDe[V, VBLOB],
+        key_serde: SerDe[KK, str],
+        value_serde: SerDe[VV, VVBLOB],
         ttl_policy: TtlPolicy | None = None,
         key_layout: KeyLayout = KeyLayout.LITERAL,
         scope_schema: tuple[str, ...] | None = None,
-    ) -> KvSet[K, V, str, VBLOB]:
-        return cls.create(
-            name,
+    ) -> KvSet[KK, VV, str, VVBLOB]:
+        return KvSet(
+            name=name,
             version=version,
             key_serde=key_serde,
             value_serde=value_serde,
             str_serde=SerDe.safe_str(),
             blob_ops=StrBlobOps(),
-            ttl_policy=ttl_policy,
+            ttl_policy=ttl_policy or TtlPolicy.none(),
             key_layout=key_layout,
             scope_schema=scope_schema,
         )
 
-    @classmethod
-    def with_bytes_keys(
-        cls,
+    @staticmethod
+    def with_bytes_keys[KK, VV, VVBLOB](
         name: str,
         *,
         version: int | str = 1,
-        key_serde: SerDe[K, bytes],
-        value_serde: SerDe[V, VBLOB],
+        key_serde: SerDe[KK, bytes],
+        value_serde: SerDe[VV, VVBLOB],
         ttl_policy: TtlPolicy | None = None,
         key_layout: KeyLayout = KeyLayout.LITERAL,
         scope_schema: tuple[str, ...] | None = None,
-    ) -> KvSet[K, V, bytes, VBLOB]:
-        return cls.create(
-            name,
+    ) -> KvSet[KK, VV, bytes, VVBLOB]:
+        return KvSet(
+            name=name,
             version=version,
             key_serde=key_serde,
             value_serde=value_serde,
             str_serde=SerDe.utf8_bytes(),
             blob_ops=BytesBlobOps(),
-            ttl_policy=ttl_policy,
+            ttl_policy=ttl_policy or TtlPolicy.none(),
             key_layout=key_layout,
             scope_schema=scope_schema,
         )

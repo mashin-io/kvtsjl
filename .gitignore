@@ -31,6 +31,7 @@ env/
 # Test / type / coverage
 .pytest_cache/
 .mypy_cache/
+.pyright/
 .ruff_cache/
 .coverage
 .coverage.*
