@@ -30,7 +30,11 @@ pip install 'kvtsjl[all]'        # every optional integration
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+pytest
+pytest --cov=kvtsjl --cov-report=term-missing
 ```
+
+Optional markers use in-process simulators: `s3` → **moto**, `redis` → **fakeredis** (no Docker/AWS required).
 
 ## License
 
