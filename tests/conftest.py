@@ -11,8 +11,10 @@ import pytest
 from moto import mock_aws
 
 from kvtsjl import KvSet, SerDe, TtlPolicy
+from kvtsjl.backends.gcs import GcsKvStore
 from kvtsjl.backends.redis import RedisKvStore
 from kvtsjl.backends.s3 import S3KvStore
+from tests.fake_gcs import FakeGcsBucket
 
 
 @pytest.fixture
@@ -78,5 +80,23 @@ def s3_store(
         str_bytes_kvset,
         client=s3_client,  # type: ignore[arg-type]
         bucket=s3_bucket,
+        key_prefix="app/",
+    )
+
+
+@pytest.fixture
+def fake_gcs_bucket() -> FakeGcsBucket:
+    return FakeGcsBucket()
+
+
+@pytest.fixture
+def gcs_store(
+    str_bytes_kvset: KvSet[str, str, str, bytes],
+    fake_gcs_bucket: FakeGcsBucket,
+) -> GcsKvStore[str, str, str]:
+    # Test double; production passes google.cloud.storage.Bucket.
+    return GcsKvStore(
+        str_bytes_kvset,
+        bucket=fake_gcs_bucket,  # type: ignore[arg-type]
         key_prefix="app/",
     )

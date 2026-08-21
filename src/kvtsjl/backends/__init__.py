@@ -5,6 +5,7 @@ extra::
 
     from kvtsjl.backends.redis import RedisKvStore
     from kvtsjl.backends.s3 import S3KvStore
+    from kvtsjl.backends.gcs import GcsKvStore
 """
 
 from __future__ import annotations
