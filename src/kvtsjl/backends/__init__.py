@@ -10,6 +10,7 @@ matching extra::
 Index store leaf backends live under ``kvtsjl.backends.index``::
 
     from kvtsjl.backends.index import MemoryKeyIndex, MemoryTermIndex
+    from kvtsjl.backends.index.chroma import ChromaVectorIndex  # kvtsjl[chroma]
 """
 
 from __future__ import annotations

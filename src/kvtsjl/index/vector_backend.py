@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from abc import ABC
+from typing import override
 
+from kvtsjl.index.backend import IndexBackend
 from kvtsjl.index.logical.envelope import VectorEnvelope
 from kvtsjl.index.logical.vector import VectorIndex, VectorRecord
-from kvtsjl.index.backend import IndexBackend
 
 
 class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
@@ -20,6 +21,7 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
     ``meta_of``; logical ``VectorIndex`` only builds ``D`` via ``merge_data``.
     """
 
+    @override
     def meta_of(
         self,
         key: K,
@@ -40,20 +42,23 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
                 embedding = tuple(raw)
         return VectorRecord(data=data, document=document, embedding=embedding)
 
+    @override
     def wrap_data(self, data: D, extras: VectorEnvelope) -> VectorRecord[D]:
         return VectorRecord(
             data=data,
             document=extras.document,
             embedding=extras.embedding,
-            distance=extras.distance,
+            score=extras.score,
         )
 
+    @override
     def unwrap_data(self, record: VectorRecord[D]) -> D:
         return record.data
 
+    @override
     def unwrap_envelope(self, record: VectorRecord[D]) -> VectorEnvelope:
         return VectorEnvelope(
             document=record.document,
             embedding=record.embedding,
-            distance=record.distance,
+            score=record.score,
         )

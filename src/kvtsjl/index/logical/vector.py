@@ -11,6 +11,17 @@ from kvtsjl.index.logical.abc import Index
 type FlatMeta = dict[str, str | int | float | bool]
 
 
+def query_has_content(content: object | None) -> bool:
+    """Whether ``content`` is a non-empty embeddable query payload."""
+    if content is None:
+        return False
+    if isinstance(content, str):
+        return content != ""
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        return len(content) > 0
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class VectorRecord[D]:
     """Index metadata ``M`` for vector indexes: wired ``D`` plus optional search extras."""
@@ -18,23 +29,27 @@ class VectorRecord[D]:
     data: D
     document: str | None = None
     embedding: tuple[float, ...] | None = None
-    distance: float | None = None  # search-only; ignored on set/upsert
+    score: float | None = None  # search-only rank measure; semantics are backend-defined
 
 
 @dataclass(frozen=True, slots=True)
-class VectorQuery:
-    """Query for vector indexes: exactly one of ``text`` or ``embedding``."""
+class VectorQuery[T]:
+    """Vector search query: exactly one of embeddable ``content`` or raw ``embedding``.
 
-    text: str | None = None
+    ``T`` is the query modality (text, image bytes, URI string, etc.) understood by
+    the index backend's embedder.
+    """
+
+    content: T | None = None
     embedding: Sequence[float] | None = None
 
     def __post_init__(self) -> None:
-        has_text = self.text is not None and self.text != ""
+        has_content = query_has_content(self.content)
         has_emb = self.embedding is not None and len(self.embedding) > 0
-        if has_text and has_emb:
-            raise ValueError("VectorQuery: set only one of text or embedding")
-        if not has_text and not has_emb:
-            raise ValueError("VectorQuery: text or embedding is required")
+        if has_content and has_emb:
+            raise ValueError("VectorQuery: set only one of content or embedding")
+        if not has_content and not has_emb:
+            raise ValueError("VectorQuery: content or embedding is required")
 
 
 class VectorIndex[Q, K, V, D](Index[Q, K, V, VectorRecord[D]], ABC):

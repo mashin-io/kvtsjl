@@ -4,47 +4,50 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from typing import cast, override
 
 from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
 from kvtsjl.index.logical.abc import IndexHit
-from kvtsjl.index.logical.vector import VectorQuery, VectorRecord
-from kvtsjl.index.vector_backend import VectorIndexBackend
+from kvtsjl.index.logical.vector import VectorQuery, VectorRecord, query_has_content
 from kvtsjl.index.schema.index_set import IndexSet
+from kvtsjl.index.vector_backend import VectorIndexBackend
 
 
 def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b, strict=True)))
 
 
-class MemoryVectorIndex[K, V, D, ID, META](
-    VectorIndexBackend[VectorQuery, K, V, D, ID, META, str]
+class MemoryVectorIndex[K, V, D, ID, META, Q](
+    VectorIndexBackend[VectorQuery[Q], K, V, D, ID, META, str]
 ):
-    """Exact nearest-neighbor scan in memory (L2 distance)."""
+    """Exact nearest-neighbor scan in memory (L2 distance as ``score``)."""
 
     def __init__(
         self,
         index_set: IndexSet[K, D, ID, META],
         merge_data_fn: Callable[[K, V, D | None], D],
         *,
-        embed_query: Callable[[str], Sequence[float]] | None = None,
+        embed_content: Callable[[Q], Sequence[float]] | None = None,
         sync_on_write: bool = True,
     ) -> None:
         super().__init__(index_set, binder=NativeStrCollectionBinder())
         self.merge_data_fn = merge_data_fn
-        self.embed_query = embed_query
+        self.embed_content = embed_content
         self.sync_on_write = sync_on_write
         self._vectors: dict[K, tuple[float, ...]] = {}
         self._records: dict[K, VectorRecord[D]] = {}
 
+    @override
     def merge_data(self, key: K, value: V, *, previous: D | None) -> D:
         return self.merge_data_fn(key, value, previous)
 
-    def _resolve_query_embedding(self, query: VectorQuery) -> tuple[float, ...] | None:
+    def _resolve_query_embedding(self, query: VectorQuery[Q]) -> tuple[float, ...] | None:
         if query.embedding is not None:
             return tuple(query.embedding)
-        if query.text is not None and self.embed_query is not None:
-            return tuple(self.embed_query(query.text))
+        content = query.content
+        if query_has_content(content) and self.embed_content is not None:
+            return tuple(self.embed_content(cast(Q, content)))
         return None
 
     def _embedding_for(self, key: K, value: V, meta: VectorRecord[D]) -> tuple[float, ...]:
@@ -58,8 +61,9 @@ class MemoryVectorIndex[K, V, D, ID, META](
             "no embedding for key; set IndexSet.embedding_of or pass embedding on meta"
         )
 
+    @override
     def search(
-        self, query: VectorQuery, *, limit: int = 100
+        self, query: VectorQuery[Q], *, limit: int = 100
     ) -> Sequence[IndexHit[K, VectorRecord[D]]]:
         if limit <= 0:
             return []
@@ -68,18 +72,19 @@ class MemoryVectorIndex[K, V, D, ID, META](
             return []
         scored: list[tuple[float, IndexHit[K, VectorRecord[D]]]] = []
         for key, vec in self._vectors.items():
-            dist = _l2_distance(q_emb, vec)
+            rank = _l2_distance(q_emb, vec)
             stored = self._records[key]
             hit_meta = VectorRecord(
                 data=stored.data,
                 document=stored.document,
                 embedding=stored.embedding,
-                distance=dist,
+                score=rank,
             )
-            scored.append((dist, IndexHit(key=key, meta=hit_meta)))
+            scored.append((rank, IndexHit(key=key, meta=hit_meta)))
         scored.sort(key=lambda row: row[0])
         return [hit for _, hit in scored[:limit]]
 
+    @override
     def get(self, key: K) -> VectorRecord[D] | None:
         rec = self._records.get(key)
         if rec is None:
@@ -88,20 +93,22 @@ class MemoryVectorIndex[K, V, D, ID, META](
             data=rec.data,
             document=rec.document,
             embedding=rec.embedding,
-            distance=None,
+            score=None,
         )
 
+    @override
     def upsert(self, key: K, value: V, meta: VectorRecord[D]) -> None:
         emb = self._embedding_for(key, value, meta)
         stored = VectorRecord(
             data=meta.data,
             document=meta.document,
             embedding=emb,
-            distance=None,
+            score=None,
         )
         self._vectors[key] = emb
         self._records[key] = stored
 
+    @override
     def set(self, key: K, value: VectorRecord[D]) -> None:
         if key not in self._records:
             raise KvStoreIndexError("key is not in the index")
@@ -114,9 +121,10 @@ class MemoryVectorIndex[K, V, D, ID, META](
             data=value.data,
             document=value.document,
             embedding=emb,
-            distance=None,
+            score=None,
         )
 
+    @override
     def delete(self, key: K) -> bool:
         if key not in self._records:
             return False

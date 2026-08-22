@@ -16,4 +16,4 @@ class VectorEnvelope:
 
     document: str | None = None
     embedding: tuple[float, ...] | None = None
-    distance: float | None = None  # search-only
+    score: float | None = None  # search-only; semantics are backend-defined

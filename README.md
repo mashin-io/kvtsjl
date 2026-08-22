@@ -12,6 +12,7 @@ pip install 'kvtsjl[pydantic]'   # kvtsjl.serde.pydantic
 pip install 'kvtsjl[redis]'      # kvtsjl.backends.redis
 pip install 'kvtsjl[s3]'         # kvtsjl.backends.s3 (AWS S3 / MinIO)
 pip install 'kvtsjl[gcs]'         # kvtsjl.backends.gcs (Google Cloud Storage)
+pip install 'kvtsjl[chroma]'     # kvtsjl.backends.index.chroma
 pip install 'kvtsjl[all]'        # every optional integration
 ```
 
@@ -21,6 +22,7 @@ pip install 'kvtsjl[all]'        # every optional integration
 | `redis` | `from kvtsjl.backends.redis import RedisKvStore` |
 | `s3` | `from kvtsjl.backends.s3 import S3KvStore` |
 | `gcs` | `from kvtsjl.backends.gcs import GcsKvStore` |
+| `chroma` | `from kvtsjl.backends.index.chroma import ChromaVectorIndex` |
 | `all` | All optional integrations (not test/lint tools) |
 | `dev` | Tests, lint, type-check (+ `all`) |
 
@@ -35,7 +37,7 @@ pytest --cov=kvtsjl --cov-report=term-missing
 pyright
 ```
 
-Optional markers use in-process simulators: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory fake bucket (no Docker/cloud required).
+Optional markers use in-process simulators: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory fake bucket, `chroma` → **EphemeralClient** (no Docker/cloud required).
 
 ## License
 

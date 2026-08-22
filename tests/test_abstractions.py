@@ -102,14 +102,14 @@ def test_index_set_identity_physical() -> None:
 
 class _VectorEnvelope(TypedDict, total=False):
     document: str | None
-    distance: float | None
+    score: float | None
 
 
 @dataclass(frozen=True, slots=True)
 class _VectorRecord[D]:
     data: D
     document: str | None = None
-    distance: float | None = None
+    score: float | None = None
 
 
 class _StubIndexBackend(
@@ -136,14 +136,14 @@ class _StubIndexBackend(
         return _VectorRecord(
             data=data,
             document=extras.get("document"),
-            distance=extras.get("distance"),
+            score=extras.get("score"),
         )
 
     def unwrap_data(self, record: _VectorRecord[_Meta]) -> _Meta:
         return record.data
 
     def unwrap_envelope(self, record: _VectorRecord[_Meta]) -> _VectorEnvelope:
-        return {"document": record.document, "distance": record.distance}
+        return {"document": record.document, "score": record.score}
 
     def get(self, key: str) -> _VectorRecord[_Meta] | None:
         return None
@@ -158,9 +158,9 @@ class _StubIndexBackend(
 def test_index_backend_envelope_type_param() -> None:
     backend = _StubIndexBackend()
     assert backend.binding.collection == "stub:v1"
-    record = backend.wrap_data({"tag": "x"}, {"document": "doc", "distance": 0.1})
+    record = backend.wrap_data({"tag": "x"}, {"document": "doc", "score": 0.1})
     assert record.data == {"tag": "x"}
     assert record.document == "doc"
-    assert record.distance == 0.1
+    assert record.score == 0.1
     envelope = backend.unwrap_envelope(record)
-    assert envelope.get("distance") == 0.1
+    assert envelope.get("score") == 0.1

@@ -6,12 +6,12 @@ from abc import ABC, abstractmethod
 
 from kvtsjl.bind.namespace import CollectionBinding, NamespaceBinder, resolve_collection_binding
 from kvtsjl.index.logical.abc import Index
+from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.leaf.base import PhysicalBackend
+from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.schema.ref import WireRef
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.schema.blob_ops import BlobOps
-from kvtsjl.index.schema.index_set import IndexSet
-from kvtsjl.schema.ref import WireRef
 
 
 class IndexBackend[Q, K, V, D, M, ID, META, COLL, E](
@@ -27,7 +27,7 @@ class IndexBackend[Q, K, V, D, M, ID, META, COLL, E](
     implementations (identity ``IndexSet``, process-local storage).
 
     ``E`` types envelope fields on ``M`` beyond wired ``D`` (e.g. search-only
-    ``distance``). Use ``EmptyEnvelope`` when ``M`` is ``D`` alone.
+    ``score``). Use ``EmptyEnvelope`` when ``M`` is ``D`` alone.
     """
 
     index_set: IndexSet[K, D, ID, META]
