@@ -16,7 +16,7 @@ CompressionCodec = Literal["gzip", "zlib", "zstd", "lz4"]
 
 T = TypeVar("T")
 
-__all__ = ["CompressionCodec", "compressed"]
+__all__ = ["CompressionCodec", "compressed", "wire_compressed"]
 
 
 def _missing_extra(codec: CompressionCodec, extra: str) -> KvStoreSerDeError:
@@ -89,29 +89,34 @@ _DECOMPRESSORS: dict[CompressionCodec, Callable[[bytes], bytes]] = {
 }
 
 
-def compressed(codec: CompressionCodec, inner: SerDe[T, bytes]) -> SerDe[T, bytes]:
-    """Wrap a byte ``SerDe`` with fixed ``codec`` compress/decompress on the wire."""
+def wire_compressed(codec: CompressionCodec) -> SerDe[bytes, bytes]:
+    """Compress/decompress wire ``bytes`` with a fixed ``codec``."""
     from kvtsjl.serde import SerDe
 
-    if inner.blob_type is not bytes:
-        raise ValueError(f"compressed inner SerDe must use bytes blobs, got {inner.blob_type!r}")
     compress_fn = _COMPRESSORS[codec]
     decompress_fn = _DECOMPRESSORS[codec]
 
-    def serialize(value: T) -> bytes:
+    def serialize(blob: bytes) -> bytes:
         try:
-            return compress_fn(inner.serialize(value))
+            return compress_fn(blob)
         except KvStoreSerDeError:
             raise
         except Exception as exc:
             raise KvStoreSerDeError(f"compress ({codec}) failed: {exc}") from exc
 
-    def deserialize(blob: bytes) -> T:
+    def deserialize(blob: bytes) -> bytes:
         try:
-            return inner.deserialize(decompress_fn(blob))
+            return decompress_fn(blob)
         except KvStoreSerDeError:
             raise
         except Exception as exc:
             raise KvStoreSerDeError(f"decompress ({codec}) failed: {exc}") from exc
 
-    return SerDe[T, bytes](serializer=serialize, deserializer=deserialize, blob_type=bytes)
+    return SerDe[bytes, bytes](serializer=serialize, deserializer=deserialize, blob_type=bytes)
+
+
+def compressed(codec: CompressionCodec, inner: SerDe[T, bytes]) -> SerDe[T, bytes]:
+    """Wrap a byte ``SerDe`` with fixed ``codec`` compress/decompress on the wire."""
+    if inner.blob_type is not bytes:
+        raise ValueError(f"compressed inner SerDe must use bytes blobs, got {inner.blob_type!r}")
+    return inner.then(wire_compressed(codec))

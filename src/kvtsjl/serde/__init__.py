@@ -8,7 +8,7 @@ import json
 import pickle
 
 from kvtsjl.exceptions import KvStoreSerDeError
-from kvtsjl.serde.compress import CompressionCodec, compressed as _compressed
+from kvtsjl.serde.compress import CompressionCodec, compressed as _compressed, wire_compressed
 
 # JSON-encodable surface for json_* factories (deliberately broad, not object/Any).
 type JsonScalar = None | bool | int | float | str
@@ -45,6 +45,18 @@ class SerDe[T, BLOB]:
             return self.deserializer(blob)
         except Exception as exc:
             raise KvStoreSerDeError(f"deserialize failed: {exc}") from exc
+
+    def then[B2](self, other: SerDe[BLOB, B2]) -> SerDe[T, B2]:
+        """Pipeline: ``other(self.serialize(v))`` on write; reverse on read."""
+        return SerDe[T, B2](
+            serializer=lambda value: other.serialize(self.serialize(value)),
+            deserializer=lambda blob: self.deserialize(other.deserialize(blob)),
+            blob_type=other.blob_type,
+        )
+
+    def __rshift__[B2](self, other: SerDe[BLOB, B2]) -> SerDe[T, B2]:
+        """Pipeline sugar: ``serde1 >> serde2`` equals ``serde1.then(serde2)``."""
+        return self.then(other)
 
     @staticmethod
     def identity[U](blob_type: type[U]) -> SerDe[U, U]:
@@ -96,6 +108,11 @@ class SerDe[T, BLOB]:
             deserializer=pickle.loads,
             blob_type=bytes,
         )
+
+    @staticmethod
+    def wire_compressed(codec: CompressionCodec) -> SerDe[bytes, bytes]:
+        """Wire-stage compression on ``bytes`` (compose with ``.then`` or ``>>``)."""
+        return wire_compressed(codec)
 
     @staticmethod
     def compressed[UV](codec: CompressionCodec, inner: SerDe[UV, bytes]) -> SerDe[UV, bytes]:

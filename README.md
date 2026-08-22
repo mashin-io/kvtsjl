@@ -130,6 +130,7 @@ kvset = (
         key_serde=SerDe.identity(str),
         value_serde=SerDe.compressed("gzip", SerDe.json_bytes()),
     )
+    # or: value_serde=SerDe.json_bytes() >> SerDe.wire_compressed("gzip")
     # or: ... SerDe.utf8_bytes()).with_compressed_value("gzip")
 )
 store = MemoryKvStore(kvset)

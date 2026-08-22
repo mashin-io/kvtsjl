@@ -28,6 +28,12 @@ def test_compressed_json_bytes_roundtrip() -> None:
     assert serde.deserialize(blob) == {"a": 1, "b": "x"}
 
 
+def test_compressed_via_pipeline_operator() -> None:
+    serde = SerDe.json_bytes() >> SerDe.wire_compressed("gzip")
+    blob = serde.serialize({"a": 1})
+    assert serde.deserialize(blob) == {"a": 1}
+
+
 def test_compressed_corrupt_blob() -> None:
     serde = SerDe.compressed("gzip", SerDe.utf8_bytes())
     with pytest.raises(KvStoreSerDeError, match="decompress"):
