@@ -89,6 +89,15 @@ target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
 
+[tool.ruff.lint]
+select = ["I"]
+fixable = ["I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kvtsjl"]
+combine-as-imports = true
+force-sort-within-sections = true
+
 [tool.pyright]
 include = ["src/kvtsjl"]
 pythonVersion = "3.12"

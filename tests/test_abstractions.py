@@ -7,6 +7,7 @@ from typing import TypedDict
 
 from kvtsjl import (
     IndexBackend,
+    IndexedKvStore,
     IndexHit,
     IndexSet,
     KvBackend,
@@ -16,9 +17,9 @@ from kvtsjl import (
     NativeStrCollectionBinder,
     PhysicalBackend,
     PhysicalSchema,
+    ReadonlyKvStore,
     SerDe,
 )
-from kvtsjl import IndexedKvStore, ReadonlyKvStore
 
 type _Meta = dict[str, str]
 

@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-import os
-import time
 from collections.abc import Iterator, Mapping, Sequence
+import os
 from pathlib import Path
+import time
 from typing import cast
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
     NativeCollectionBinder,
 )
+from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.scope import Scope
+from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import (
     KeyLayout,
@@ -22,8 +24,6 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.scope import Scope
-from kvtsjl.store import KvBackend
 
 
 def _safe_name(name: str) -> str:

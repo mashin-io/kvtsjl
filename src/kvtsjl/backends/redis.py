@@ -11,17 +11,17 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.bind import (
     CollectionBinding,
     KeyPrefixBinder,
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
-from kvtsjl.store.schema.kvset import KvSet
-from kvtsjl.store.schema.layout import ScanQuery, supports_prefix_scan
+from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import ScanQuery, supports_prefix_scan
 
 if TYPE_CHECKING:
     from redis import Redis

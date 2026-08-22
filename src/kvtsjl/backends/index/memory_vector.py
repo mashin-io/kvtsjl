@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Sequence
+import math
 from typing import cast, override
 
 from kvtsjl.bind import NativeStrCollectionBinder

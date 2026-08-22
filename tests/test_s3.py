@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-import pytest
 from freezegun import freeze_time
+import pytest
 
 from kvtsjl import KeyLayout, KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.s3 import S3KvStore

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+import time
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
@@ -12,10 +12,10 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
-from kvtsjl.store.schema.kvset import KvSet
-from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import ScanQuery
 
 
 @dataclass

@@ -10,8 +10,8 @@ from kvtsjl.backends.index._null_meta import NullMetaIndexBackend, null_meta_ind
 from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
 from kvtsjl.index.logical.abc import IndexHit
-from kvtsjl.serde import SerDe
 from kvtsjl.index.schema.index_set import IndexSet
+from kvtsjl.serde import SerDe
 
 
 class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):

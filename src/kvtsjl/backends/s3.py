@@ -12,20 +12,22 @@ server-side expiry.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
+import time
 from typing import TYPE_CHECKING, cast
 
 from botocore.exceptions import ClientError
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
     NativeCollectionBinder,
 )
+from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.scope import Scope
+from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import (
     KeyLayout,
@@ -33,8 +35,6 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.scope import Scope
-from kvtsjl.store import KvBackend
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client

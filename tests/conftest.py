@@ -7,8 +7,8 @@ from datetime import timedelta
 
 import boto3
 import fakeredis
-import pytest
 from moto import mock_aws
+import pytest
 
 from kvtsjl import KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.gcs import GcsKvStore

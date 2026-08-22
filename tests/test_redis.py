@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import timedelta
 
 import fakeredis
-import pytest
 from freezegun import freeze_time
+import pytest
 
 from kvtsjl import KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.redis import RedisKvStore
