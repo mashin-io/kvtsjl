@@ -450,6 +450,20 @@ ruff check --fix src tests    # auto-fix imports
 
 Integration tests use in-process fakes—no Docker required: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory bucket, `chroma` → **EphemeralClient**.
 
+### Release
+
+Package version lives in `src/kvtsjl/__init__.py` (`__version__`). Hatch reads it for builds.
+
+```bash
+python scripts/bump_version.py 0.1.1   # prints commit / tag / release steps
+git commit -am "Release 0.1.1"
+git tag 0.1.1
+git push origin main && git push origin 0.1.1
+gh release create 0.1.1 --title 0.1.1
+```
+
+Publishing the GitHub Release runs CI (tests, tag check, build) and uploads to PyPI via trusted publishing.
+
 ---
 
 ## License
