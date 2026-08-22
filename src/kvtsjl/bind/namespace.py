@@ -1,4 +1,4 @@
-"""Namespace binding: name/version → collection vs key prefix (store-owned)."""
+"""Namespace binding: wire identity → collection vs key prefix."""
 
 from __future__ import annotations
 
@@ -6,16 +6,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kvtsjl.blob_ops import BlobOps
-from kvtsjl.kvset import KvSet
-from kvtsjl.kvset_ref import KvSetRef
+from kvtsjl.wire.blob_ops import BlobOps
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
+from kvtsjl.wire.ref import WireRef
 
 
 @dataclass(frozen=True, slots=True)
 class PhysicalRef[KBLOB, COLL]:
-    """Backend-facing address of one item (or a scan prefix if key is partial)."""
+    """Physical address of one item (or a scan prefix if key is partial)."""
 
     collection: COLL | None
     key: KBLOB
@@ -23,7 +22,7 @@ class PhysicalRef[KBLOB, COLL]:
 
 @dataclass(frozen=True, slots=True)
 class CollectionBinding[KBLOB, COLL]:
-    """Resolved binding for one KvSet under a NamespaceBinder policy."""
+    """Resolved binding for one wire schema under a NamespaceBinder policy."""
 
     collection: COLL | None
     _name_version_prefix: tuple[KBLOB, ...] = ()
@@ -83,13 +82,24 @@ class CollectionBinding[KBLOB, COLL]:
         )
 
 
+def resolve_collection_binding[KBLOB, COLL](
+    wire: WireRef[KBLOB],
+    *,
+    binder: NamespaceBinder[KBLOB, COLL] | None = None,
+    binding: CollectionBinding[KBLOB, COLL] | None = None,
+) -> CollectionBinding[KBLOB, COLL]:
+    if binding is not None:
+        return binding
+    if binder is not None:
+        return binder.bind_wire(wire)
+    raise TypeError("physical backend requires binder= or binding=")
+
+
 class NamespaceBinder[KBLOB, COLL](ABC):
-    """Maps logical KvSet identity → collection vs key prefix. Owned by the store."""
+    """Maps wire identity → collection vs key prefix."""
 
     @abstractmethod
-    def bind[K, V, VBLOB](
-        self, kvset: KvSet[K, V, KBLOB, VBLOB]
-    ) -> CollectionBinding[KBLOB, COLL]: ...
+    def bind_wire(self, wire: WireRef[KBLOB]) -> CollectionBinding[KBLOB, COLL]: ...
 
 
 class NativeCollectionBinder[KBLOB, COLL](NamespaceBinder[KBLOB, COLL]):
@@ -98,22 +108,19 @@ class NativeCollectionBinder[KBLOB, COLL](NamespaceBinder[KBLOB, COLL]):
     def __init__(
         self,
         *,
-        collection_formatter: Callable[[KvSetRef[KBLOB]], COLL],
+        collection_formatter: Callable[[WireRef[KBLOB]], COLL],
     ) -> None:
         self._collection_formatter = collection_formatter
 
-    def bind[K, V, VBLOB](
-        self, kvset: KvSet[K, V, KBLOB, VBLOB]
-    ) -> CollectionBinding[KBLOB, COLL]:
-        ref = KvSetRef.from_kvset(kvset)
+    def bind_wire(self, wire: WireRef[KBLOB]) -> CollectionBinding[KBLOB, COLL]:
         return CollectionBinding(
-            collection=self._collection_formatter(ref),
+            collection=self._collection_formatter(wire),
             _name_version_prefix=(),
         )
 
 
-def default_str_collection_name[KBLOB](ref: KvSetRef[KBLOB]) -> str:
-    return f"{ref.name}:{ref.version_label()}"
+def default_str_collection_name[KBLOB](wire: WireRef[KBLOB]) -> str:
+    return f"{wire.name}:{wire.version_label()}"
 
 
 class NativeStrCollectionBinder[KBLOB](NativeCollectionBinder[KBLOB, str]):
@@ -122,7 +129,7 @@ class NativeStrCollectionBinder[KBLOB](NativeCollectionBinder[KBLOB, str]):
     def __init__(
         self,
         *,
-        collection_formatter: Callable[[KvSetRef[KBLOB]], str] | None = None,
+        collection_formatter: Callable[[WireRef[KBLOB]], str] | None = None,
     ) -> None:
         super().__init__(
             collection_formatter=collection_formatter or default_str_collection_name
@@ -132,11 +139,9 @@ class NativeStrCollectionBinder[KBLOB](NativeCollectionBinder[KBLOB, str]):
 class KeyPrefixBinder[KBLOB](NamespaceBinder[KBLOB, None]):
     """Flat keyspace: name + version are prepended into every in-key."""
 
-    def bind[K, V, VBLOB](
-        self, kvset: KvSet[K, V, KBLOB, VBLOB]
-    ) -> CollectionBinding[KBLOB, None]:
+    def bind_wire(self, wire: WireRef[KBLOB]) -> CollectionBinding[KBLOB, None]:
         prefix = (
-            kvset.str_serde.serialize(kvset.name),
-            kvset.str_serde.serialize(kvset.version_label()),
+            wire.str_serde.serialize(wire.name),
+            wire.str_serde.serialize(wire.version_label()),
         )
         return CollectionBinding(collection=None, _name_version_prefix=prefix)

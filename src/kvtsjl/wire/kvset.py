@@ -5,27 +5,28 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from kvtsjl.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
+from kvtsjl.wire.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
 from kvtsjl.exceptions import KvStoreScopeError
-from kvtsjl.key_layout import KeyLayout
+from kvtsjl.wire.layout import KeyLayout
+from kvtsjl.wire.schema import PhysicalSchema
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.ttl import TtlPolicy
+from kvtsjl.wire.ttl import TtlPolicy
 
 
 @dataclass(frozen=True, slots=True)
-class KvSet[K, V, KBLOB, VBLOB]:
-    """Logical collection schema — not a store."""
+class KvSet[K, V, KBLOB, VBLOB](PhysicalSchema[K, V, KBLOB, VBLOB]):
+    """Document collection wire schema — not a store."""
 
-    name: str
-    version: int | str
-    key_serde: SerDe[K, KBLOB]
-    value_serde: SerDe[V, VBLOB]
     str_serde: SerDe[str, KBLOB]
     blob_ops: BlobOps[KBLOB]
     ttl_policy: TtlPolicy = TtlPolicy.none()
     key_layout: KeyLayout = KeyLayout.LITERAL
     scope_schema: tuple[str, ...] | None = None
+
+    @property
+    def value_serde(self) -> SerDe[V, VBLOB]:
+        return self.data_serde
 
     @classmethod
     def create(
@@ -46,7 +47,7 @@ class KvSet[K, V, KBLOB, VBLOB]:
             name=name,
             version=version,
             key_serde=key_serde,
-            value_serde=value_serde,
+            data_serde=value_serde,
             str_serde=str_serde,
             blob_ops=blob_ops,
             ttl_policy=ttl_policy or TtlPolicy.none(),
@@ -69,7 +70,7 @@ class KvSet[K, V, KBLOB, VBLOB]:
             name=name,
             version=version,
             key_serde=key_serde,
-            value_serde=value_serde,
+            data_serde=value_serde,
             str_serde=SerDe.safe_str(),
             blob_ops=StrBlobOps(),
             ttl_policy=ttl_policy or TtlPolicy.none(),
@@ -92,19 +93,13 @@ class KvSet[K, V, KBLOB, VBLOB]:
             name=name,
             version=version,
             key_serde=key_serde,
-            value_serde=value_serde,
+            data_serde=value_serde,
             str_serde=SerDe.utf8_bytes(),
             blob_ops=BytesBlobOps(),
             ttl_policy=ttl_policy or TtlPolicy.none(),
             key_layout=key_layout,
             scope_schema=scope_schema,
         )
-
-    def version_label(self) -> str:
-        return f"v{self.version}"
-
-    def identity_tuple(self) -> tuple[str, str]:
-        return (self.name, self.version_label())
 
     def validate_scope(self, scope: Scope) -> None:
         schema = self.scope_schema
@@ -160,12 +155,9 @@ class KvSet[K, V, KBLOB, VBLOB]:
 
     def same_schema_as(self, other: KvSet[K, V, KBLOB, VBLOB]) -> bool:
         return (
-            self.name == other.name
-            and self.version == other.version
+            self.same_physical_as(other)
             and self.key_layout == other.key_layout
             and self.scope_schema == other.scope_schema
-            and self.key_serde is other.key_serde
-            and self.value_serde is other.value_serde
             and self.str_serde is other.str_serde
             and self.blob_ops is other.blob_ops
         )

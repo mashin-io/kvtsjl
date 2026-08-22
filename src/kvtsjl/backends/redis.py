@@ -12,16 +12,16 @@ from typing import TYPE_CHECKING, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.key_layout import ScanQuery, supports_prefix_scan
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import (
+from kvtsjl.bind import (
     CollectionBinding,
     KeyPrefixBinder,
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
+from kvtsjl.wire.kvset import KvSet
+from kvtsjl.wire.layout import ScanQuery, supports_prefix_scan
 from kvtsjl.scope import Scope
-from kvtsjl.store import KvStore
+from kvtsjl.store import KvBackend
 
 if TYPE_CHECKING:
     from redis import Redis
@@ -46,7 +46,7 @@ def _as_redis_value(blob: object, *, what: str) -> RedisWire:
     raise TypeError(f"{what} requires str|bytes VBLOB, got {type(blob).__name__}")
 
 
-class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V, KBLOB, VBLOB, COLL]):
+class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]):
     """Sync redis-py client store.
 
     Prefer the factories:

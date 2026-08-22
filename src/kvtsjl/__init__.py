@@ -6,12 +6,14 @@ from kvtsjl.backends import (
     FilesystemKvStore,
     MemoryKvStore,
 )
-from kvtsjl.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
-from kvtsjl.compose import (
-    FallbackReadKvStore,
-    IndexedKvStore,
-    MirrorKvStore,
-    ReadonlyKvStore,
+from kvtsjl.backends.index import MemoryKeyIndex, MemoryTermIndex
+from kvtsjl.bind import (
+    CollectionBinding,
+    KeyPrefixBinder,
+    NamespaceBinder,
+    NativeCollectionBinder,
+    NativeStrCollectionBinder,
+    PhysicalRef,
 )
 from kvtsjl.exceptions import (
     KvStoreComposeError,
@@ -23,27 +25,33 @@ from kvtsjl.exceptions import (
     KvStoreSerDeError,
 )
 from kvtsjl.index import (
+    EmptyEnvelope,
     Index,
     IndexHit,
-    MemoryKeyIndex,
-    MemoryTermIndex,
 )
-from kvtsjl.key_layout import KeyLayout, ScanQuery
 from kvtsjl.keymap import KeyMap
-from kvtsjl.kvset import KvSet
-from kvtsjl.kvset_ref import KvSetRef
-from kvtsjl.namespace import (
-    CollectionBinding,
-    KeyPrefixBinder,
-    NamespaceBinder,
-    NativeCollectionBinder,
-    NativeStrCollectionBinder,
-    PhysicalRef,
-)
+from kvtsjl.physical import IndexBackend, KvBackend, PhysicalBackend
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
 from kvtsjl.serde import SerDe
-from kvtsjl.store import KvStore
-from kvtsjl.ttl import TtlPolicy
+from kvtsjl.store import (
+    FallbackReadKvStore,
+    IndexedKvStore,
+    KvStore,
+    MirrorKvStore,
+    ReadonlyKvStore,
+)
+from kvtsjl.wire import (
+    BlobOps,
+    BytesBlobOps,
+    IndexSet,
+    KeyLayout,
+    KvSet,
+    PhysicalSchema,
+    ScanQuery,
+    StrBlobOps,
+    TtlPolicy,
+    WireRef,
+)
 
 __version__ = "0.1.0"
 
@@ -51,17 +59,20 @@ __all__ = [
     "BlobOps",
     "BytesBlobOps",
     "CollectionBinding",
+    "EmptyEnvelope",
     "FallbackReadKvStore",
     "FilesystemKvStore",
     "Index",
+    "IndexBackend",
     "IndexHit",
+    "IndexSet",
     "IndexedKvStore",
     "KeyLayout",
     "KeyMap",
     "KeyPrefix",
     "KeyPrefixBinder",
+    "KvBackend",
     "KvSet",
-    "KvSetRef",
     "KvStore",
     "KvStoreComposeError",
     "KvStoreError",
@@ -77,7 +88,9 @@ __all__ = [
     "NamespaceBinder",
     "NativeCollectionBinder",
     "NativeStrCollectionBinder",
+    "PhysicalBackend",
     "PhysicalRef",
+    "PhysicalSchema",
     "ReadonlyKvStore",
     "ScanQuery",
     "Scope",
@@ -85,5 +98,6 @@ __all__ = [
     "SerDe",
     "StrBlobOps",
     "TtlPolicy",
+    "WireRef",
     "__version__",
 ]

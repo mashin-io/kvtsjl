@@ -26,20 +26,20 @@ from typing import TYPE_CHECKING, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.key_layout import (
+from kvtsjl.bind import (
+    CollectionBinding,
+    NamespaceBinder,
+    NativeCollectionBinder,
+)
+from kvtsjl.wire.kvset import KvSet
+from kvtsjl.wire.layout import (
     KeyLayout,
     ScanQuery,
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import (
-    CollectionBinding,
-    NamespaceBinder,
-    NativeCollectionBinder,
-)
 from kvtsjl.scope import Scope
-from kvtsjl.store import KvStore
+from kvtsjl.store import KvBackend
 
 if TYPE_CHECKING:
     from google.cloud.storage import Blob, Bucket  # google-cloud-storage is not py.typed
@@ -72,7 +72,7 @@ def _normalize_prefix(prefix: str) -> str:
     return prefix
 
 
-class GcsKvStore[K, V, KBLOB: str | bytes](KvStore[K, V, KBLOB, bytes, str]):
+class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     """KvStore over a GCS bucket.
 
     - ``VBLOB`` is ``bytes`` from ``value_serde``.

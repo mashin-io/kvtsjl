@@ -10,20 +10,20 @@ from typing import cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.key_layout import (
+from kvtsjl.bind import (
+    CollectionBinding,
+    NamespaceBinder,
+    NativeCollectionBinder,
+)
+from kvtsjl.wire.kvset import KvSet
+from kvtsjl.wire.layout import (
     KeyLayout,
     ScanQuery,
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import (
-    CollectionBinding,
-    NamespaceBinder,
-    NativeCollectionBinder,
-)
 from kvtsjl.scope import Scope
-from kvtsjl.store import KvStore
+from kvtsjl.store import KvBackend
 
 
 def _safe_name(name: str) -> str:
@@ -36,7 +36,7 @@ def _safe_name(name: str) -> str:
     )
 
 
-class FilesystemKvStore[K, V, KBLOB: str | bytes](KvStore[K, V, KBLOB, bytes, str]):
+class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     """Light FS store: ``{root}/{name}/v{version}/`` + one data file per key.
 
     - ``VBLOB`` is ``bytes`` from ``value_serde`` (encoding is the caller's SerDe).

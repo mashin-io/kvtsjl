@@ -1,4 +1,4 @@
-"""In-memory KvStore backend."""
+"""In-memory KvStore leaf backend."""
 
 from __future__ import annotations
 
@@ -7,15 +7,15 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.key_layout import ScanQuery
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import (
+from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
+from kvtsjl.wire.kvset import KvSet
+from kvtsjl.wire.layout import ScanQuery
 from kvtsjl.scope import Scope
-from kvtsjl.store import KvStore
+from kvtsjl.store import KvBackend
 
 
 @dataclass
@@ -35,7 +35,7 @@ class _MemoryRoot[KBLOB, VBLOB]:
         return self.collections[key]
 
 
-class MemoryKvStore[K, V, KBLOB, VBLOB](KvStore[K, V, KBLOB, VBLOB, str]):
+class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     """In-process store with string-named native collections."""
 
     def __init__(

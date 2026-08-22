@@ -21,20 +21,20 @@ from botocore.exceptions import ClientError
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.key_layout import (
+from kvtsjl.bind import (
+    CollectionBinding,
+    NamespaceBinder,
+    NativeCollectionBinder,
+)
+from kvtsjl.wire.kvset import KvSet
+from kvtsjl.wire.layout import (
     KeyLayout,
     ScanQuery,
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import (
-    CollectionBinding,
-    NamespaceBinder,
-    NativeCollectionBinder,
-)
 from kvtsjl.scope import Scope
-from kvtsjl.store import KvStore
+from kvtsjl.store import KvBackend
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
@@ -57,7 +57,7 @@ def _normalize_prefix(prefix: str) -> str:
     return prefix
 
 
-class S3KvStore[K, V, KBLOB: str | bytes](KvStore[K, V, KBLOB, bytes, str]):
+class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     """KvStore over an S3 bucket (or MinIO / other S3-compatible endpoint).
 
     - ``VBLOB`` is ``bytes`` from ``value_serde``.

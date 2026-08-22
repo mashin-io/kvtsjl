@@ -6,10 +6,10 @@ from collections.abc import Callable
 
 from kvtsjl.store import KvStore
 
-StoreFactory = Callable[[], KvStore[str, str, str, bytes, object]]
+StoreFactory = Callable[[], KvStore[str, str]]
 
 
-def assert_basic_crud(store: KvStore[str, str, str, bytes, object]) -> None:
+def assert_basic_crud(store: KvStore[str, str]) -> None:
     assert store.get("missing") is None
     store.set("a", "one")
     assert store.get("a") == "one"
@@ -20,7 +20,7 @@ def assert_basic_crud(store: KvStore[str, str, str, bytes, object]) -> None:
     assert store.delete("a") is False
 
 
-def assert_batch_ops(store: KvStore[str, str, str, bytes, object]) -> None:
+def assert_batch_ops(store: KvStore[str, str]) -> None:
     store.batch_set({"k1": "v1", "k2": "v2", "k3": "v3"})
     assert store.batch_get(["k1", "k2", "missing"]) == {"k1": "v1", "k2": "v2"}
     assert store.batch_delete(["k1", "k3", "missing"]) == 2
@@ -28,7 +28,7 @@ def assert_batch_ops(store: KvStore[str, str, str, bytes, object]) -> None:
     assert store.get("k1") is None
 
 
-def assert_scan_and_scope(store: KvStore[str, str, str, bytes, object]) -> None:
+def assert_scan_and_scope(store: KvStore[str, str]) -> None:
     store.set("alpha", "1")
     store.set("beta", "2")
     assert sorted(store.list()) == ["alpha", "beta"]

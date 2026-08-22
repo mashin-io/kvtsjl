@@ -1,4 +1,4 @@
-"""KvStore ABC, mixins, and shared high-level ops."""
+"""Logical ``KvStore`` ABC: domain K/V, scope, scan, composition."""
 
 from __future__ import annotations
 
@@ -6,56 +6,34 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
-from kvtsjl.batching import DEFAULT_BATCH_SIZE, chunk_sequence
+from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
-from kvtsjl.key_layout import ScanQuery, supports_prefix_scan
 from kvtsjl.keymap import KeyMap
-from kvtsjl.kvset import KvSet
-from kvtsjl.namespace import CollectionBinding, NamespaceBinder
 from kvtsjl.scope import Scope
+from kvtsjl.wire.layout import KeyLayout, ScanQuery, supports_prefix_scan
 
 if TYPE_CHECKING:
-    from kvtsjl.compose import IndexedKvStore
-    from kvtsjl.index import Index
+    from kvtsjl.index.abc import Index
+    from kvtsjl.store.compose.indexed import IndexedKvStore
 
 
-class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
-    """Typed key-value store bound to a KvSet, Scope, and namespace binding.
+class KvStore[K, V](KeyMap[K, V], ABC):
+    """Logical document store: domain ``K`` / ``V``, scope views, and composition.
 
-    Implements ``KeyMap[K, V]`` for document get/set/delete (and batch forms).
-    ``COLL`` is the backend collection-handle type (e.g. ``str`` for named
-    collections, ``None`` for flat key-prefix binders).
+    Physical schema (``KvSet``, blob serdes, collection binding) lives on
+    ``KvBackend`` / ``PhysicalBackend`` only. Logical wrappers delegate I/O to a leaf.
     """
 
-    def __init__(
-        self,
-        kvset: KvSet[K, V, KBLOB, VBLOB],
-        *,
-        scope: Scope | None = None,
-        binder: NamespaceBinder[KBLOB, COLL] | None = None,
-        binding: CollectionBinding[KBLOB, COLL] | None = None,
-        batch_size: int = DEFAULT_BATCH_SIZE,
-    ) -> None:
-        self.kvset = kvset
-        self.scope = scope or Scope.empty()
-        kvset.validate_scope(self.scope)
-        self.batch_size = batch_size
-        if binding is not None:
-            self._binding = binding
-        elif binder is not None:
-            self._binding = binder.bind(kvset)
-        else:
-            raise TypeError("KvStore requires binder= or binding=")
+    scope: Scope
+    batch_size: int
 
-    @property
-    def binding(self) -> CollectionBinding[KBLOB, COLL]:
-        return self._binding
+    @abstractmethod
+    def key_layout(self) -> KeyLayout:
+        """Key physicalization policy (from the leaf ``KvSet``)."""
 
     @abstractmethod
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         """Yield decoded keys (and values if requested) under scope + prefix."""
-
-    # --- high-level ---
 
     def get_or_set(self, key: K, compute_value_fn: Callable[[], V]) -> V:
         existing = self.get(key)
@@ -109,9 +87,9 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
         include_values: bool = False,
         page_size: int = 100,
     ) -> Iterator[K] | Iterator[tuple[K, V]]:
-        if prefix is not None and not supports_prefix_scan(self.kvset.key_layout):
+        if prefix is not None and not supports_prefix_scan(self.key_layout()):
             raise KvStoreScanUnsupported(
-                f"prefix scan unsupported for layout {self.kvset.key_layout!r}"
+                f"prefix scan unsupported for layout {self.key_layout()!r}"
             )
         query = ScanQuery(
             prefix=prefix, include_values=include_values, page_size=page_size
@@ -180,8 +158,6 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
             if batch_k:
                 yield batch_k
 
-    # --- views / composition ---
-
     def scoped(
         self, scope: Scope | None = None, **kinds_to_ids: str
     ) -> Self:
@@ -205,39 +181,31 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
             f"{type(self).__name__} must implement _clone_with_scope"
         )
 
-    def readonly(self) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
-        from kvtsjl.compose import ReadonlyKvStore
+    def readonly(self) -> KvStore[K, V]:
+        from kvtsjl.store.compose.readonly import ReadonlyKvStore
 
         return ReadonlyKvStore(self)
 
     @classmethod
-    def readonly_of(
-        cls, store: KvStore[K, V, KBLOB, VBLOB, COLL]
-    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
-        from kvtsjl.compose import ReadonlyKvStore
+    def readonly_of(cls, store: KvStore[K, V]) -> KvStore[K, V]:
+        from kvtsjl.store.compose.readonly import ReadonlyKvStore
 
         return ReadonlyKvStore(store)
 
-    def fallback_read[COLL2](
+    def fallback_read(
         self,
-        secondary: KvStore[K, V, KBLOB, VBLOB, COLL2],
+        secondary: KvStore[K, V],
         *,
         promote: bool = True,
-    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
-        """Read-through secondary on miss (e.g. new version → old version).
-
-        Name/version/scope/COLL need not match — callers compose deliberately
-        (``v2.fallback_read(v1)``) for migrations and layered caches.
-        """
-        from kvtsjl.compose import FallbackReadKvStore
+    ) -> KvStore[K, V]:
+        """Read-through secondary on miss (e.g. new version → old version)."""
+        from kvtsjl.store.compose.fallback import FallbackReadKvStore
 
         return FallbackReadKvStore(self, secondary, promote=promote)
 
-    def mirror[COLL2](
-        self, secondary: KvStore[K, V, KBLOB, VBLOB, COLL2]
-    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+    def mirror(self, secondary: KvStore[K, V]) -> KvStore[K, V]:
         """Write-through to secondary; reads stay on primary."""
-        from kvtsjl.compose import MirrorKvStore
+        from kvtsjl.store.compose.mirror import MirrorKvStore
 
         return MirrorKvStore(self, secondary)
 
@@ -246,28 +214,16 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
         index: Index[Any, K, V, Any],
         /,
         *more: Index[Any, K, V, Any],
-    ) -> IndexedKvStore[K, V, KBLOB, VBLOB, COLL, None]:
-        """Attach index(es).
-
-        - One index → default for ``search(query)``.
-        - Several → ``search(index, query)`` only (or use ``indexed_as`` + ``via``).
-        """
-        from kvtsjl.compose import IndexedKvStore
+    ) -> IndexedKvStore[K, V, None]:
+        from kvtsjl.store.compose.indexed import IndexedKvStore
 
         indexes = (index, *more)
         default = index if not more else None
         return IndexedKvStore(self, indexes, default_index=default)
 
-    def indexed_as[ViaT](
-        self, bundle: ViaT
-    ) -> IndexedKvStore[K, V, KBLOB, VBLOB, COLL, ViaT]:
-        """Attach indexes from a dataclass; ``via`` is that same instance.
-
-        Every top-level ``Index`` field is registered for sync and is callable
-        for hydrated search: ``store.via.tags(query)``.
-        """
-        from kvtsjl.compose import IndexedKvStore
-        from kvtsjl.index import indexes_from_bundle
+    def indexed_as[ViaT](self, bundle: ViaT) -> IndexedKvStore[K, V, ViaT]:
+        from kvtsjl.index.bundle import indexes_from_bundle
+        from kvtsjl.store.compose.indexed import IndexedKvStore
 
         indexes = indexes_from_bundle(bundle)
         default = indexes[0] if len(indexes) == 1 else None
@@ -277,50 +233,3 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
             default_index=default,  # type: ignore[arg-type]
             bundle=bundle,
         )
-
-    # --- helpers for backends ---
-
-    def _physical_key_blob(self, key: K) -> KBLOB:
-        leaf = self.kvset.key_serde.serialize(key)
-        return self._binding.item_key(
-            self.scope,
-            leaf,
-            str_serde=self.kvset.str_serde,
-            blob_ops=self.kvset.blob_ops,
-        )
-
-    def _scan_prefix_blob(self, key_prefix: K | None) -> KBLOB:
-        leaf: KBLOB | None = None
-        if key_prefix is not None:
-            leaf = self.kvset.key_serde.serialize(key_prefix)
-        return self._binding.scope_prefix(
-            self.scope,
-            str_serde=self.kvset.str_serde,
-            blob_ops=self.kvset.blob_ops,
-            key_prefix_blob=leaf,
-        )
-
-    def _decode_key_from_physical(self, physical_key: KBLOB) -> K | None:
-        """Decode leaf K from a full in-key physical key under this scope."""
-        ops = self.kvset.blob_ops
-        binding = self._binding
-        name_version = list(binding._name_version_prefix)
-        rest = physical_key
-        if name_version:
-            nv = ops.join(name_version)
-            if not ops.startswith(rest, nv):
-                return None
-            stripped = ops.strip_prefix(rest, nv)
-            if stripped is None:
-                return None
-            if ops.len(stripped) >= ops.len(ops.separator) and ops.startswith(
-                stripped, ops.separator
-            ):
-                stripped = ops.strip_prefix(stripped, ops.separator)
-            if stripped is None:
-                return None
-            rest = stripped
-        return self.kvset.decode_leaf_from_in_key(self.scope, rest)
-
-    def ttl_seconds(self) -> int | None:
-        return self.kvset.ttl_policy.ttl_seconds()
