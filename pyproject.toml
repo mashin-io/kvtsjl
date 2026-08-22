@@ -69,6 +69,7 @@ packages = ["src/kvtsjl"]
 include = [
   "/src",
   "/tests",
+  "/docs",
   "/README.md",
   "/LICENSE",
 ]

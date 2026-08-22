@@ -1,4 +1,6 @@
-# kvtsjl
+<p align="center">
+  <img src="docs/kvtsjl-logo.jpeg" alt="kvtsjl — typed, composable indexing facade" width="480">
+</p>
 
 **kvtsjl** (*kv-tasjil*, from Arabic *tasjīl* تسجيل — “recording”) is a **typed, composable Python library for key–value storage with first-class indexing**.
 
