@@ -14,6 +14,7 @@ from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_sca
 
 if TYPE_CHECKING:
     from kvtsjl.index.logical.abc import Index
+    from kvtsjl.keymap_algebra.bundle import ZipPartsBundle
     from kvtsjl.store.compose.indexed import IndexedKvStore
 
 
@@ -203,11 +204,136 @@ class KvStore[K, V](KeyMap[K, V], ABC):
 
         return FallbackReadKvStore(self, secondary, promote=promote)
 
+    def coalesce(  # type: ignore[override]
+        self, other: KvStore[K, V], *, promote: bool = True
+    ) -> KvStore[K, V]:
+        """Left-biased merge — alias of ``fallback_read``."""
+        return self.fallback_read(other, promote=promote)
+
     def mirror(self, secondary: KvStore[K, V]) -> KvStore[K, V]:
         """Write-through to secondary; reads stay on primary."""
         from kvtsjl.store.compose.mirror import MirrorKvStore
 
         return MirrorKvStore(self, secondary)
+
+    def map[U](self, forward: Callable[[V], U]) -> KvStore[K, U]:  # type: ignore[override]
+        from kvtsjl.store.compose.algebra_map import MappedKvStore
+
+        return MappedKvStore(self, forward)
+
+    def imap[U](  # type: ignore[override]
+        self, forward: Callable[[V], U], inverse: Callable[[U], V]
+    ) -> KvStore[K, U]:
+        from kvtsjl.store.compose.algebra_map import IMappedKvStore
+
+        return IMappedKvStore(self, forward, inverse)
+
+    def imap_keys[NK](  # type: ignore[override]
+        self,
+        to_store: Callable[[NK], K],
+        from_store: Callable[[K], NK] | None = None,
+    ) -> KvStore[NK, V]:
+        from kvtsjl.store.compose.algebra_map import IMappedKeysKvStore
+
+        return IMappedKeysKvStore(self, to_store, from_store)
+
+    @overload
+    @classmethod
+    def zip[ZipK, A, B](
+        cls, a: KvStore[ZipK, A], b: KvStore[ZipK, B], /
+    ) -> KvStore[ZipK, tuple[A | None, B | None]]: ...
+
+    @overload
+    @classmethod
+    def zip[ZipK, A, B, C](
+        cls, a: KvStore[ZipK, A], b: KvStore[ZipK, B], c: KvStore[ZipK, C], /
+    ) -> KvStore[ZipK, tuple[A | None, B | None, C | None]]: ...
+
+    @overload
+    @classmethod
+    def zip[ZipK, A, B, C, D](
+        cls,
+        a: KvStore[ZipK, A],
+        b: KvStore[ZipK, B],
+        c: KvStore[ZipK, C],
+        d: KvStore[ZipK, D],
+        /
+    ) -> KvStore[ZipK, tuple[A | None, B | None, C | None, D | None]]: ...
+
+    @overload
+    @classmethod
+    def zip[ZipK, A, B, C, D, E](
+        cls,
+        a: KvStore[ZipK, A],
+        b: KvStore[ZipK, B],
+        c: KvStore[ZipK, C],
+        d: KvStore[ZipK, D],
+        e: KvStore[ZipK, E],
+        /
+    ) -> KvStore[ZipK, tuple[A | None, B | None, C | None, D | None, E | None]]: ...
+
+    @classmethod
+    def zip(cls, *parts: KvStore[Any, Any]) -> KvStore[Any, tuple[Any, ...]]:  # type: ignore[override]
+        from kvtsjl.store.compose.algebra_zip import ZippedKvStore
+
+        return ZippedKvStore(parts)
+
+    @classmethod
+    def zip_with[ZipK, W](  # type: ignore[override]
+        cls,
+        ctor: Callable[..., W],
+        **parts: KvStore[ZipK, Any],
+    ) -> KvStore[ZipK, W]:
+        from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
+
+        return ZipWithKvStore(ctor, parts)
+
+    @classmethod
+    def zip_as[ZipK, W](  # type: ignore[override]
+        cls,
+        ctor: type[W],
+        parts: ZipPartsBundle[ZipK],
+    ) -> KvStore[ZipK, W]:
+        """Assemble from a dataclass bundle of part stores — see ``KeyMap.zip_as``."""
+        from kvtsjl.keymap_algebra.bundle import stores_from_bundle
+        from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
+
+        return ZipWithKvStore(ctor, stores_from_bundle(parts))
+
+    def then[W](self, other: KvStore[V, W]) -> KvStore[K, W]:  # type: ignore[override]
+        from kvtsjl.store.compose.algebra_then import ThenKvStore
+
+        return ThenKvStore(self, other)
+
+    def then_with[J, W](  # type: ignore[override]
+        self,
+        key_of: Callable[[K, V], J],
+        other: KvStore[J, W],
+    ) -> KvStore[K, W]:
+        from kvtsjl.store.compose.algebra_then import ThenWithKvStore
+
+        return ThenWithKvStore(self, key_of, other)
+
+    def expand[SK, SV](  # type: ignore[override]
+        self,
+        expander: Callable[
+            [K, V], KeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]]
+        ],
+    ) -> KvStore[K, KeyMap[SK, SV]]:
+        from kvtsjl.store.compose.algebra_expand import ExpandKvStore
+
+        return ExpandKvStore(self, expander)
+
+    def expand_map[SK, SV, U](  # type: ignore[override]
+        self,
+        expander: Callable[
+            [K, V], KeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]]
+        ],
+        aggregate: Callable[[K, V, KeyMap[SK, SV]], U],
+    ) -> KvStore[K, U]:
+        from kvtsjl.store.compose.algebra_expand import ExpandMapKvStore
+
+        return ExpandMapKvStore(self, expander, aggregate)
 
     def indexed(
         self,

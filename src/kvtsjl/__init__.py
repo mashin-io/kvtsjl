@@ -37,6 +37,7 @@ from kvtsjl.index import (
     VectorRecord,
 )
 from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap_algebra import DictKeyMap
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
@@ -60,6 +61,7 @@ __all__ = [
     "BlobOps",
     "BytesBlobOps",
     "CollectionBinding",
+    "DictKeyMap",
     "EmptyEnvelope",
     "FallbackReadKvStore",
     "FilesystemKvStore",
