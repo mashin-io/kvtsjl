@@ -89,6 +89,15 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
             bundle=self._bundle,
         )
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr(
+            "IndexedKvStore",
+            underlying=self._underlying,
+            indexes=list(self._indexes),
+        )
+
     def _require_attached[Q, M](self, index: Index[Q, K, V, M]) -> Index[Q, K, V, M]:
         if id(index) not in self._index_ids:
             raise KvStoreIndexError("index is not attached to this store")

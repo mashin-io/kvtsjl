@@ -57,6 +57,15 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, KeyMap[SK, SV]]:
         return ExpandKvStore(self._src._clone_with_scope(scope), self._expander)
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        return compose_repr(
+            "ExpandKvStore",
+            src=self._src,
+            expander=callable_label(self._expander),
+        )
+
 
 class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
     def __init__(
@@ -105,4 +114,14 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
             self._src._clone_with_scope(scope),
             self._expander,
             self._aggregate,
+        )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        return compose_repr(
+            "ExpandMapKvStore",
+            src=self._src,
+            expander=callable_label(self._expander),
+            aggregate=callable_label(self._aggregate),
         )

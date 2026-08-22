@@ -57,6 +57,11 @@ class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):
         self._keys.discard(key)
         return True
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import index_backend_repr
+
+        return index_backend_repr(self)
+
 
 class MemoryTermIndex[K, V](NullMetaIndexBackend[str, K, V]):
     """Exact term → keys multimaps (in-memory)."""
@@ -126,3 +131,8 @@ class MemoryTermIndex[K, V](NullMetaIndexBackend[str, K, V]):
                 if not bucket:
                     del self._term_to_keys[term]
         return True
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, index_backend_repr
+
+        return index_backend_repr(self, terms_of=callable_label(self.terms_of))

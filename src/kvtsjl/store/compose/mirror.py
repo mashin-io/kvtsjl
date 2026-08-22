@@ -69,3 +69,12 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
             self._primary._clone_with_scope(scope),
             self._secondary._clone_with_scope(scope),
         )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr(
+            "MirrorKvStore",
+            primary=self._primary,
+            secondary=self._secondary,
+        )

@@ -38,3 +38,8 @@ class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
 
     def readonly(self) -> KvStore[K, V]:
         return self
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr("ReadonlyKvStore", underlying=self._underlying)

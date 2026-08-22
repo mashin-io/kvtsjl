@@ -73,3 +73,8 @@ class IndexBackend[Q, K, V, D, M, ID, META, COLL, E](
     def _physical_id_blob(self, key: K) -> ID:
         leaf = self.index_set.id_serde.serialize(key)
         return self._item_key_blob(leaf)
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import index_backend_repr
+
+        return index_backend_repr(self)

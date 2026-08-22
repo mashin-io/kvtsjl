@@ -75,3 +75,13 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
             self._secondary._clone_with_scope(scope),
             promote=self._promote,
         )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr(
+            "FallbackReadKvStore",
+            primary=self._primary,
+            secondary=self._secondary,
+            promote=self._promote,
+        )

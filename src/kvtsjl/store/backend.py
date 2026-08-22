@@ -91,3 +91,8 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
 
     def ttl_seconds(self) -> int | None:
         return self.kvset.ttl_policy.ttl_seconds()
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import backend_repr
+
+        return backend_repr(self)

@@ -58,6 +58,11 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, tuple[Any, ...]]:
         return ZippedKvStore([p._clone_with_scope(scope) for p in self._parts])
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr("ZippedKvStore", parts=list(self._parts))
+
 
 class ZipWithKvStore[K, V](KvStore[K, V]):
     def __init__(
@@ -99,3 +104,10 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
             self._ctor,
             {name: store._clone_with_scope(scope) for name, store in self._parts.items()},
         )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, stores_mapping_repr
+
+        ctor = callable_label(self._ctor)
+        parts = stores_mapping_repr(self._parts)
+        return f"ZipWithKvStore({ctor}, {parts})"

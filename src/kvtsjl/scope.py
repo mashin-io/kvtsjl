@@ -66,6 +66,11 @@ class Scope:
             return ""
         return "/".join(f"{s.kind}/{s.id}" for s in self.segments)
 
+    def __repr__(self) -> str:
+        if not self.segments:
+            return "Scope.empty()"
+        return f"Scope({self.path_display()!r})"
+
 
 # Alias for callers who think in prefixes rather than "scope".
 KeyPrefix = Scope

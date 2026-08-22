@@ -51,6 +51,15 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
         return MappedKvStore(self._src._clone_with_scope(scope), self._forward)
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        return compose_repr(
+            "MappedKvStore",
+            src=self._src,
+            forward=callable_label(self._forward),
+        )
+
 
 class IMappedKvStore[K, V, U](KvStore[K, U]):
     """Invertible value ``imap`` over a ``KvStore``."""
@@ -96,6 +105,16 @@ class IMappedKvStore[K, V, U](KvStore[K, U]):
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
         return IMappedKvStore(
             self._src._clone_with_scope(scope), self._forward, self._inverse
+        )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        return compose_repr(
+            "IMappedKvStore",
+            src=self._src,
+            forward=callable_label(self._forward),
+            inverse=callable_label(self._inverse),
         )
 
 
@@ -145,3 +164,14 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
         return IMappedKeysKvStore(
             self._src._clone_with_scope(scope), self._to_store, self._from_store
         )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        fields: dict[str, object] = {
+            "src": self._src,
+            "to_store": callable_label(self._to_store),
+        }
+        if self._from_store is not None:
+            fields["from_store"] = callable_label(self._from_store)
+        return compose_repr("IMappedKeysKvStore", **fields)

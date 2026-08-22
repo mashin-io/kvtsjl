@@ -20,3 +20,8 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
 
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr(type(self).__name__, underlying=self._underlying)

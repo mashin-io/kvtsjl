@@ -51,6 +51,11 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
             self._right._clone_with_scope(scope),
         )
 
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import compose_repr
+
+        return compose_repr("ThenKvStore", left=self._left, right=self._right)
+
 
 class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
     def __init__(
@@ -97,4 +102,14 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
             self._left._clone_with_scope(scope),
             self._key_of,
             self._right._clone_with_scope(scope),
+        )
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import callable_label, compose_repr
+
+        return compose_repr(
+            "ThenWithKvStore",
+            left=self._left,
+            key_of=callable_label(self._key_of),
+            right=self._right,
         )
