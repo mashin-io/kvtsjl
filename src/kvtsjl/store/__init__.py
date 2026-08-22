@@ -1,8 +1,8 @@
-"""Document stores: logical surface, physical backend, and wrappers."""
+"""Document stores: logical API, wire schema, leaf backend, and wrappers."""
 
 from __future__ import annotations
 
-from kvtsjl.physical.document import KvBackend
+from kvtsjl.store.backend import KvBackend
 from kvtsjl.store.compose import (
     FallbackReadKvStore,
     IndexedKvStore,
@@ -10,12 +10,17 @@ from kvtsjl.store.compose import (
     ReadonlyKvStore,
 )
 from kvtsjl.store.logical import KvStore
+from kvtsjl.store.schema import KeyLayout, KvSet, ScanQuery, TtlPolicy
 
 __all__ = [
     "FallbackReadKvStore",
     "IndexedKvStore",
+    "KeyLayout",
     "KvBackend",
+    "KvSet",
     "KvStore",
     "MirrorKvStore",
     "ReadonlyKvStore",
+    "ScanQuery",
+    "TtlPolicy",
 ]

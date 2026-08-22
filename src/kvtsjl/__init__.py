@@ -27,34 +27,31 @@ from kvtsjl.exceptions import (
 from kvtsjl.index import (
     EmptyEnvelope,
     Index,
+    IndexBackend,
     IndexHit,
+    IndexSet,
     VectorEnvelope,
     VectorIndex,
+    VectorIndexBackend,
     VectorQuery,
     VectorRecord,
 )
 from kvtsjl.keymap import KeyMap
-from kvtsjl.physical import IndexBackend, KvBackend, PhysicalBackend, VectorIndexBackend
+from kvtsjl.leaf import PhysicalBackend
+from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
 from kvtsjl.serde import SerDe
 from kvtsjl.store import (
     FallbackReadKvStore,
     IndexedKvStore,
+    KeyLayout,
+    KvBackend,
+    KvSet,
     KvStore,
     MirrorKvStore,
     ReadonlyKvStore,
-)
-from kvtsjl.wire import (
-    BlobOps,
-    BytesBlobOps,
-    IndexSet,
-    KeyLayout,
-    KvSet,
-    PhysicalSchema,
     ScanQuery,
-    StrBlobOps,
     TtlPolicy,
-    WireRef,
 )
 
 __version__ = "0.1.0"

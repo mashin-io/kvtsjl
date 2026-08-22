@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from kvtsjl.wire.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
 from kvtsjl.exceptions import KvStoreScopeError
-from kvtsjl.wire.layout import KeyLayout
-from kvtsjl.wire.schema import PhysicalSchema
+from kvtsjl.schema.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
+from kvtsjl.schema.physical import PhysicalSchema
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.ttl import TtlPolicy
+from kvtsjl.store.schema.layout import KeyLayout
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 @dataclass(frozen=True, slots=True)

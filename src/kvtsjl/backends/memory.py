@@ -12,8 +12,8 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
-from kvtsjl.wire.kvset import KvSet
-from kvtsjl.wire.layout import ScanQuery
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 

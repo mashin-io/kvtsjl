@@ -5,13 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from kvtsjl.bind.namespace import CollectionBinding, NamespaceBinder, resolve_collection_binding
-from kvtsjl.index.abc import Index
-from kvtsjl.physical.base import PhysicalBackend
+from kvtsjl.index.logical.abc import Index
+from kvtsjl.leaf.base import PhysicalBackend
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.blob_ops import BlobOps
-from kvtsjl.wire.index_set import IndexSet
-from kvtsjl.wire.ref import WireRef
+from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.index.schema.index_set import IndexSet
+from kvtsjl.schema.ref import WireRef
 
 
 class IndexBackend[Q, K, V, D, M, ID, META, COLL, E](

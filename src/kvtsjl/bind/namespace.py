@@ -6,10 +6,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kvtsjl.wire.blob_ops import BlobOps
+from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.schema.ref import WireRef
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.ref import WireRef
 
 
 @dataclass(frozen=True, slots=True)

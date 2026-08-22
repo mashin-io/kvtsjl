@@ -8,7 +8,7 @@ from kvtsjl.exceptions import KvStoreReadOnlyError
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
-from kvtsjl.wire.layout import ScanQuery
+from kvtsjl.store.schema.layout import ScanQuery
 
 
 class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):

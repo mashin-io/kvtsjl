@@ -7,10 +7,10 @@ from collections.abc import Callable, Sequence
 
 from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
-from kvtsjl.index.abc import IndexHit
-from kvtsjl.index.vector import VectorQuery, VectorRecord
-from kvtsjl.physical.vector import VectorIndexBackend
-from kvtsjl.wire.index_set import IndexSet
+from kvtsjl.index.logical.abc import IndexHit
+from kvtsjl.index.logical.vector import VectorQuery, VectorRecord
+from kvtsjl.index.vector_backend import VectorIndexBackend
+from kvtsjl.index.schema.index_set import IndexSet
 
 
 def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:

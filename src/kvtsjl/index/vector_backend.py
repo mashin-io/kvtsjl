@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from abc import ABC
 
-from kvtsjl.index.envelope import VectorEnvelope
-from kvtsjl.index.vector import VectorIndex, VectorRecord
-from kvtsjl.physical.index import IndexBackend
+from kvtsjl.index.logical.envelope import VectorEnvelope
+from kvtsjl.index.logical.vector import VectorIndex, VectorRecord
+from kvtsjl.index.backend import IndexBackend
 
 
 class VectorIndexBackend[Q, K, V, D, ID, META, COLL](

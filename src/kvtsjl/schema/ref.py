@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.index_set import IndexSet
-from kvtsjl.wire.kvset import KvSet
+
+if TYPE_CHECKING:
+    from kvtsjl.index.schema.index_set import IndexSet
+    from kvtsjl.store.schema.kvset import KvSet
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from kvtsjl.index.envelope import EmptyEnvelope
-from kvtsjl.physical.index import IndexBackend
+from kvtsjl.index.logical.envelope import EmptyEnvelope
+from kvtsjl.index.backend import IndexBackend
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.index_set import IndexSet
+from kvtsjl.index.schema.index_set import IndexSet
 
 _NONE_META_SERDE = SerDe[None, str](
     serializer=lambda _: "",

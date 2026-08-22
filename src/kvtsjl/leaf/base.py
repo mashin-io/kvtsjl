@@ -6,10 +6,10 @@ from abc import ABC, abstractmethod
 
 from kvtsjl.bind.namespace import CollectionBinding
 from kvtsjl.keymap import KeyMap
+from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.schema.physical import PhysicalSchema
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.blob_ops import BlobOps
-from kvtsjl.wire.schema import PhysicalSchema
 
 
 class PhysicalBackend[K, T, KBLOB, TBLOB, COLL](KeyMap[K, T], ABC):

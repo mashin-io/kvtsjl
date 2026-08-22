@@ -7,11 +7,11 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Literal, overload
 
 from kvtsjl.exceptions import KvStoreIndexError
-from kvtsjl.index.abc import Index, IndexHit
+from kvtsjl.index.logical.abc import Index, IndexHit
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
-from kvtsjl.wire.layout import ScanQuery
+from kvtsjl.store.schema.layout import ScanQuery
 
 logger = logging.getLogger(__name__)
 

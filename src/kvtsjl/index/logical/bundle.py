@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from typing import Any
 
-from kvtsjl.index.abc import Index
+from kvtsjl.index.logical.abc import Index
 
 
 def indexes_from_bundle(bundle: object) -> tuple[Index[Any, Any, Any, Any], ...]:

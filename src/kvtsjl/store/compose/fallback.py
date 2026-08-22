@@ -8,7 +8,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
-from kvtsjl.wire.layout import ScanQuery
+from kvtsjl.store.schema.layout import ScanQuery
 
 logger = logging.getLogger(__name__)
 

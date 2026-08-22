@@ -15,8 +15,8 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeCollectionBinder,
 )
-from kvtsjl.wire.kvset import KvSet
-from kvtsjl.wire.layout import (
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import (
     KeyLayout,
     ScanQuery,
     layout_decode_for_fs,

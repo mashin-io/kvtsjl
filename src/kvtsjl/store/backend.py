@@ -6,14 +6,14 @@ from abc import ABC
 
 from kvtsjl.batching import DEFAULT_BATCH_SIZE
 from kvtsjl.bind.namespace import CollectionBinding, NamespaceBinder, resolve_collection_binding
-from kvtsjl.physical.base import PhysicalBackend
+from kvtsjl.leaf.base import PhysicalBackend
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
 from kvtsjl.store.logical import KvStore
-from kvtsjl.wire.blob_ops import BlobOps
-from kvtsjl.wire.kvset import KvSet
-from kvtsjl.wire.layout import KeyLayout
-from kvtsjl.wire.ref import WireRef
+from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import KeyLayout
+from kvtsjl.schema.ref import WireRef
 
 
 class KvBackend[K, V, KBLOB, VBLOB, COLL](

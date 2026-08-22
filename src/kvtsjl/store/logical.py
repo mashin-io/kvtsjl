@@ -10,10 +10,10 @@ from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
-from kvtsjl.wire.layout import KeyLayout, ScanQuery, supports_prefix_scan
+from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
 
 if TYPE_CHECKING:
-    from kvtsjl.index.abc import Index
+    from kvtsjl.index.logical.abc import Index
     from kvtsjl.store.compose.indexed import IndexedKvStore
 
 
@@ -222,7 +222,7 @@ class KvStore[K, V](KeyMap[K, V], ABC):
         return IndexedKvStore(self, indexes, default_index=default)
 
     def indexed_as[ViaT](self, bundle: ViaT) -> IndexedKvStore[K, V, ViaT]:
-        from kvtsjl.index.bundle import indexes_from_bundle
+        from kvtsjl.index.logical.bundle import indexes_from_bundle
         from kvtsjl.store.compose.indexed import IndexedKvStore
 
         indexes = indexes_from_bundle(bundle)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
-from kvtsjl.wire.layout import KeyLayout
+from kvtsjl.store.schema.layout import KeyLayout
 
 
 class DelegatingKvStore[K, V](KvStore[K, V]):

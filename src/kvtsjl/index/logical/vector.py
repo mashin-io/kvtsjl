@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from kvtsjl.index.abc import Index
+from kvtsjl.index.logical.abc import Index
 
 type FlatMeta = dict[str, str | int | float | bool]
 

@@ -9,9 +9,9 @@ from typing import cast
 from kvtsjl.backends.index._null_meta import NullMetaIndexBackend, null_meta_index_set
 from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
-from kvtsjl.index.abc import IndexHit
+from kvtsjl.index.logical.abc import IndexHit
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.index_set import IndexSet
+from kvtsjl.index.schema.index_set import IndexSet
 
 
 class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):

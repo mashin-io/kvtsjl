@@ -6,8 +6,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from kvtsjl.serde import SerDe
-from kvtsjl.wire.blob_ops import BlobOps, StrBlobOps
-from kvtsjl.wire.schema import PhysicalSchema
+from kvtsjl.schema.blob_ops import BlobOps, StrBlobOps
+from kvtsjl.schema.physical import PhysicalSchema
 
 
 @dataclass(frozen=True, slots=True)
