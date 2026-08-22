@@ -41,7 +41,7 @@ from kvtsjl.keymap_algebra import DictKeyMap
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
-from kvtsjl.serde import SerDe
+from kvtsjl.serde import CompressionCodec, SerDe
 from kvtsjl.store import (
     FallbackReadKvStore,
     IndexedKvStore,
@@ -61,6 +61,7 @@ __all__ = [
     "BlobOps",
     "BytesBlobOps",
     "CollectionBinding",
+    "CompressionCodec",
     "DictKeyMap",
     "EmptyEnvelope",
     "FallbackReadKvStore",

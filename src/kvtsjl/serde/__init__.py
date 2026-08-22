@@ -8,12 +8,14 @@ import json
 import pickle
 
 from kvtsjl.exceptions import KvStoreSerDeError
+from kvtsjl.serde.compress import CompressionCodec, compressed as _compressed
 
 # JSON-encodable surface for json_* factories (deliberately broad, not object/Any).
 type JsonScalar = None | bool | int | float | str
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
 __all__ = [
+    "CompressionCodec",
     "JsonScalar",
     "JsonValue",
     "SerDe",
@@ -94,3 +96,8 @@ class SerDe[T, BLOB]:
             deserializer=pickle.loads,
             blob_type=bytes,
         )
+
+    @staticmethod
+    def compressed[UV](codec: CompressionCodec, inner: SerDe[UV, bytes]) -> SerDe[UV, bytes]:
+        """Compress wire bytes from ``inner`` using a fixed ``codec``."""
+        return _compressed(codec, inner)

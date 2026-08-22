@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import cast
 
 from kvtsjl.exceptions import KvStoreScopeError
 from kvtsjl.schema.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
 from kvtsjl.schema.physical import PhysicalSchema
 from kvtsjl.scope import Scope
-from kvtsjl.serde import SerDe
+from kvtsjl.serde import CompressionCodec, SerDe
 from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -27,6 +28,21 @@ class KvSet[K, V, KBLOB, VBLOB](PhysicalSchema[K, V, KBLOB, VBLOB]):
     @property
     def value_serde(self) -> SerDe[V, VBLOB]:
         return self.data_serde
+
+    def with_compressed_value(
+        self, codec: CompressionCodec
+    ) -> KvSet[K, V, KBLOB, bytes]:
+        """Return a copy whose value serde compresses inner wire bytes with ``codec``."""
+        inner = self.value_serde
+        if inner.blob_type is not bytes:
+            raise ValueError(
+                f"with_compressed_value requires bytes value serde, got {inner.blob_type!r}"
+            )
+        byte_inner = cast(SerDe[V, bytes], inner)
+        return cast(
+            KvSet[K, V, KBLOB, bytes],
+            replace(self, data_serde=SerDe.compressed(codec, byte_inner)),
+        )
 
     @classmethod
     def create(

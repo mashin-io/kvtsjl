@@ -121,6 +121,22 @@ for key in store.scan(prefix="a"):
     print(key)  # alice
 ```
 
+Compress wire values at the leaf (`gzip` / `zlib` in core; `zstd` / `lz4` via optional extras):
+
+```python
+kvset = (
+    KvSet.with_str_keys(
+        "docs",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.compressed("gzip", SerDe.json_bytes()),
+    )
+    # or: ... SerDe.utf8_bytes()).with_compressed_value("gzip")
+)
+store = MemoryKvStore(kvset)
+```
+
+Apply compression on the **leaf** `KvSet` before `.mirror()`, `.coalesce()`, or `.indexed()`.
+
 ---
 
 ## Indexed search
@@ -420,6 +436,8 @@ pip install 'kvtsjl[redis]'      # RedisKvStore
 pip install 'kvtsjl[s3]'         # S3KvStore (AWS S3 / MinIO)
 pip install 'kvtsjl[gcs]'        # GcsKvStore
 pip install 'kvtsjl[chroma]'     # ChromaVectorIndex
+pip install 'kvtsjl[zstd]'       # SerDe.compressed("zstd", …)
+pip install 'kvtsjl[lz4]'        # SerDe.compressed("lz4", …)
 pip install 'kvtsjl[all]'        # every optional integration
 pip install 'kvtsjl[dev]'        # tests, ruff, pyright + all extras
 ```
@@ -431,6 +449,8 @@ pip install 'kvtsjl[dev]'        # tests, ruff, pyright + all extras
 | `s3` | `from kvtsjl.backends.s3 import S3KvStore` |
 | `gcs` | `from kvtsjl.backends.gcs import GcsKvStore` |
 | `chroma` | `from kvtsjl.backends.index.chroma import ChromaVectorIndex, ChromaQuery` |
+| `zstd` | `SerDe.compressed("zstd", inner_bytes_serde)` |
+| `lz4` | `SerDe.compressed("lz4", inner_bytes_serde)` |
 
 ---
 

@@ -44,8 +44,10 @@ redis = ["redis>=5"]
 s3 = ["boto3>=1.34"]
 gcs = ["google-cloud-storage>=2.14"]
 chroma = ["chromadb>=0.5"]
+zstd = ["zstandard>=0.22"]
+lz4 = ["lz4>=4.3"]
 all = [
-  "kvtsjl[pydantic,redis,s3,gcs,chroma]",
+  "kvtsjl[pydantic,redis,s3,gcs,chroma,zstd,lz4]",
 ]
 dev = [
   "pytest>=8",
