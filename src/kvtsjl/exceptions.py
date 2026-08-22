@@ -25,3 +25,7 @@ class KvStoreScopeError(KvStoreError):
 
 class KvStoreComposeError(KvStoreError):
     """Composition requires matching KvSet / Scope identity."""
+
+
+class KvStoreIndexError(KvStoreError):
+    """Unknown or incompatible index for search."""

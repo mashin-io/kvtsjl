@@ -9,18 +9,27 @@ from kvtsjl.backends import (
 from kvtsjl.blob_ops import BlobOps, BytesBlobOps, StrBlobOps
 from kvtsjl.compose import (
     FallbackReadKvStore,
+    IndexedKvStore,
     MirrorKvStore,
     ReadonlyKvStore,
 )
 from kvtsjl.exceptions import (
     KvStoreComposeError,
     KvStoreError,
+    KvStoreIndexError,
     KvStoreReadOnlyError,
     KvStoreScanUnsupported,
     KvStoreScopeError,
     KvStoreSerDeError,
 )
+from kvtsjl.index import (
+    Index,
+    IndexHit,
+    MemoryKeyIndex,
+    MemoryTermIndex,
+)
 from kvtsjl.key_layout import KeyLayout, ScanQuery
+from kvtsjl.keymap import KeyMap
 from kvtsjl.kvset import KvSet
 from kvtsjl.kvset_ref import KvSetRef
 from kvtsjl.namespace import (
@@ -44,7 +53,11 @@ __all__ = [
     "CollectionBinding",
     "FallbackReadKvStore",
     "FilesystemKvStore",
+    "Index",
+    "IndexHit",
+    "IndexedKvStore",
     "KeyLayout",
+    "KeyMap",
     "KeyPrefix",
     "KeyPrefixBinder",
     "KvSet",
@@ -52,11 +65,14 @@ __all__ = [
     "KvStore",
     "KvStoreComposeError",
     "KvStoreError",
+    "KvStoreIndexError",
     "KvStoreReadOnlyError",
     "KvStoreScanUnsupported",
     "KvStoreScopeError",
     "KvStoreSerDeError",
+    "MemoryKeyIndex",
     "MemoryKvStore",
+    "MemoryTermIndex",
     "MirrorKvStore",
     "NamespaceBinder",
     "NativeCollectionBinder",

@@ -4,19 +4,25 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 from kvtsjl.batching import DEFAULT_BATCH_SIZE, chunk_sequence
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.key_layout import ScanQuery, supports_prefix_scan
+from kvtsjl.keymap import KeyMap
 from kvtsjl.kvset import KvSet
 from kvtsjl.namespace import CollectionBinding, NamespaceBinder
 from kvtsjl.scope import Scope
 
+if TYPE_CHECKING:
+    from kvtsjl.compose import IndexedKvStore
+    from kvtsjl.index import Index
 
-class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
+
+class KvStore[K, V, KBLOB, VBLOB, COLL](KeyMap[K, V], ABC):
     """Typed key-value store bound to a KvSet, Scope, and namespace binding.
 
+    Implements ``KeyMap[K, V]`` for document get/set/delete (and batch forms).
     ``COLL`` is the backend collection-handle type (e.g. ``str`` for named
     collections, ``None`` for flat key-prefix binders).
     """
@@ -44,26 +50,6 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
     @property
     def binding(self) -> CollectionBinding[KBLOB, COLL]:
         return self._binding
-
-    # --- abstract core ---
-
-    @abstractmethod
-    def get(self, key: K) -> V | None: ...
-
-    @abstractmethod
-    def set(self, key: K, value: V) -> None: ...
-
-    @abstractmethod
-    def delete(self, key: K) -> bool: ...
-
-    @abstractmethod
-    def batch_get(self, keys: Sequence[K]) -> dict[K, V]: ...
-
-    @abstractmethod
-    def batch_set(self, items: Mapping[K, V]) -> None: ...
-
-    @abstractmethod
-    def batch_delete(self, keys: Sequence[K]) -> int: ...
 
     @abstractmethod
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
@@ -198,7 +184,7 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
 
     def scoped(
         self, scope: Scope | None = None, **kinds_to_ids: str
-    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+    ) -> Self:
         """Narrow to a longer logical key prefix (appends scope segments)."""
         if scope is not None and kinds_to_ids:
             raise KvStoreScopeError("pass scope= or kwargs, not both")
@@ -210,11 +196,11 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
 
     def prefixed(
         self, scope: Scope | None = None, **kinds_to_ids: str
-    ) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+    ) -> Self:
         """Alias of ``scoped`` — scope is a logical key prefix."""
         return self.scoped(scope, **kinds_to_ids)
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V, KBLOB, VBLOB, COLL]:
+    def _clone_with_scope(self, scope: Scope) -> Self:
         raise NotImplementedError(
             f"{type(self).__name__} must implement _clone_with_scope"
         )
@@ -254,6 +240,43 @@ class KvStore[K, V, KBLOB, VBLOB, COLL](ABC):
         from kvtsjl.compose import MirrorKvStore
 
         return MirrorKvStore(self, secondary)
+
+    def indexed(
+        self,
+        index: Index[Any, K, V, Any],
+        /,
+        *more: Index[Any, K, V, Any],
+    ) -> IndexedKvStore[K, V, KBLOB, VBLOB, COLL, None]:
+        """Attach index(es).
+
+        - One index → default for ``search(query)``.
+        - Several → ``search(index, query)`` only (or use ``indexed_as`` + ``via``).
+        """
+        from kvtsjl.compose import IndexedKvStore
+
+        indexes = (index, *more)
+        default = index if not more else None
+        return IndexedKvStore(self, indexes, default_index=default)
+
+    def indexed_as[ViaT](
+        self, bundle: ViaT
+    ) -> IndexedKvStore[K, V, KBLOB, VBLOB, COLL, ViaT]:
+        """Attach indexes from a dataclass; ``via`` is that same instance.
+
+        Every top-level ``Index`` field is registered for sync and is callable
+        for hydrated search: ``store.via.tags(query)``.
+        """
+        from kvtsjl.compose import IndexedKvStore
+        from kvtsjl.index import indexes_from_bundle
+
+        indexes = indexes_from_bundle(bundle)
+        default = indexes[0] if len(indexes) == 1 else None
+        return IndexedKvStore(
+            self,
+            indexes,  # type: ignore[arg-type]
+            default_index=default,  # type: ignore[arg-type]
+            bundle=bundle,
+        )
 
     # --- helpers for backends ---
 
