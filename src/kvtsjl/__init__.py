@@ -6,7 +6,7 @@ from kvtsjl.backends import (
     FilesystemKvStore,
     MemoryKvStore,
 )
-from kvtsjl.backends.index import MemoryKeyIndex, MemoryTermIndex
+from kvtsjl.backends.index import MemoryKeyIndex, MemoryTermIndex, MemoryVectorIndex
 from kvtsjl.bind import (
     CollectionBinding,
     KeyPrefixBinder,
@@ -28,9 +28,13 @@ from kvtsjl.index import (
     EmptyEnvelope,
     Index,
     IndexHit,
+    VectorEnvelope,
+    VectorIndex,
+    VectorQuery,
+    VectorRecord,
 )
 from kvtsjl.keymap import KeyMap
-from kvtsjl.physical import IndexBackend, KvBackend, PhysicalBackend
+from kvtsjl.physical import IndexBackend, KvBackend, PhysicalBackend, VectorIndexBackend
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
 from kvtsjl.serde import SerDe
 from kvtsjl.store import (
@@ -84,6 +88,7 @@ __all__ = [
     "MemoryKeyIndex",
     "MemoryKvStore",
     "MemoryTermIndex",
+    "MemoryVectorIndex",
     "MirrorKvStore",
     "NamespaceBinder",
     "NativeCollectionBinder",
@@ -98,6 +103,11 @@ __all__ = [
     "SerDe",
     "StrBlobOps",
     "TtlPolicy",
+    "VectorEnvelope",
+    "VectorIndex",
+    "VectorIndexBackend",
+    "VectorQuery",
+    "VectorRecord",
     "WireRef",
     "__version__",
 ]

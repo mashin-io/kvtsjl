@@ -7,6 +7,7 @@ from typing import TypedDict
 
 from kvtsjl import (
     IndexBackend,
+    IndexHit,
     IndexSet,
     KvBackend,
     KvSet,
@@ -48,6 +49,13 @@ def test_index_set_aliases_serde() -> None:
     assert idx.id_serde is idx.key_serde
     assert idx.meta_serde is idx.data_serde
     assert idx.same_schema_as(idx)
+
+
+def test_memory_key_index_is_index_backend() -> None:
+    keys = MemoryKeyIndex[str, str]()
+    assert isinstance(keys, IndexBackend)
+    assert isinstance(keys, PhysicalBackend)
+    assert keys.physical is keys.index_set
 
 
 def test_memory_kvstore_is_kv_backend() -> None:
@@ -112,6 +120,17 @@ class _StubIndexBackend(
             _STUB_INDEX_SET,
             binder=NativeStrCollectionBinder(),
         )
+
+    def search(self, query: str, *, limit: int = 100) -> list[IndexHit[str, _VectorRecord[_Meta]]]:
+        return []
+
+    def meta_of(
+        self, key: str, value: str, *, previous: _VectorRecord[_Meta] | None
+    ) -> _VectorRecord[_Meta]:
+        return _VectorRecord(data={"tag": value})
+
+    def upsert(self, key: str, value: str, meta: _VectorRecord[_Meta]) -> None:
+        return None
 
     def wrap_data(self, data: _Meta, extras: _VectorEnvelope) -> _VectorRecord[_Meta]:
         return _VectorRecord(

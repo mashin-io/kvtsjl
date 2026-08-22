@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from kvtsjl.serde import SerDe
 from kvtsjl.wire.blob_ops import BlobOps, StrBlobOps
 from kvtsjl.wire.schema import PhysicalSchema
-from kvtsjl.serde import SerDe
 
 
 @dataclass(frozen=True, slots=True)

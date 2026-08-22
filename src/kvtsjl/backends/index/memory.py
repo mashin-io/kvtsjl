@@ -4,18 +4,32 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from typing import cast
 
+from kvtsjl.backends.index._null_meta import NullMetaIndexBackend, null_meta_index_set
+from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
-from kvtsjl.index.abc import Index, IndexHit
+from kvtsjl.index.abc import IndexHit
+from kvtsjl.serde import SerDe
+from kvtsjl.wire.index_set import IndexSet
 
 
-@dataclass
-class MemoryKeyIndex[K, V](Index[K, K, V, None]):
+class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):
     """Exact membership index: query type is the document key ``K``."""
 
-    sync_on_write: bool = True
-    _keys: set[K] = field(default_factory=set)
+    def __init__(
+        self,
+        *,
+        index_set: IndexSet[K, None, str, str] | None = None,
+        sync_on_write: bool = True,
+    ) -> None:
+        wire = index_set or cast(
+            IndexSet[K, None, str, str],
+            null_meta_index_set("mem-keys", id_serde=SerDe.identity(str)),
+        )
+        super().__init__(wire, binder=NativeStrCollectionBinder())
+        self.sync_on_write = sync_on_write
+        self._keys: set[K] = set()
 
     def search(self, query: K, *, limit: int = 100) -> Sequence[IndexHit[K, None]]:
         if limit <= 0:
@@ -44,14 +58,25 @@ class MemoryKeyIndex[K, V](Index[K, K, V, None]):
         return True
 
 
-@dataclass
-class MemoryTermIndex[K, V](Index[str, K, V, None]):
+class MemoryTermIndex[K, V](NullMetaIndexBackend[str, K, V]):
     """Exact term → keys multimaps (in-memory)."""
 
-    terms_of: Callable[[K, V], Sequence[str]]
-    sync_on_write: bool = True
-    _term_to_keys: dict[str, set[K]] = field(default_factory=lambda: defaultdict(set))
-    _key_to_terms: dict[K, set[str]] = field(default_factory=dict)
+    def __init__(
+        self,
+        terms_of: Callable[[K, V], Sequence[str]],
+        *,
+        index_set: IndexSet[K, None, str, str] | None = None,
+        sync_on_write: bool = True,
+    ) -> None:
+        wire = index_set or cast(
+            IndexSet[K, None, str, str],
+            null_meta_index_set("mem-terms", id_serde=SerDe.identity(str)),
+        )
+        super().__init__(wire, binder=NativeStrCollectionBinder())
+        self.terms_of = terms_of
+        self.sync_on_write = sync_on_write
+        self._term_to_keys: dict[str, set[K]] = defaultdict(set)
+        self._key_to_terms: dict[K, set[str]] = {}
 
     def search(self, query: str, *, limit: int = 100) -> Sequence[IndexHit[K, None]]:
         if limit <= 0:

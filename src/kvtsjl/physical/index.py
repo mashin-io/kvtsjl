@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from kvtsjl.bind.namespace import CollectionBinding, NamespaceBinder, resolve_collection_binding
+from kvtsjl.index.abc import Index
 from kvtsjl.physical.base import PhysicalBackend
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
@@ -14,14 +15,19 @@ from kvtsjl.wire.ref import WireRef
 
 
 class IndexBackend[Q, K, V, D, M, ID, META, COLL, E](
+    Index[Q, K, V, M],
     PhysicalBackend[K, M, ID, META, COLL],
     ABC,
 ):
-    """Leaf index backend: ``IndexSet`` physicalizes ``D``; ``KeyMap`` surface is ``M``.
+    """Leaf index backend: ``Index`` search/sync plus ``IndexSet`` wire and medium I/O.
+
+    Parallel to ``KvBackend`` (= ``KvStore`` + ``KvSet`` + binding). ``IndexSet`` lives
+    here only — logical ``Index`` subclasses (``VectorIndex``) do not carry wire
+    identity. In-memory leaves in ``backends/index`` are still ``IndexBackend``
+    implementations (identity ``IndexSet``, process-local storage).
 
     ``E`` types envelope fields on ``M`` beyond wired ``D`` (e.g. search-only
-    ``distance``, denormalized ``document``). Use ``EmptyEnvelope`` when ``M`` is
-    ``D`` alone or extras are not modeled separately.
+    ``distance``). Use ``EmptyEnvelope`` when ``M`` is ``D`` alone.
     """
 
     index_set: IndexSet[K, D, ID, META]

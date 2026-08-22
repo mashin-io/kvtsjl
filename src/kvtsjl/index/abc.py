@@ -25,8 +25,10 @@ class IndexHit[K, M]:
 class Index[Q, K, V, M](KeyMap[K, M], ABC):
     """Logical search facet: query document keys, metadata as ``KeyMap[K, M]``.
 
-    Leaf implementations live in ``kvtsjl.backends.index``. Attach to a document
-    store via ``KvStore.indexed(...)`` / ``IndexedKvStore``.
+    Wire-free leaf implementations live in ``kvtsjl.backends.index`` (e.g.
+    custom in-process indexes). Wire-backed leaves extend ``IndexBackend`` in
+    ``kvtsjl.physical`` (``Index`` + ``IndexSet`` + binding), including in-memory
+    backends in ``backends/index``. Attach via ``KvStore.indexed(...)``.
     """
 
     sync_on_write: bool = True
