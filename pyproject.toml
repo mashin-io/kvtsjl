@@ -7,10 +7,16 @@ name = "kvtsjl"
 dynamic = ["version"]
 description = "A typed, composable Python facade for key-value storage. Decouples domain schemas from persistence backends with orthogonal scope partitioning and layered wrappers (fallback, mirror, tiering). Features an abstract multi-indexing layer—attach custom exact, sparse, dense, or semantic vector indices per store for unified search and hydration."
 readme = "README.md"
-license = "Apache-2.0"
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [
-  { name = "Ahmed Mahran", email = "ahmed.mahran@mashin.io" },
+  { name = "Ahmed Mahran" },
+  { email = "ahmed.mahran@mashin.io" },
+]
+maintainers = [
+  { name = "Mashin IO" },
+  { email = "ahmed.mahran@mashin.io" },
 ]
 keywords = [
   "kv",
@@ -58,6 +64,7 @@ dev = [
 Homepage = "https://github.com/mashin-io/kvtsjl"
 Repository = "https://github.com/mashin-io/kvtsjl"
 Issues = "https://github.com/mashin-io/kvtsjl/issues"
+Organization = "https://mashin.io"
 
 [tool.hatch.version]
 path = "src/kvtsjl/__init__.py"
