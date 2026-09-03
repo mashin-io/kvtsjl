@@ -142,6 +142,7 @@ store.batch_set({"a": "v", "b": "w"}, ttl=TtlPolicy(ttl_duration=timedelta(minut
 - **Memory** and **Redis flat keys** honor `ttl=` natively (no extra footprint).
 - **Redis HASH collections** raise `KvStoreTtlUnsupported` on explicit `ttl=` (expiry is hash-wide).
 - **S3 / GCS / filesystem** honor `ttl=` only when provisioned: `S3TtlMode.EXPIRES`, `GcsTtlMode.CUSTOM_TIME`, `FilesystemTtlMode.SIDECAR`. Those modes use a **standard header** or an **explicit sidecar**, not a hidden kvtsjl schema. Defaults (`OBJECT_TIME` / `MTIME`) raise on per-write `ttl=`.
+- **Expired entries** on get/scan: default `expiry_gc=ExpiryGc.LAZY_DELETE` removes them from the medium; pass `ExpiryGc.HIDE` to treat as absent and leave GC to bucket lifecycle / ops. Redis flat keys are deleted by the server (`EX`) regardless.
 
 Compress wire values at the leaf (`gzip` / `zlib` in core; `zstd` / `lz4` via optional extras):
 

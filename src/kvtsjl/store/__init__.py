@@ -11,8 +11,10 @@ from kvtsjl.store.compose import (
 )
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema import KeyLayout, KvSet, ScanQuery, TtlPolicy
+from kvtsjl.store.schema.ttl import ExpiryGc
 
 __all__ = [
+    "ExpiryGc",
     "FallbackReadKvStore",
     "IndexedKvStore",
     "KeyLayout",

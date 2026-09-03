@@ -7,7 +7,7 @@ from datetime import timedelta
 from freezegun import freeze_time
 import pytest
 
-from kvtsjl import KeyLayout, KvSet, SerDe, TtlPolicy
+from kvtsjl import ExpiryGc, KeyLayout, KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.s3 import S3KvStore, S3TtlMode
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
@@ -85,6 +85,28 @@ def test_s3_expires_mode_ttl_and_none(s3_client: object, s3_bucket: str) -> None
         frozen.move_to("2024-01-01 12:01:00")
         assert store.get("short") is None
         assert store.get("pinned") == "c"
+
+
+@pytest.mark.s3
+def test_s3_expiry_gc_hide(s3_client: object, s3_bucket: str) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = S3KvStore(
+            kvset,
+            client=s3_client,  # type: ignore[arg-type]
+            bucket=s3_bucket,
+            expiry_gc=ExpiryGc.HIDE,
+        )
+        store.set("a", "live")
+        object_key = store._object_key(store._physical_key_blob("a"))
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("a") is None
+        s3_client.head_object(Bucket=s3_bucket, Key=object_key)  # type: ignore[attr-defined]
 
 
 @pytest.mark.s3

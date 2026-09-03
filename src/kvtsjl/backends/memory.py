@@ -16,7 +16,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
 
 
 @dataclass
@@ -48,6 +48,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
         binding: CollectionBinding[KBLOB, str] | None = None,
         batch_size: int = 500,
         root: _MemoryRoot[KBLOB, VBLOB] | None = None,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
     ) -> None:
         super().__init__(
             kvset,
@@ -57,6 +58,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             batch_size=batch_size,
         )
         self._root: _MemoryRoot[KBLOB, VBLOB] = root or _MemoryRoot()
+        self._expiry_gc = expiry_gc
 
     def _clone_with_scope(self, scope: Scope) -> MemoryKvStore[K, V, KBLOB, VBLOB]:
         return MemoryKvStore(
@@ -65,6 +67,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             binding=self._binding,
             batch_size=self.batch_size,
             root=self._root,
+            expiry_gc=self._expiry_gc,
         )
 
     def _bucket(self) -> dict[KBLOB, _Entry[VBLOB]]:
@@ -86,7 +89,8 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
         if entry is None:
             return None
         if self._expired(entry):
-            bucket.pop(pk, None)
+            if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                bucket.pop(pk, None)
             return None
         return self.kvset.value_serde.deserialize(entry.value_blob)
 
@@ -133,7 +137,8 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             if entry is None:
                 continue
             if self._expired(entry):
-                bucket.pop(pk, None)
+                if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                    bucket.pop(pk, None)
                 continue
             if not ops.startswith(pk, prefix):
                 continue

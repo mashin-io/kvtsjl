@@ -15,6 +15,7 @@ construction via ``ttl_mode``:
   that depend on ``customTime``.
 
 Default ``OBJECT_TIME`` writes nothing extra. This is not GCS Object Lifecycle.
+Use ``expiry_gc=HIDE`` to treat expired objects as absent without deleting them.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from kvtsjl.store.schema.layout import (
 )
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
+    ExpiryGc,
     TtlPolicy,
     require_explicit_ttl_supported,
 )
@@ -95,6 +97,7 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         bucket: Bucket,
         key_prefix: str = "",
         ttl_mode: GcsTtlMode = GcsTtlMode.OBJECT_TIME,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
@@ -117,6 +120,7 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         self._bucket = bucket
         self._key_prefix = base
         self._ttl_mode = ttl_mode
+        self._expiry_gc = expiry_gc
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
@@ -126,6 +130,7 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             bucket=self._bucket,
             key_prefix=self._key_prefix,
             ttl_mode=self._ttl_mode,
+            expiry_gc=self._expiry_gc,
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
@@ -177,7 +182,8 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         if blob is None:
             return None
         if self._expired(blob):
-            blob.delete()
+            if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                blob.delete()
             return None
         data = blob.download_as_bytes()
         return data if isinstance(data, bytes) else bytes(data)
@@ -252,7 +258,8 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         ops = self.kvset.blob_ops
         for blob in self._bucket.list_blobs(prefix=self._collection_prefix):
             if self._expired(blob):
-                blob.delete()
+                if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                    blob.delete()
                 continue
             try:
                 pk = self._physical_from_object_key(blob.name)

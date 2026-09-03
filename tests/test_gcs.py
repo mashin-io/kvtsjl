@@ -7,7 +7,7 @@ from datetime import timedelta
 from freezegun import freeze_time
 import pytest
 
-from kvtsjl import KeyLayout, KvSet, SerDe, TtlPolicy
+from kvtsjl import ExpiryGc, KeyLayout, KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.gcs import GcsKvStore, GcsTtlMode
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
@@ -104,6 +104,26 @@ def test_gcs_custom_time_per_write_none(fake_gcs_bucket: FakeGcsBucket) -> None:
         frozen.move_to("2024-01-01 12:01:00")
         assert store.get("short") is None
         assert store.get("pinned") == "c"
+
+
+@pytest.mark.gcs
+def test_gcs_expiry_gc_hide(fake_gcs_bucket: FakeGcsBucket) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = GcsKvStore(
+            kvset,
+            bucket=fake_gcs_bucket,
+            expiry_gc=ExpiryGc.HIDE,
+        )
+        store.set("a", "live")
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("a") is None
+        assert list(fake_gcs_bucket.list_blobs())
 
 
 @pytest.mark.gcs

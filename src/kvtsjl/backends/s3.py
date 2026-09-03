@@ -12,7 +12,8 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
 - ``S3TtlMode.EXPIRES`` — write HTTP ``Expires`` on explicit ``ttl=`` (RFC 7231).
   Opt in only if you do not also use ``Expires`` for CDN caching.
 
-This is not S3 Lifecycle (day-granularity bucket rules).
+This is not S3 Lifecycle (day-granularity bucket rules). Use ``expiry_gc=HIDE``
+to treat expired objects as absent without deleting them on get/scan.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from kvtsjl.store.schema.layout import (
 )
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
+    ExpiryGc,
     TtlPolicy,
     require_explicit_ttl_supported,
 )
@@ -96,6 +98,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         bucket: str,
         key_prefix: str = "",
         ttl_mode: S3TtlMode = S3TtlMode.OBJECT_TIME,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
@@ -119,6 +122,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         self._bucket = bucket
         self._key_prefix = base
         self._ttl_mode = ttl_mode
+        self._expiry_gc = expiry_gc
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
@@ -129,6 +133,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             bucket=self._bucket,
             key_prefix=self._key_prefix,
             ttl_mode=self._ttl_mode,
+            expiry_gc=self._expiry_gc,
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
@@ -163,7 +168,8 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         last_modified = resp.get("LastModified")
         last_modified_dt = last_modified if isinstance(last_modified, datetime) else None
         if self._expired(last_modified_dt, self._expires_from_response(resp)):
-            self._client.delete_object(Bucket=self._bucket, Key=object_key)
+            if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                self._client.delete_object(Bucket=self._bucket, Key=object_key)
             return None
         body = resp.get("Body")
         if body is None or not hasattr(body, "read"):
@@ -297,7 +303,8 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                     raise
                 expires = self._expires_from_response(head)
             if self._expired(last_modified, expires):
-                self._client.delete_object(Bucket=self._bucket, Key=object_key)
+                if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                    self._client.delete_object(Bucket=self._bucket, Key=object_key)
                 continue
             try:
                 pk = self._physical_from_object_key(object_key)

@@ -10,7 +10,7 @@ import time
 from freezegun import freeze_time
 import pytest
 
-from kvtsjl import FilesystemKvStore, KeyLayout, KvSet, SerDe, TtlPolicy
+from kvtsjl import ExpiryGc, FilesystemKvStore, KeyLayout, KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.filesystem import FilesystemTtlMode
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
@@ -45,8 +45,6 @@ def test_filesystem_no_meta_sidecars(
 
 
 def test_filesystem_ttl_via_mtime(tmp_path: Path) -> None:
-    from datetime import timedelta
-
     kvset = KvSet.with_str_keys(
         "ttl",
         key_serde=SerDe.identity(str),
@@ -61,6 +59,22 @@ def test_filesystem_ttl_via_mtime(tmp_path: Path) -> None:
     os.utime(path, (old, old))
     assert store.get("a") is None
     assert not path.exists()
+
+
+def test_filesystem_expiry_gc_hide(tmp_path: Path) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    store = FilesystemKvStore(kvset, root=tmp_path, expiry_gc=ExpiryGc.HIDE)
+    store.set("a", "live")
+    path = next(p for p in tmp_path.rglob("*") if p.is_file())
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    assert store.get("a") is None
+    assert path.exists()
 
 
 def test_filesystem_explicit_ttl_raises_by_default(tmp_path: Path) -> None:

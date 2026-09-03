@@ -4,12 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 
 from kvtsjl.exceptions import KvStoreTtlUnsupported
 
 # Far-future marker for ``TtlPolicy.none()`` on opted-in blob stores.
 # Year 9999 is not encodable as an S3 HTTP ``Expires`` timestamp in botocore.
 TTL_NONE_EXPIRES_AT = datetime(2099, 12, 31, 23, 59, 59, tzinfo=UTC)
+
+
+class ExpiryGc(str, Enum):
+    """What to do when a leaf observes an expired entry on get/scan."""
+
+    LAZY_DELETE = "lazy_delete"
+    """Delete the expired object/file from the medium (default)."""
+
+    HIDE = "hide"
+    """Treat as absent without mutating the medium (leave GC to lifecycle/ops)."""
 
 
 @dataclass(frozen=True, slots=True)

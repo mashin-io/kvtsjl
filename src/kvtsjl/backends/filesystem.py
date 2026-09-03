@@ -30,7 +30,11 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.store.schema.ttl import TtlPolicy, require_explicit_ttl_supported
+from kvtsjl.store.schema.ttl import (
+    ExpiryGc,
+    TtlPolicy,
+    require_explicit_ttl_supported,
+)
 
 
 class FilesystemTtlMode(str, Enum):
@@ -60,6 +64,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
     - ``KBLOB`` is logical in-key material (``str`` / ``bytes``), not ``Path`` —
       paths are derived via ``KeyLayout``.
     - TTL: see ``ttl_mode`` / ``FilesystemTtlMode`` (default ``mtime``, no sidecars).
+    - ``expiry_gc``: delete expired files on get/scan (default) or only hide them.
     - Scan is supported only for ``KeyLayout.LITERAL`` (path ↔ key is reversible).
     """
 
@@ -69,6 +74,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         *,
         root: Path | str,
         ttl_mode: FilesystemTtlMode = FilesystemTtlMode.MTIME,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
@@ -90,6 +96,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         )
         self._root = root_path
         self._ttl_mode = ttl_mode
+        self._expiry_gc = expiry_gc
         assert self._binding.collection is not None
         self._collection_dir = Path(self._binding.collection)
         self._collection_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +106,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             self.kvset,
             root=self._root,
             ttl_mode=self._ttl_mode,
+            expiry_gc=self._expiry_gc,
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
@@ -137,7 +145,8 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
                 except ValueError:
                     expires_at = 0.0
                 if time.time() >= expires_at:
-                    self._delete_with_sidecar(path)
+                    if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                        self._delete_with_sidecar(path)
                     return None
         else:
             ttl = self.ttl_seconds()
@@ -147,7 +156,8 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
                 except OSError:
                     return None
                 if time.time() >= mtime + ttl:
-                    self._delete_with_sidecar(path)
+                    if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                        self._delete_with_sidecar(path)
                     return None
         try:
             return path.read_bytes()

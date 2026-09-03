@@ -7,7 +7,7 @@ from datetime import timedelta
 from freezegun import freeze_time
 import pytest
 
-from kvtsjl import KvSet, MemoryKvStore, SerDe, TtlPolicy
+from kvtsjl import ExpiryGc, KvSet, MemoryKvStore, SerDe, TtlPolicy
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
 
 
@@ -61,3 +61,19 @@ def test_memory_per_write_ttl_and_none() -> None:
         frozen.move_to("2024-01-01 13:01:00")
         assert store.get("default") is None
         assert store.get("pinned") == "c"
+
+
+def test_memory_expiry_gc_hide() -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    store = MemoryKvStore(kvset, expiry_gc=ExpiryGc.HIDE)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.set("a", "live")
+        pk = store._physical_key_blob("a")
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("a") is None
+        assert pk in store._bucket()
