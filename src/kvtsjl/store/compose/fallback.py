@@ -9,6 +9,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,8 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
                 logger.exception("fallback promote failed for key")
         return value
 
-    def set(self, key: K, value: V) -> None:
-        self._primary.set(key, value)
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        self._primary.set(key, value, ttl=ttl)
 
     def delete(self, key: K) -> bool:
         return self._primary.delete(key)
@@ -60,8 +61,10 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         found.update(secondary_found)
         return found
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
-        self._primary.batch_set(items)
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        self._primary.batch_set(items, ttl=ttl)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._primary.batch_delete(keys)

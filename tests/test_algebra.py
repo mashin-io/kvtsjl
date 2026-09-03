@@ -15,6 +15,7 @@ from kvtsjl import (
     MemoryKvStore,
     MemoryVectorIndex,
     SerDe,
+    TtlPolicy,
     VectorQuery,
 )
 from kvtsjl.exceptions import KvStoreReadOnlyError, KvStoreScanUnsupported
@@ -37,6 +38,29 @@ def test_imap_roundtrip() -> None:
     assert wired.get("a") == "HELLO"
     wired.set("b", "WORLD")
     assert store.get("b") == "world"
+    wired.set("c", "PIN", ttl=TtlPolicy.none())
+    assert store.get("c") == "pin"
+
+
+def test_mirror_forwards_ttl() -> None:
+    from datetime import timedelta
+
+    from freezegun import freeze_time
+
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    primary = MemoryKvStore(kvset)
+    secondary = MemoryKvStore(kvset)
+    store = primary.mirror(secondary)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.set("k", "v", ttl=TtlPolicy(ttl_duration=timedelta(seconds=30)))
+        frozen.move_to("2024-01-01 12:01:00")
+        assert primary.get("k") is None
+        assert secondary.get("k") is None
 
 
 def test_map_readonly() -> None:

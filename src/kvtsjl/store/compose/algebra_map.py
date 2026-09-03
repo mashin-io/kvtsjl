@@ -10,6 +10,7 @@ from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class MappedKvStore[K, V, U](KvStore[K, U]):
@@ -28,7 +29,7 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U) -> None:
+    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -83,8 +84,8 @@ class IMappedKvStore[K, V, U](KvStore[K, U]):
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U) -> None:
-        self._view.set(key, value)
+    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
+        self._src.set(key, self._inverse(value), ttl=ttl)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
@@ -140,8 +141,8 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V) -> None:
-        self._view.set(key, value)
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        self._src.set(self._to_store(key), value, ttl=ttl)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)

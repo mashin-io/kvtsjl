@@ -1,8 +1,14 @@
-"""Filesystem-backed KvStore (native collection dirs, no sidecars)."""
+"""Filesystem-backed KvStore (native collection dirs).
+
+Default ``ttl_mode=MTIME`` is footprint-free: one data file per key, TTL is
+``mtime + KvSet.ttl_policy``. Opt in to ``SIDECAR`` only when you need per-write
+``ttl=`` (writes ``{path}.expires``).
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from enum import Enum
 import os
 from pathlib import Path
 import time
@@ -24,6 +30,17 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
+from kvtsjl.store.schema.ttl import TtlPolicy, require_explicit_ttl_supported
+
+
+class FilesystemTtlMode(str, Enum):
+    """How ``FilesystemKvStore`` applies TTL."""
+
+    MTIME = "mtime"
+    """``now >= mtime + kvset.ttl``; no sidecar files; per-write ``ttl=`` raises."""
+
+    SIDECAR = "sidecar"
+    """Honor per-write ``ttl=`` via ``{data_path}.expires``."""
 
 
 def _safe_name(name: str) -> str:
@@ -42,7 +59,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
     - ``VBLOB`` is ``bytes`` from ``value_serde`` (encoding is the caller's SerDe).
     - ``KBLOB`` is logical in-key material (``str`` / ``bytes``), not ``Path`` —
       paths are derived via ``KeyLayout``.
-    - No meta sidecars. TTL (when set) is ``mtime + ttl``; lazy-delete on read/scan.
+    - TTL: see ``ttl_mode`` / ``FilesystemTtlMode`` (default ``mtime``, no sidecars).
     - Scan is supported only for ``KeyLayout.LITERAL`` (path ↔ key is reversible).
     """
 
@@ -51,6 +68,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         kvset: KvSet[K, V, KBLOB, bytes],
         *,
         root: Path | str,
+        ttl_mode: FilesystemTtlMode = FilesystemTtlMode.MTIME,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
@@ -71,6 +89,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             batch_size=batch_size,
         )
         self._root = root_path
+        self._ttl_mode = ttl_mode
         assert self._binding.collection is not None
         self._collection_dir = Path(self._binding.collection)
         self._collection_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +98,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         return FilesystemKvStore(
             self.kvset,
             root=self._root,
+            ttl_mode=self._ttl_mode,
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
@@ -94,19 +114,41 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         tmp.write_bytes(data)
         os.replace(tmp, path)
 
+    def _expires_sidecar(self, path: Path) -> Path:
+        return Path(str(path) + ".expires")
+
+    def _delete_with_sidecar(self, path: Path) -> None:
+        path.unlink(missing_ok=True)
+        self._expires_sidecar(path).unlink(missing_ok=True)
+
     def _read_live(self, path: Path) -> bytes | None:
         """Read file bytes, or ``None`` if missing / TTL-expired (lazy delete)."""
         if not path.is_file():
             return None
-        ttl = self.ttl_seconds()
-        if ttl is not None:
+        sidecar = self._expires_sidecar(path)
+        if sidecar.is_file():
             try:
-                mtime = path.stat().st_mtime
+                token = sidecar.read_text(encoding="utf-8").strip()
             except OSError:
                 return None
-            if time.time() >= mtime + ttl:
-                path.unlink(missing_ok=True)
-                return None
+            if token != "none":
+                try:
+                    expires_at = float(token)
+                except ValueError:
+                    expires_at = 0.0
+                if time.time() >= expires_at:
+                    self._delete_with_sidecar(path)
+                    return None
+        else:
+            ttl = self.ttl_seconds()
+            if ttl is not None:
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    return None
+                if time.time() >= mtime + ttl:
+                    self._delete_with_sidecar(path)
+                    return None
         try:
             return path.read_bytes()
         except OSError:
@@ -118,14 +160,25 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        require_explicit_ttl_supported(
+            ttl,
+            allowed=self._ttl_mode is FilesystemTtlMode.SIDECAR,
+            backend="FilesystemKvStore",
+        )
         path = self._path_for_physical(self._physical_key_blob(key))
         self._write_atomic(path, self.kvset.value_serde.serialize(value))
+        sidecar = self._expires_sidecar(path)
+        if ttl is None:
+            sidecar.unlink(missing_ok=True)
+            return
+        secs = self.resolve_ttl_seconds(ttl)
+        sidecar.write_text("none" if secs is None else str(time.time() + secs), encoding="utf-8")
 
     def delete(self, key: K) -> bool:
         path = self._path_for_physical(self._physical_key_blob(key))
         existed = path.is_file()
-        path.unlink(missing_ok=True)
+        self._delete_with_sidecar(path)
         return existed
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
@@ -137,10 +190,12 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
                     out[key] = value
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
         for chunk in chunk_sequence(list(items.items()), self.batch_size):
             for key, value in chunk:
-                self.set(key, value)
+                self.set(key, value, ttl=ttl)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0
@@ -155,7 +210,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             return
         for dirpath, _dirnames, filenames in os.walk(self._collection_dir):
             for name in filenames:
-                if name.endswith(".tmp"):
+                if name.endswith(".tmp") or name.endswith(".expires"):
                     continue
                 yield Path(dirpath) / name
 

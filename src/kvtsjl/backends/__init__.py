@@ -15,10 +15,11 @@ Index store leaf backends live under ``kvtsjl.backends.index``::
 
 from __future__ import annotations
 
-from kvtsjl.backends.filesystem import FilesystemKvStore
+from kvtsjl.backends.filesystem import FilesystemKvStore, FilesystemTtlMode
 from kvtsjl.backends.memory import MemoryKvStore
 
 __all__ = [
     "FilesystemKvStore",
+    "FilesystemTtlMode",
     "MemoryKvStore",
 ]

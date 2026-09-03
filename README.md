@@ -20,6 +20,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 | Ad-hoc search | **Indexes** attach to a store; writes sync automatically |
 | Leaky key encoding | **`KvSet`** + **`SerDe`** wire domain types to bytes; **`Scope`** partitions namespaces |
 | Cache / tiering hacks | **`KvStore` algebra** — `.coalesce()`, `.mirror()`, `.zip_with()`, `.then()`, `.expand()` |
+| Opaque library blobs | **Footprint-free by default** — payload plus native object/file metadata only; swap kvtsjl for another client |
 | Untyped I/O | Generics end-to-end; strict static checking in CI |
 
 ---
@@ -40,6 +41,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 ## Features
 
 - **Typed CRUD** — `get` / `set` / `delete` + batch variants, `scan`, `get_or_set`
+- **Footprint-free medium** — default writes do not stamp library identity (`x-amz-meta-kvtsjl-*`, tags, sidecars)
 - **Wire schema** — `KvSet` describes key/value serdes, layout, TTL; leaf backends own I/O
 - **Scope views** — prefix namespaces without copying data
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
@@ -120,6 +122,26 @@ assert store.get("alice") == "admin"
 for key in store.scan(prefix="a"):
     print(key)  # alice
 ```
+
+### Footprint-free storage
+
+kvtsjl is a typed facade, not a proprietary format. **Default provision writes the value blob and whatever the medium already uses** (mtime, `LastModified`, Redis `EX` on flat keys). There are no `x-amz-meta-kvtsjl-*` keys, object tags, or sidecar files unless you **opt in at construction**.
+
+Per-write TTL follows the same rule:
+
+```python
+from datetime import timedelta
+from kvtsjl import TtlPolicy
+
+store.set("a", "v")                         # KvSet.ttl_policy
+store.set("a", "v", ttl=TtlPolicy.hourly()) # this key only
+store.set("a", "v", ttl=TtlPolicy.none())   # never expire this key
+store.batch_set({"a": "v", "b": "w"}, ttl=TtlPolicy(ttl_duration=timedelta(minutes=5)))
+```
+
+- **Memory** and **Redis flat keys** honor `ttl=` natively (no extra footprint).
+- **Redis HASH collections** raise `KvStoreTtlUnsupported` on explicit `ttl=` (expiry is hash-wide).
+- **S3 / GCS / filesystem** honor `ttl=` only when provisioned: `S3TtlMode.EXPIRES`, `GcsTtlMode.CUSTOM_TIME`, `FilesystemTtlMode.SIDECAR`. Those modes use a **standard header** or an **explicit sidecar**, not a hidden kvtsjl schema. Defaults (`OBJECT_TIME` / `MTIME`) raise on per-write `ttl=`.
 
 Compress wire values at the leaf (`gzip` / `zlib` in core; `zstd` / `lz4` via optional extras):
 

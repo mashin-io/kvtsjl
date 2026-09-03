@@ -22,6 +22,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery, supports_prefix_scan
+from kvtsjl.store.schema.ttl import TtlPolicy, require_explicit_ttl_supported
 
 if TYPE_CHECKING:
     from redis import Redis
@@ -143,16 +144,19 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
             return None
         return self._deserialize_value(raw)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         pk = self._pk(key)
         raw = self._serialize_value(value)
-        ttl = self.ttl_seconds()
+        require_explicit_ttl_supported(
+            ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
+        )
+        ttl_secs = self.resolve_ttl_seconds(ttl)
         if self._use_hash:
             self._client.hset(self._collection_key(), pk, raw)
-            if ttl is not None:
-                self._client.expire(self._collection_key(), ttl)
+            if ttl_secs is not None:
+                self._client.expire(self._collection_key(), ttl_secs)
         else:
-            self._client.set(pk, raw, ex=ttl)
+            self._client.set(pk, raw, ex=ttl_secs)
 
     def delete(self, key: K) -> bool:
         pk = self._pk(key)
@@ -178,9 +182,14 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
                         out[key] = self._deserialize_value(raw)
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        require_explicit_ttl_supported(
+            ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
+        )
         pairs = list(items.items())
-        ttl = self.ttl_seconds()
+        ttl_secs = self.resolve_ttl_seconds(ttl)
         for chunk in chunk_sequence(pairs, self.batch_size):
             if self._use_hash:
                 mapping = {self._pk(k): self._serialize_value(v) for k, v in chunk}
@@ -189,12 +198,12 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
                         self._collection_key(),
                         mapping=cast(_RedisHSetMapping, mapping),
                     )
-                    if ttl is not None:
-                        self._client.expire(self._collection_key(), ttl)
+                    if ttl_secs is not None:
+                        self._client.expire(self._collection_key(), ttl_secs)
             else:
                 pipe = self._client.pipeline(transaction=False)
                 for k, v in chunk:
-                    pipe.set(self._pk(k), self._serialize_value(v), ex=ttl)
+                    pipe.set(self._pk(k), self._serialize_value(v), ex=ttl_secs)
                 pipe.execute()
 
     def batch_delete(self, keys: Sequence[K]) -> int:

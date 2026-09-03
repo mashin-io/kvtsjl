@@ -11,6 +11,7 @@ from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 if TYPE_CHECKING:
     from kvtsjl.index.logical.abc import Index
@@ -31,6 +32,19 @@ class KvStore[K, V](KeyMap[K, V], ABC):
     @abstractmethod
     def key_layout(self) -> KeyLayout:
         """Key physicalization policy (from the leaf ``KvSet``)."""
+
+    @abstractmethod
+    def set(  # type: ignore[override]
+        self, key: K, value: V, *, ttl: TtlPolicy | None = None
+    ) -> None:
+        """Insert or replace ``key``. ``ttl=None`` uses the ``KvSet`` policy."""
+
+    def batch_set(  # type: ignore[override]
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        """Insert or replace many entries with the same optional ``ttl``."""
+        for key, value in items.items():
+            self.set(key, value, ttl=ttl)
 
     @abstractmethod
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:

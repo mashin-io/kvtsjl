@@ -9,6 +9,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,10 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._primary.get(key)
 
-    def set(self, key: K, value: V) -> None:
-        self._primary.set(key, value)
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        self._primary.set(key, value, ttl=ttl)
         try:
-            self._secondary.set(key, value)
+            self._secondary.set(key, value, ttl=ttl)
         except Exception:
             logger.exception("mirror set to secondary failed")
 
@@ -46,10 +47,12 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
         return self._primary.batch_get(keys)
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
-        self._primary.batch_set(items)
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        self._primary.batch_set(items, ttl=ttl)
         try:
-            self._secondary.batch_set(items)
+            self._secondary.batch_set(items, ttl=ttl)
         except Exception:
             logger.exception("mirror batch_set to secondary failed")
 

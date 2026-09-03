@@ -10,10 +10,11 @@ construction via ``ttl_mode``:
 - ``GcsTtlMode.OBJECT_TIME`` (default) — derive from object ``updated``
   (fallback ``time_created``) + ``TtlPolicy``; does not write ``customTime``.
 - ``GcsTtlMode.CUSTOM_TIME`` — write absolute expiry to native ``customTime``;
-  expire when ``now >= customTime``. Prefer only when you do not also use
-  lifecycle rules (or other features) that depend on ``customTime``.
+  expire when ``now >= customTime``. Per-write ``ttl=`` requires this mode.
+  Prefer only when you do not also use lifecycle rules (or other features)
+  that depend on ``customTime``.
 
-No library-specific custom metadata. This is not GCS Object Lifecycle.
+Default ``OBJECT_TIME`` writes nothing extra. This is not GCS Object Lifecycle.
 """
 
 from __future__ import annotations
@@ -39,6 +40,11 @@ from kvtsjl.store.schema.layout import (
     ScanQuery,
     layout_decode_for_fs,
     layout_encode_for_fs,
+)
+from kvtsjl.store.schema.ttl import (
+    TTL_NONE_EXPIRES_AT,
+    TtlPolicy,
+    require_explicit_ttl_supported,
 )
 
 if TYPE_CHECKING:
@@ -129,9 +135,11 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
         return f"{self._collection_prefix}{rel}"
 
-    def _custom_time_expires_at(self) -> datetime | None:
-        secs = self.ttl_seconds()
+    def _custom_time_expires_at(self, ttl: TtlPolicy | None = None) -> datetime | None:
+        secs = self.resolve_ttl_seconds(ttl)
         if secs is None:
+            if ttl is not None:
+                return TTL_NONE_EXPIRES_AT
             return None
         return datetime.fromtimestamp(time.time() + secs, tz=UTC)
 
@@ -145,14 +153,20 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         return None
 
     def _expired(self, blob: Blob) -> bool:
+        if self._ttl_mode is GcsTtlMode.CUSTOM_TIME:
+            custom_time = blob.custom_time
+            if isinstance(custom_time, datetime):
+                return time.time() >= custom_time.timestamp()
+            ttl = self.ttl_seconds()
+            if ttl is None:
+                return False
+            ref = self._object_reference_time(blob)
+            if ref is None:
+                return False
+            return time.time() >= ref.timestamp() + ttl
         ttl = self.ttl_seconds()
         if ttl is None:
             return False
-        if self._ttl_mode is GcsTtlMode.CUSTOM_TIME:
-            custom_time = blob.custom_time
-            if not isinstance(custom_time, datetime):
-                return False
-            return time.time() >= custom_time.timestamp()
         ref = self._object_reference_time(blob)
         if ref is None:
             return False
@@ -174,11 +188,16 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        require_explicit_ttl_supported(
+            ttl,
+            allowed=self._ttl_mode is GcsTtlMode.CUSTOM_TIME,
+            backend="GcsKvStore",
+        )
         object_key = self._object_key(self._physical_key_blob(key))
         blob = self._bucket.blob(object_key)
         if self._ttl_mode is GcsTtlMode.CUSTOM_TIME:
-            blob.custom_time = self._custom_time_expires_at()
+            blob.custom_time = self._custom_time_expires_at(ttl)
         blob.upload_from_string(self.kvset.value_serde.serialize(value))
 
     def delete(self, key: K) -> bool:
@@ -198,10 +217,12 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                     out[key] = value
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
         for chunk in chunk_sequence(list(items.items()), self.batch_size):
             for key, value in chunk:
-                self.set(key, value)
+                self.set(key, value, ttl=ttl)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

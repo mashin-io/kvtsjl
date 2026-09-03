@@ -10,6 +10,7 @@ from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
@@ -32,7 +33,7 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
     def get(self, key: K) -> KeyMap[SK, SV] | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: KeyMap[SK, SV]) -> None:
+    def set(self, key: K, value: KeyMap[SK, SV], *, ttl: TtlPolicy | None = None) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -89,7 +90,7 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U) -> None:
+    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:

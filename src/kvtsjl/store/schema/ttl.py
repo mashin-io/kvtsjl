@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+
+from kvtsjl.exceptions import KvStoreTtlUnsupported
+
+# Far-future marker for ``TtlPolicy.none()`` on opted-in blob stores.
+# Year 9999 is not encodable as an S3 HTTP ``Expires`` timestamp in botocore.
+TTL_NONE_EXPIRES_AT = datetime(2099, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +43,16 @@ class TtlPolicy:
         if self.ttl_duration is None:
             return None
         return max(1, int(self.ttl_duration.total_seconds()))
+
+
+def require_explicit_ttl_supported(
+    ttl: TtlPolicy | None,
+    *,
+    allowed: bool,
+    backend: str,
+) -> None:
+    """Raise if the caller passed a per-write override the backend cannot store."""
+    if ttl is not None and not allowed:
+        raise KvStoreTtlUnsupported(
+            f"{backend} does not support per-write ttl with the current provision"
+        )

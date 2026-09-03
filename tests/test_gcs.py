@@ -9,7 +9,7 @@ import pytest
 
 from kvtsjl import KeyLayout, KvSet, SerDe, TtlPolicy
 from kvtsjl.backends.gcs import GcsKvStore, GcsTtlMode
-from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
 from tests.fake_gcs import FakeGcsBucket
 
@@ -70,6 +70,40 @@ def test_gcs_ttl_via_custom_time(fake_gcs_bucket: FakeGcsBucket) -> None:
         frozen.move_to("2024-01-01 12:01:00")
         assert store.get("a") is None
         assert list(fake_gcs_bucket.list_blobs()) == []
+
+
+@pytest.mark.gcs
+def test_gcs_explicit_ttl_raises_on_object_time(fake_gcs_bucket: FakeGcsBucket) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    store = GcsKvStore(kvset, bucket=fake_gcs_bucket)
+    with pytest.raises(KvStoreTtlUnsupported):
+        store.set("a", "v", ttl=TtlPolicy.hourly())
+
+
+@pytest.mark.gcs
+def test_gcs_custom_time_per_write_none(fake_gcs_bucket: FakeGcsBucket) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = GcsKvStore(
+            kvset,
+            bucket=fake_gcs_bucket,
+            ttl_mode=GcsTtlMode.CUSTOM_TIME,
+        )
+        store.set("short", "b", ttl=TtlPolicy(ttl_duration=timedelta(seconds=30)))
+        store.set("pinned", "c", ttl=TtlPolicy.none())
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("short") is None
+        assert store.get("pinned") == "c"
 
 
 @pytest.mark.gcs

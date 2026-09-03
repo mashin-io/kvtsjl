@@ -9,6 +9,7 @@ from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class ThenKvStore[K, J, V](KvStore[K, V]):
@@ -25,7 +26,7 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -77,7 +78,7 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:

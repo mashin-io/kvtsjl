@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import os
 from pathlib import Path
 import time
 
+from freezegun import freeze_time
 import pytest
 
 from kvtsjl import FilesystemKvStore, KeyLayout, KvSet, SerDe, TtlPolicy
-from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.backends.filesystem import FilesystemTtlMode
+from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
 
 
@@ -58,6 +61,42 @@ def test_filesystem_ttl_via_mtime(tmp_path: Path) -> None:
     os.utime(path, (old, old))
     assert store.get("a") is None
     assert not path.exists()
+
+
+def test_filesystem_explicit_ttl_raises_by_default(tmp_path: Path) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    store = FilesystemKvStore(kvset, root=tmp_path)
+    with pytest.raises(KvStoreTtlUnsupported):
+        store.set("a", "v", ttl=TtlPolicy.hourly())
+
+
+def test_filesystem_sidecar_ttl_and_none(tmp_path: Path) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    store = FilesystemKvStore(kvset, root=tmp_path, ttl_mode=FilesystemTtlMode.SIDECAR)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.set("short", "b", ttl=TtlPolicy(ttl_duration=timedelta(seconds=30)))
+        store.set("pinned", "c", ttl=TtlPolicy.none())
+        store.set("plain", "d")
+        data_files = [
+            p for p in tmp_path.rglob("*") if p.is_file() and not str(p).endswith(".expires")
+        ]
+        assert any(Path(str(p) + ".expires").is_file() for p in data_files)
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("short") is None
+        assert store.get("pinned") == "c"
+        assert store.get("plain") == "d"
+        store.delete("pinned")
+        assert not any(str(p).endswith(".expires") for p in tmp_path.rglob("*") if p.is_file())
 
 
 def test_filesystem_hashed_scan_unsupported(tmp_path: Path) -> None:

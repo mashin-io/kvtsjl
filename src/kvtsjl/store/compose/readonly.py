@@ -9,13 +9,14 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._underlying.get(key)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         raise KvStoreReadOnlyError("set on readonly store")
 
     def delete(self, key: K) -> bool:
@@ -24,7 +25,9 @@ class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
         return self._underlying.batch_get(keys)
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
         raise KvStoreReadOnlyError("batch_set on readonly store")
 
     def batch_delete(self, keys: Sequence[K]) -> int:

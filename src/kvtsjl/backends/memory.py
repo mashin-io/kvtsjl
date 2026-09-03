@@ -16,6 +16,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 @dataclass
@@ -72,8 +73,8 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     def _expired(self, entry: _Entry[VBLOB]) -> bool:
         return entry.expires_at is not None and time.time() >= entry.expires_at
 
-    def _expires_at(self) -> float | None:
-        secs = self.ttl_seconds()
+    def _expires_at(self, ttl: TtlPolicy | None = None) -> float | None:
+        secs = self.resolve_ttl_seconds(ttl)
         if secs is None:
             return None
         return time.time() + secs
@@ -89,10 +90,10 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             return None
         return self.kvset.value_serde.deserialize(entry.value_blob)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         pk = self._physical_key_blob(key)
         blob = self.kvset.value_serde.serialize(value)
-        self._bucket()[pk] = _Entry(value_blob=blob, expires_at=self._expires_at())
+        self._bucket()[pk] = _Entry(value_blob=blob, expires_at=self._expires_at(ttl))
 
     def delete(self, key: K) -> bool:
         pk = self._physical_key_blob(key)
@@ -107,11 +108,13 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
                     out[key] = value
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
         pairs = list(items.items())
         for chunk in chunk_sequence(pairs, self.batch_size):
             for key, value in chunk:
-                self.set(key, value)
+                self.set(key, value, ttl=ttl)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

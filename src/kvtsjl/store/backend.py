@@ -14,6 +14,7 @@ from kvtsjl.serde import SerDe
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import KeyLayout
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class KvBackend[K, V, KBLOB, VBLOB, COLL](
@@ -91,6 +92,10 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
 
     def ttl_seconds(self) -> int | None:
         return self.kvset.ttl_policy.ttl_seconds()
+
+    def resolve_ttl_seconds(self, ttl: TtlPolicy | None = None) -> int | None:
+        policy = self.kvset.ttl_policy if ttl is None else ttl
+        return policy.ttl_seconds()
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import backend_repr

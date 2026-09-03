@@ -29,3 +29,7 @@ class KvStoreComposeError(KvStoreError):
 
 class KvStoreIndexError(KvStoreError):
     """Unknown or incompatible index for search."""
+
+
+class KvStoreTtlUnsupported(KvStoreError):
+    """Backend cannot honor a per-write TTL override."""

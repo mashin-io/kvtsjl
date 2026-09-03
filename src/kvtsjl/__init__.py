@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kvtsjl.backends import (
     FilesystemKvStore,
+    FilesystemTtlMode,
     MemoryKvStore,
 )
 from kvtsjl.backends.index import MemoryKeyIndex, MemoryTermIndex, MemoryVectorIndex
@@ -23,6 +24,7 @@ from kvtsjl.exceptions import (
     KvStoreScanUnsupported,
     KvStoreScopeError,
     KvStoreSerDeError,
+    KvStoreTtlUnsupported,
 )
 from kvtsjl.index import (
     EmptyEnvelope,
@@ -66,6 +68,7 @@ __all__ = [
     "EmptyEnvelope",
     "FallbackReadKvStore",
     "FilesystemKvStore",
+    "FilesystemTtlMode",
     "Index",
     "IndexBackend",
     "IndexHit",
@@ -85,6 +88,7 @@ __all__ = [
     "KvStoreScanUnsupported",
     "KvStoreScopeError",
     "KvStoreSerDeError",
+    "KvStoreTtlUnsupported",
     "MemoryKeyIndex",
     "MemoryKvStore",
     "MemoryTermIndex",

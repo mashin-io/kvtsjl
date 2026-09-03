@@ -9,6 +9,7 @@ from kvtsjl.keymap_algebra.zip import ZippedKeyMap, ZipWithKeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 def _union_keys[K](
@@ -42,8 +43,18 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def get(self, key: K) -> tuple[Any, ...] | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: tuple[Any, ...]) -> None:
-        self._view.set(key, value)
+    def set(
+        self, key: K, value: tuple[Any, ...], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        if len(value) != len(self._parts):
+            raise ValueError(
+                f"zip set expects {len(self._parts)}-tuple, got {len(value)}"
+            )
+        for part, item in zip(self._parts, value, strict=True):
+            if item is None:
+                part.delete(key)
+            else:
+                part.set(key, item, ttl=ttl)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
@@ -85,8 +96,14 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V) -> None:
-        self._view.set(key, value)
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        for name in self._view._field_names:
+            item = getattr(value, name)
+            part = self._parts[name]
+            if item is None:
+                part.delete(key)
+            else:
+                part.set(key, item, ttl=ttl)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)

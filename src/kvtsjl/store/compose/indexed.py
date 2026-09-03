@@ -12,6 +12,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,8 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._underlying.get(key)
 
-    def set(self, key: K, value: V) -> None:
-        self._underlying.set(key, value)
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        self._underlying.set(key, value, ttl=ttl)
         self._sync_upsert(key, value)
 
     def delete(self, key: K) -> bool:
@@ -69,8 +70,10 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
         return self._underlying.batch_get(keys)
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
-        self._underlying.batch_set(items)
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        self._underlying.batch_set(items, ttl=ttl)
         self._sync_batch_upsert(items)
 
     def batch_delete(self, keys: Sequence[K]) -> int:

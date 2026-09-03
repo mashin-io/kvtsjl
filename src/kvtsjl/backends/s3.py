@@ -4,18 +4,24 @@ Install with::
 
     pip install 'kvtsjl[s3]'
 
-TTL uses object ``LastModified`` the same way the filesystem backend uses mtime:
-lazy delete on get/scan when ``now >= LastModified + ttl``. This is not S3
-Lifecycle (day-granularity bucket rules); wire Lifecycle separately if you want
-server-side expiry.
+TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
+``ttl_mode``:
+
+- ``S3TtlMode.OBJECT_TIME`` (default) — ``LastModified + KvSet.ttl_policy``;
+  does not write HTTP ``Expires``; per-write ``ttl=`` raises.
+- ``S3TtlMode.EXPIRES`` — write HTTP ``Expires`` on explicit ``ttl=`` (RFC 7231).
+  Opt in only if you do not also use ``Expires`` for CDN caching.
+
+This is not S3 Lifecycle (day-granularity bucket rules).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from enum import Enum
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
@@ -35,9 +41,24 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
+from kvtsjl.store.schema.ttl import (
+    TTL_NONE_EXPIRES_AT,
+    TtlPolicy,
+    require_explicit_ttl_supported,
+)
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
+
+
+class S3TtlMode(str, Enum):
+    """How ``S3KvStore`` applies TTL."""
+
+    OBJECT_TIME = "object_time"
+    """``now >= LastModified + ttl`` (no ``Expires`` writes)."""
+
+    EXPIRES = "expires"
+    """Write HTTP ``Expires`` on per-write ``ttl=``; ``now >= Expires``."""
 
 
 def _safe_name(name: str) -> str:
@@ -63,7 +84,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - ``VBLOB`` is ``bytes`` from ``value_serde``.
     - Collection = key prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a boto3 S3 client (configure ``endpoint_url`` for MinIO).
-    - TTL: ``LastModified + ttl``, lazy-delete on read/scan.
+    - TTL: see ``ttl_mode`` / ``S3TtlMode``.
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -74,6 +95,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         client: S3Client,
         bucket: str,
         key_prefix: str = "",
+        ttl_mode: S3TtlMode = S3TtlMode.OBJECT_TIME,
         scope: Scope | None = None,
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
@@ -96,6 +118,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         self._client = client
         self._bucket = bucket
         self._key_prefix = base
+        self._ttl_mode = ttl_mode
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
@@ -105,6 +128,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             client=self._client,
             bucket=self._bucket,
             key_prefix=self._key_prefix,
+            ttl_mode=self._ttl_mode,
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
@@ -114,11 +138,19 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
         return f"{self._collection_prefix}{rel}"
 
-    def _expired(self, last_modified: datetime) -> bool:
+    def _expired(
+        self, last_modified: datetime | None, expires: datetime | None = None
+    ) -> bool:
+        if self._ttl_mode is S3TtlMode.EXPIRES and expires is not None:
+            return time.time() >= expires.timestamp()
         ttl = self.ttl_seconds()
-        if ttl is None:
+        if ttl is None or last_modified is None:
             return False
         return time.time() >= last_modified.timestamp() + ttl
+
+    def _expires_from_response(self, resp: Mapping[str, Any]) -> datetime | None:
+        expires = resp.get("Expires")
+        return expires if isinstance(expires, datetime) else None
 
     def _read_live(self, object_key: str) -> bytes | None:
         try:
@@ -129,7 +161,8 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                 return None
             raise
         last_modified = resp.get("LastModified")
-        if isinstance(last_modified, datetime) and self._expired(last_modified):
+        last_modified_dt = last_modified if isinstance(last_modified, datetime) else None
+        if self._expired(last_modified_dt, self._expires_from_response(resp)):
             self._client.delete_object(Bucket=self._bucket, Key=object_key)
             return None
         body = resp.get("Body")
@@ -144,12 +177,25 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V) -> None:
-        self._client.put_object(
-            Bucket=self._bucket,
-            Key=self._object_key(self._physical_key_blob(key)),
-            Body=self.kvset.value_serde.serialize(value),
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+        require_explicit_ttl_supported(
+            ttl,
+            allowed=self._ttl_mode is S3TtlMode.EXPIRES,
+            backend="S3KvStore",
         )
+        kwargs: dict[str, object] = {
+            "Bucket": self._bucket,
+            "Key": self._object_key(self._physical_key_blob(key)),
+            "Body": self.kvset.value_serde.serialize(value),
+        }
+        if ttl is not None:
+            secs = self.resolve_ttl_seconds(ttl)
+            kwargs["Expires"] = (
+                TTL_NONE_EXPIRES_AT
+                if secs is None
+                else datetime.fromtimestamp(time.time() + secs, tz=UTC)
+            )
+        self._client.put_object(**kwargs)  # type: ignore[arg-type]
 
     def delete(self, key: K) -> bool:
         object_key = self._object_key(self._physical_key_blob(key))
@@ -172,10 +218,12 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                     out[key] = value
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
         for chunk in chunk_sequence(list(items.items()), self.batch_size):
             for key, value in chunk:
-                self.set(key, value)
+                self.set(key, value, ttl=ttl)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0
@@ -238,7 +286,17 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         prefix = self._scan_prefix_blob(query.prefix)
         ops = self.kvset.blob_ops
         for object_key, last_modified in self._iter_object_keys():
-            if last_modified is not None and self._expired(last_modified):
+            expires: datetime | None = None
+            if self._ttl_mode is S3TtlMode.EXPIRES:
+                try:
+                    head = self._client.head_object(Bucket=self._bucket, Key=object_key)
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        continue
+                    raise
+                expires = self._expires_from_response(head)
+            if self._expired(last_modified, expires):
                 self._client.delete_object(Bucket=self._bucket, Key=object_key)
                 continue
             try:

@@ -22,11 +22,12 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
+# Virtual environments / lockfiles (library: consumers resolve from pyproject)
 .venv/
 venv/
 ENV/
 env/
+uv.lock
 
 # Test / type / coverage
 .pytest_cache/
