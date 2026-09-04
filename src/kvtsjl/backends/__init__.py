@@ -7,6 +7,7 @@ matching extra::
     from kvtsjl.backends.s3 import S3KvStore
     from kvtsjl.backends.gcs import GcsKvStore
     from kvtsjl.backends.azure import AzureBlobKvStore
+    from kvtsjl.backends.sql import SqlDbKvStore, SqliteSqlDbClientAdapter
 
 Index store leaf backends live under ``kvtsjl.backends.index``::
 

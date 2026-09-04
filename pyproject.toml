@@ -44,11 +44,12 @@ redis = ["redis>=5"]
 s3 = ["boto3>=1.34"]
 gcs = ["google-cloud-storage>=2.14"]
 azure = ["azure-storage-blob>=12"]
+sql = []
 chroma = ["chromadb>=0.5"]
 zstd = ["zstandard>=0.22"]
 lz4 = ["lz4>=4.3"]
 all = [
-  "kvtsjl[pydantic,redis,s3,gcs,azure,chroma,zstd,lz4]",
+  "kvtsjl[pydantic,redis,s3,gcs,azure,sql,chroma,zstd,lz4]",
 ]
 dev = [
   "pytest>=8",
@@ -96,6 +97,7 @@ markers = [
   "redis: tests using fakeredis",
   "gcs: tests using an in-memory fake GCS bucket",
   "azure: tests using an in-memory fake Azure Blob container",
+  "sql: tests using SqliteSqlDbClientAdapter (stdlib sqlite3)",
   "chroma: tests using ephemeral ChromaDB",
 ]
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import timedelta
+import sqlite3
 
 import boto3
 import fakeredis
@@ -15,6 +16,7 @@ from kvtsjl.backends.azure import AzureBlobKvStore
 from kvtsjl.backends.gcs import GcsKvStore
 from kvtsjl.backends.redis import RedisKvStore
 from kvtsjl.backends.s3 import S3KvStore
+from kvtsjl.backends.sql import SqlDbKvStore, SqliteSqlDbClientAdapter
 from tests.fake_azure import FakeAzureContainer
 from tests.fake_gcs import FakeGcsBucket
 
@@ -119,4 +121,25 @@ def azure_store(
         str_bytes_kvset,
         container=fake_azure_container,  # type: ignore[arg-type]
         key_prefix="app/",
+    )
+
+
+@pytest.fixture
+def sqlite_conn() -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(":memory:")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def sql_store(sqlite_conn: sqlite3.Connection) -> SqlDbKvStore[str, str]:
+    from tests.sql_helpers import ensure_sql_table, make_sql_kvset
+
+    sql_kvset = make_sql_kvset("test")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    return SqlDbKvStore(
+        sql_kvset,
+        adapter=SqliteSqlDbClientAdapter(sqlite_conn, db_name="test-sqlite"),
     )

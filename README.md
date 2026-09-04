@@ -4,7 +4,7 @@
 
 **kvtsjl** (*kv-tasjil*, from Arabic *tasjīl* تسجيل — “recording”) is a **typed, composable Python library for key–value storage with first-class indexing**.
 
-Define your domain keys and values once. Plug in Redis, S3, GCS, Azure Blob, filesystem, or in-memory backends without rewriting business logic. Attach exact, term, or vector indexes that stay in sync on every write—then search and hydrate documents from a single API.
+Define your domain keys and values once. Plug in Redis, S3, GCS, Azure Blob, SQL, filesystem, or in-memory backends without rewriting business logic. Attach exact, term, or vector indexes that stay in sync on every write—then search and hydrate documents from a single API.
 
 Python **3.12+** · **pyright strict** · **zero required dependencies** · Apache 2.0
 
@@ -48,7 +48,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
 - **Store algebra** — `.map` / `.imap` / `.imap_keys`, `.zip` / `.zip_with` / `.zip_as`, `.then` / `.then_with`, `.expand` / `.expand_map`, `.coalesce`, plus `.mirror()`, `.indexed()`, `.readonly()`, `.scoped()`
 - **Extensible adapters** — subclass `KvBackend` / `IndexBackend`; plug in custom serdes and binders
-- **Optional integrations** — Pydantic serdes, Redis, S3/MinIO, GCS, Azure Blob, ChromaDB
+- **Optional integrations** — Pydantic serdes, Redis, S3/MinIO, GCS, Azure Blob, SQL (SQLite shipped), ChromaDB
 
 ---
 
@@ -139,7 +139,7 @@ store.set("a", "v", ttl=TtlPolicy.none())   # never expire this key
 store.batch_set({"a": "v", "b": "w"}, ttl=TtlPolicy(ttl_duration=timedelta(minutes=5)))
 ```
 
-- **Memory** and **Redis flat keys** honor `ttl=` natively (no extra footprint).
+- **Memory**, **Redis flat keys**, and **SQL** honor `ttl=` natively (SQL via declared `updated_at` / `expires_at` columns).
 - **Redis HASH collections** raise `KvStoreTtlUnsupported` on explicit `ttl=` (expiry is hash-wide).
 - **S3 / GCS / Azure / filesystem** honor `ttl=` only when provisioned: `S3TtlMode.EXPIRES`, `GcsTtlMode.CUSTOM_TIME`, `AzureTtlMode.METADATA`, `FilesystemTtlMode.SIDECAR`. Those modes use a **standard header**, **platform field**, or an **explicit sidecar/metadata key**, not a hidden kvtsjl schema. Defaults (`OBJECT_TIME` / `MTIME`) raise on per-write `ttl=`.
 - **Expired entries** on get/scan: default `expiry_gc=ExpiryGc.LAZY_DELETE` removes them from the medium; pass `ExpiryGc.HIDE` to treat as absent and leave GC to bucket lifecycle / ops. Redis flat keys are deleted by the server (`EX`) regardless.
@@ -235,7 +235,7 @@ hits = store.search_hits(chroma, ChromaQuery(embedding=[1.0, 0.0], where={"tag":
 
 ## Extensibility
 
-kvtsjl ships adapters for memory, filesystem, Redis, S3, GCS, Azure Blob, and Chroma—but the design is **adapter-first**, not monolithic.
+kvtsjl ships adapters for memory, filesystem, Redis, S3, GCS, Azure Blob, SQL (SQLite), and Chroma—but the design is **adapter-first**, not monolithic.
 
 | Layer | Extend by | You provide |
 |-------|-----------|-------------|
@@ -441,6 +441,7 @@ Light laws: zip row iff any part; `then` is `other.get(self.get(k))`; expand mis
 | `S3KvStore` | | `s3` |
 | `GcsKvStore` | | `gcs` |
 | `AzureBlobKvStore` | | `azure` |
+| `SqlDbKvStore` + `SqliteSqlDbClientAdapter` | ✓ (stdlib) | `sql` |
 | `MemoryKeyIndex` / `MemoryTermIndex` | ✓ | |
 | `MemoryVectorIndex` | ✓ | |
 | `ChromaVectorIndex` | | `chroma` |
@@ -461,6 +462,7 @@ pip install 'kvtsjl[redis]'      # RedisKvStore
 pip install 'kvtsjl[s3]'         # S3KvStore (AWS S3 / MinIO)
 pip install 'kvtsjl[gcs]'        # GcsKvStore
 pip install 'kvtsjl[azure]'      # AzureBlobKvStore
+pip install 'kvtsjl[sql]'        # SqlDbKvStore (SQLite adapter in stdlib)
 pip install 'kvtsjl[chroma]'     # ChromaVectorIndex
 pip install 'kvtsjl[zstd]'       # SerDe.compressed("zstd", …)
 pip install 'kvtsjl[lz4]'        # SerDe.compressed("lz4", …)
@@ -475,6 +477,7 @@ pip install 'kvtsjl[dev]'        # tests, ruff, pyright + all extras
 | `s3` | `from kvtsjl.backends.s3 import S3KvStore` |
 | `gcs` | `from kvtsjl.backends.gcs import GcsKvStore` |
 | `azure` | `from kvtsjl.backends.azure import AzureBlobKvStore` |
+| `sql` | `from kvtsjl.backends.sql import SqlDbKvStore, SqliteSqlDbClientAdapter` |
 | `chroma` | `from kvtsjl.backends.index.chroma import ChromaVectorIndex, ChromaQuery` |
 | `zstd` | `SerDe.compressed("zstd", inner_bytes_serde)` |
 | `lz4` | `SerDe.compressed("lz4", inner_bytes_serde)` |
@@ -495,7 +498,7 @@ ruff check src tests          # import sorting enforced (rule I)
 ruff check --fix src tests    # auto-fix imports
 ```
 
-Integration tests use in-process fakes—no Docker required: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory bucket, `azure` → in-memory container, `chroma` → **EphemeralClient**.
+Integration tests use in-process fakes—no Docker required: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory bucket, `azure` → in-memory container, `sql` → **sqlite3** memory DB, `chroma` → **EphemeralClient**.
 
 ### Release
 
