@@ -6,6 +6,7 @@ matching extra::
     from kvtsjl.backends.redis import RedisKvStore
     from kvtsjl.backends.s3 import S3KvStore
     from kvtsjl.backends.gcs import GcsKvStore
+    from kvtsjl.backends.azure import AzureBlobKvStore
 
 Index store leaf backends live under ``kvtsjl.backends.index``::
 

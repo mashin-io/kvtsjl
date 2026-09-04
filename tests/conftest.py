@@ -11,9 +11,11 @@ from moto import mock_aws
 import pytest
 
 from kvtsjl import KvSet, SerDe, TtlPolicy
+from kvtsjl.backends.azure import AzureBlobKvStore
 from kvtsjl.backends.gcs import GcsKvStore
 from kvtsjl.backends.redis import RedisKvStore
 from kvtsjl.backends.s3 import S3KvStore
+from tests.fake_azure import FakeAzureContainer
 from tests.fake_gcs import FakeGcsBucket
 
 
@@ -98,5 +100,23 @@ def gcs_store(
     return GcsKvStore(
         str_bytes_kvset,
         bucket=fake_gcs_bucket,  # type: ignore[arg-type]
+        key_prefix="app/",
+    )
+
+
+@pytest.fixture
+def fake_azure_container() -> FakeAzureContainer:
+    return FakeAzureContainer()
+
+
+@pytest.fixture
+def azure_store(
+    str_bytes_kvset: KvSet[str, str, str, bytes],
+    fake_azure_container: FakeAzureContainer,
+) -> AzureBlobKvStore[str, str, str]:
+    # Test double; production passes azure.storage.blob.ContainerClient.
+    return AzureBlobKvStore(
+        str_bytes_kvset,
+        container=fake_azure_container,  # type: ignore[arg-type]
         key_prefix="app/",
     )

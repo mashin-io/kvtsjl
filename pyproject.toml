@@ -43,11 +43,12 @@ pydantic = ["pydantic>=2"]
 redis = ["redis>=5"]
 s3 = ["boto3>=1.34"]
 gcs = ["google-cloud-storage>=2.14"]
+azure = ["azure-storage-blob>=12"]
 chroma = ["chromadb>=0.5"]
 zstd = ["zstandard>=0.22"]
 lz4 = ["lz4>=4.3"]
 all = [
-  "kvtsjl[pydantic,redis,s3,gcs,chroma,zstd,lz4]",
+  "kvtsjl[pydantic,redis,s3,gcs,azure,chroma,zstd,lz4]",
 ]
 dev = [
   "pytest>=8",
@@ -94,6 +95,7 @@ markers = [
   "s3: tests using moto-simulated S3",
   "redis: tests using fakeredis",
   "gcs: tests using an in-memory fake GCS bucket",
+  "azure: tests using an in-memory fake Azure Blob container",
   "chroma: tests using ephemeral ChromaDB",
 ]
 
@@ -118,7 +120,8 @@ typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
 extraPaths = ["src"]
-# google-cloud-storage / some redis stubs leave Unknowns; keep value checks strict.
+# google-cloud-storage / azure-storage-blob / some redis stubs leave Unknowns;
+# keep value checks strict.
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportUnknownVariableType = false
