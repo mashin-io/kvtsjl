@@ -152,18 +152,18 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return cast(K, values)
 
     def _leaf_prefix_map(self, key_prefix: K | None) -> dict[str, str]:
-        if key_prefix is None:
-            return {}
         sk = self._sql_kvset
         fields = sk.leaf_key_fields
-        if len(fields) == 1:
-            if sk.scope_fields:
-                blob = self.kvset.key_serde.serialize(key_prefix)
-                text = str(blob)
-                return {fields[0]: text} if text else {}
-            # Legacy string in-key prefix (includes scope blob prefix).
+        if len(fields) == 1 and not sk.scope_fields:
+            # Legacy: scope is embedded in the leaf string key.
             blob = self._scan_prefix_blob(key_prefix)
             return {fields[0]: blob} if blob else {}
+        if key_prefix is None:
+            return {}
+        if len(fields) == 1:
+            blob = self.kvset.key_serde.serialize(key_prefix)
+            text = str(blob)
+            return {fields[0]: text} if text else {}
         if isinstance(key_prefix, Mapping):
             out: dict[str, str] = {}
             for f in fields:
@@ -333,3 +333,35 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 key_fields=sk.key_fields,
                 keys=expired_keys,
             )
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        sk = self._sql_kvset
+        exact = self._scope_key_row(require_all=False)
+        prefixes = self._leaf_prefix_map(None)
+        deleted: list[K] = []
+        expired_rows: list[SqlDbRow] = []
+        for row in self._adapter.scan_by_key_parts(
+            table=self._table,
+            columns=sk.select_columns(),
+            key_fields=sk.key_fields,
+            exact=exact,
+            prefixes=prefixes,
+        ):
+            if len(deleted) >= max_entries:
+                break
+            if not self._row_expired(row):
+                continue
+            decoded = self._decode_leaf_key(row)
+            if decoded is None:
+                continue
+            expired_rows.append({f: row[f] for f in sk.key_fields})
+            deleted.append(decoded)
+        if expired_rows:
+            self._adapter.delete_by_keys(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=expired_rows,
+            )
+        return deleted

@@ -142,7 +142,7 @@ store.batch_set({"a": "v", "b": "w"}, ttl=TtlPolicy(ttl_duration=timedelta(minut
 - **Memory**, **Redis flat keys**, and **SQL** honor `ttl=` natively (SQL via declared `updated_at` / `expires_at` columns).
 - **Redis HASH collections** raise `KvStoreTtlUnsupported` on explicit `ttl=` (expiry is hash-wide).
 - **S3 / GCS / Azure / filesystem** honor `ttl=` only when provisioned: `S3TtlMode.EXPIRES`, `GcsTtlMode.CUSTOM_TIME`, `AzureTtlMode.METADATA`, `FilesystemTtlMode.SIDECAR`. Those modes use a **standard header**, **platform field**, or an **explicit sidecar/metadata key**, not a hidden kvtsjl schema. Defaults (`OBJECT_TIME` / `MTIME`) raise on per-write `ttl=`.
-- **Expired entries** on get/scan: default `expiry_gc=ExpiryGc.LAZY_DELETE` removes them from the medium; pass `ExpiryGc.HIDE` to treat as absent and leave GC to bucket lifecycle / ops. Redis flat keys are deleted by the server (`EX`) regardless.
+- **Expired entries** on get/scan: default `expiry_gc=ExpiryGc.LAZY_DELETE` removes them from the medium; pass `ExpiryGc.HIDE` to treat as absent and leave cleanup to ops. Call `store.gc_expired(max_entries=N)` on a schedule (or on demand) to delete up to `N` expired entries under the current scope—works even with `HIDE`. Redis flat keys are removed by the server (`EX`); `gc_expired` is a no-op there.
 
 Compress wire values at the leaf (`gzip` / `zlib` in core; `zstd` / `lz4` via optional extras):
 

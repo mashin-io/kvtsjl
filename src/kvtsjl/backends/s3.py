@@ -322,3 +322,37 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                 yield decoded, self.kvset.value_serde.deserialize(raw)
             else:
                 yield decoded, None
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        prefix = self._scan_prefix_blob(None)
+        ops = self.kvset.blob_ops
+        deleted: list[K] = []
+        for object_key, last_modified in self._iter_object_keys():
+            if len(deleted) >= max_entries:
+                break
+            expires: datetime | None = None
+            if self._ttl_mode is S3TtlMode.EXPIRES:
+                try:
+                    head = self._client.head_object(Bucket=self._bucket, Key=object_key)
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        continue
+                    raise
+                expires = self._expires_from_response(head)
+            if not self._expired(last_modified, expires):
+                continue
+            try:
+                pk = self._physical_from_object_key(object_key)
+            except ValueError:
+                continue
+            if not ops.startswith(pk, prefix):
+                continue
+            decoded = self._decode_key_from_physical(pk)
+            if decoded is None:
+                continue
+            self._client.delete_object(Bucket=self._bucket, Key=object_key)
+            deleted.append(decoded)
+        return deleted

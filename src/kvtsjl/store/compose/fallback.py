@@ -72,6 +72,16 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._primary._scan_entries(query)
 
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        deleted = self._primary._gc_expired_keys(max_entries=max_entries)
+        remaining = max_entries - len(deleted)
+        if remaining < 1:
+            return deleted
+        deleted.extend(self._secondary._gc_expired_keys(max_entries=remaining))
+        return deleted
+
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return FallbackReadKvStore(
             self._primary._clone_with_scope(scope),

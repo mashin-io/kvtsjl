@@ -84,6 +84,12 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._underlying._scan_entries(query)
 
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        keys = self._underlying._gc_expired_keys(max_entries=max_entries)
+        if keys:
+            self._sync_batch_delete(keys)
+        return keys
+
     def _clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
         return IndexedKvStore(
             self._underlying._clone_with_scope(scope),

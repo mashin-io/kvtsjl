@@ -69,6 +69,26 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, tuple[Any, ...]]:
         return ZippedKvStore([p._clone_with_scope(scope) for p in self._parts])
 
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        deleted: list[K] = []
+        remaining = max_entries
+        for part in self._parts:
+            if remaining < 1:
+                break
+            part_keys = part._gc_expired_keys(max_entries=remaining)
+            deleted.extend(part_keys)
+            remaining = max_entries - len(deleted)
+        # Dedupe while preserving order (same K may be GC'd in multiple parts).
+        seen: set[K] = set()
+        unique: list[K] = []
+        for key in deleted:
+            if key not in seen:
+                seen.add(key)
+                unique.append(key)
+        return unique[:max_entries]
+
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr
 
@@ -121,6 +141,24 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
             self._ctor,
             {name: store._clone_with_scope(scope) for name, store in self._parts.items()},
         )
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        deleted: list[K] = []
+        remaining = max_entries
+        for part in self._parts.values():
+            if remaining < 1:
+                break
+            deleted.extend(part._gc_expired_keys(max_entries=remaining))
+            remaining = max_entries - len(deleted)
+        seen: set[K] = set()
+        unique: list[K] = []
+        for key in deleted:
+            if key not in seen:
+                seen.add(key)
+                unique.append(key)
+        return unique[:max_entries]
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, stores_mapping_repr

@@ -5,7 +5,8 @@ Install with::
     pip install 'kvtsjl[redis]'
 
 Flat keys use Redis ``EX`` (server-side delete). ``ExpiryGc`` does not apply —
-expired keys are already gone before get/scan.
+expired keys are already gone before get/scan. ``gc_expired`` is a no-op (returns
+``0``); the server removes expired flat keys.
 """
 
 from __future__ import annotations

@@ -33,6 +33,9 @@ class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
     def batch_delete(self, keys: Sequence[K]) -> int:
         raise KvStoreReadOnlyError("batch_delete on readonly store")
 
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        raise KvStoreReadOnlyError("gc_expired on readonly store")
+
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._underlying._scan_entries(query)
 

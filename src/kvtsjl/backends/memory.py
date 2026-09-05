@@ -149,3 +149,25 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
                 yield decoded, self.kvset.value_serde.deserialize(entry.value_blob)
             else:
                 yield decoded, None
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        prefix = self._scan_prefix_blob(None)
+        ops = self.kvset.blob_ops
+        bucket = self._bucket()
+        deleted: list[K] = []
+        for pk in list(bucket.keys()):
+            if len(deleted) >= max_entries:
+                break
+            entry = bucket.get(pk)
+            if entry is None or not self._expired(entry):
+                continue
+            if not ops.startswith(pk, prefix):
+                continue
+            decoded = self._decode_key_from_physical(pk)
+            if decoded is None:
+                continue
+            bucket.pop(pk, None)
+            deleted.append(decoded)
+        return deleted

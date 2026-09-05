@@ -77,3 +77,45 @@ def test_memory_expiry_gc_hide() -> None:
         frozen.move_to("2024-01-01 12:01:00")
         assert store.get("a") is None
         assert pk in store._bucket()
+
+
+def test_memory_gc_expired_effort_and_hide() -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    store = MemoryKvStore(kvset, expiry_gc=ExpiryGc.HIDE)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.set("a", "1")
+        store.set("b", "2")
+        store.set("live", "3", ttl=TtlPolicy.none())
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.gc_expired(max_entries=1) == 1
+        assert store.get("live") == "3"
+        remaining_expired = sum(
+            1 for k in ("a", "b") if store._physical_key_blob(k) in store._bucket()
+        )
+        assert remaining_expired == 1
+        assert store.gc_expired(max_entries=10) == 1
+        assert store.get("a") is None
+        assert store.get("b") is None
+        assert store.get("live") == "3"
+        assert store.gc_expired(max_entries=10) == 0
+
+
+def test_memory_gc_expired_rejects_bad_effort(
+    store: MemoryKvStore[str, str, str, bytes],
+) -> None:
+    with pytest.raises(ValueError, match="max_entries"):
+        store.gc_expired(max_entries=0)
+
+
+def test_readonly_gc_expired_raises(
+    store: MemoryKvStore[str, str, str, bytes],
+) -> None:
+    from kvtsjl.exceptions import KvStoreReadOnlyError
+
+    with pytest.raises(KvStoreReadOnlyError):
+        store.readonly().gc_expired(max_entries=1)

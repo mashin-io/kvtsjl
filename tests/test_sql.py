@@ -175,3 +175,44 @@ def test_sql_scope_as_column_single_leaf(sqlite_conn: sqlite3.Connection) -> Non
     assert eu.get("a") == "eu-a"
     assert sorted(us.list()) == ["a"]
     assert sorted(eu.scan(include_values=True)) == [("a", "eu-a")]
+
+
+@pytest.mark.sql
+def test_sql_gc_expired(sqlite_conn: sqlite3.Connection) -> None:
+    sql_kvset = make_sql_kvset(
+        "gc",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(
+            sql_kvset,
+            adapter=SqliteSqlDbClientAdapter(sqlite_conn),
+            expiry_gc=ExpiryGc.HIDE,
+        )
+        store.set("a", "1")
+        store.set("b", "2")
+        store.set("live", "3", ttl=TtlPolicy.none())
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.get("a") is None
+        assert (
+            sqlite_conn.execute(
+                f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+            ).fetchone()[0]
+            == 3
+        )
+        assert store.gc_expired(max_entries=1) == 1
+        assert (
+            sqlite_conn.execute(
+                f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+            ).fetchone()[0]
+            == 2
+        )
+        assert store.gc_expired(max_entries=10) == 1
+        assert store.get("live") == "3"
+        assert (
+            sqlite_conn.execute(
+                f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+            ).fetchone()[0]
+            == 1
+        )

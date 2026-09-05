@@ -277,3 +277,27 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
                 yield decoded, self.kvset.value_serde.deserialize(raw)
             else:
                 yield decoded, None
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        prefix = self._scan_prefix_blob(None)
+        ops = self.kvset.blob_ops
+        deleted: list[K] = []
+        for blob in self._bucket.list_blobs(prefix=self._collection_prefix):
+            if len(deleted) >= max_entries:
+                break
+            if not self._expired(blob):
+                continue
+            try:
+                pk = self._physical_from_object_key(blob.name)
+            except ValueError:
+                continue
+            if not ops.startswith(pk, prefix):
+                continue
+            decoded = self._decode_key_from_physical(pk)
+            if decoded is None:
+                continue
+            blob.delete()
+            deleted.append(decoded)
+        return deleted

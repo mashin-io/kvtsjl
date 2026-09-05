@@ -196,6 +196,26 @@ class KvStore[K, V](KeyMap[K, V], ABC):
             f"{type(self).__name__} must implement _clone_with_scope"
         )
 
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        """Delete up to ``max_entries`` expired entries; return deleted keys.
+
+        Default is a no-op. Leaf backends with TTL override this. Logical
+        wrappers forward (or fan-out) to underlying stores.
+        """
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        return []
+
+    def gc_expired(self, *, max_entries: int) -> int:
+        """Delete expired entries under this scope, up to ``max_entries``.
+
+        Returns the number deleted. Suitable for cron / on-demand cleanup.
+        ``max_entries`` caps deleted count (not merely scanned count).
+        Explicit GC always deletes expired entries it finds (even if
+        ``ExpiryGc.HIDE`` is set for lazy get/scan).
+        """
+        return len(self._gc_expired_keys(max_entries=max_entries))
+
     def readonly(self) -> KvStore[K, V]:
         from kvtsjl.store.compose.readonly import ReadonlyKvStore
 

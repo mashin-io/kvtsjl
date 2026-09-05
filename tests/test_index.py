@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 
+from freezegun import freeze_time
 import pytest
 
 from kvtsjl import (
@@ -16,6 +18,7 @@ from kvtsjl import (
     MemoryKvStore,
     MemoryTermIndex,
     SerDe,
+    TtlPolicy,
 )
 from tests.conformance import assert_basic_crud
 
@@ -223,3 +226,23 @@ def test_index_hit_metadata() -> None:
     m2 = next(h.meta for h in store.search_hits(ranked, "#x") if h.key == "2")
     assert m2 == RankMeta(score=0.95, title="BetaPrime")
     assert store.get("2") == "BetaPrime|#x|0.0"
+
+
+def test_indexed_gc_expired_syncs_indexes() -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl-idx",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    keys = MemoryKeyIndex[str, str]()
+    store = MemoryKvStore(kvset).indexed(keys)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.set("gone", "x")
+        store.set("stay", "y", ttl=TtlPolicy.none())
+        assert store.search("gone") == ["x"]
+        frozen.move_to("2024-01-01 12:01:00")
+        assert store.gc_expired(max_entries=10) == 1
+        assert store.search("gone") == []
+        assert store.search("stay") == ["y"]
+        assert store.get("stay") == "y"

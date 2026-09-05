@@ -52,6 +52,18 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
             self._right._clone_with_scope(scope),
         )
 
+    def gc_expired(self, *, max_entries: int) -> int:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        n = self._left.gc_expired(max_entries=max_entries)
+        remaining = max_entries - n
+        if remaining >= 1:
+            n += self._right.gc_expired(max_entries=remaining)
+        return n
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._left._gc_expired_keys(max_entries=max_entries)
+
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr
 
@@ -104,6 +116,18 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
             self._key_of,
             self._right._clone_with_scope(scope),
         )
+
+    def gc_expired(self, *, max_entries: int) -> int:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        n = self._left.gc_expired(max_entries=max_entries)
+        remaining = max_entries - n
+        if remaining >= 1:
+            n += self._right.gc_expired(max_entries=remaining)
+        return n
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._left._gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr

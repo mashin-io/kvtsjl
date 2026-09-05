@@ -101,3 +101,12 @@ def test_redis_hash_explicit_ttl_raises(
     store = RedisKvStore.hash_collection(kvset, fake_redis)
     with pytest.raises(KvStoreTtlUnsupported):
         store.set("a", "v", ttl=TtlPolicy.hourly())
+
+
+@pytest.mark.redis
+def test_redis_gc_expired_noop(
+    redis_flat_store: RedisKvStore[str, str, str, bytes, None],
+) -> None:
+    redis_flat_store.set("a", "v")
+    assert redis_flat_store.gc_expired(max_entries=10) == 0
+    assert redis_flat_store.get("a") == "v"

@@ -14,7 +14,11 @@ TTL_NONE_EXPIRES_AT = datetime(2099, 12, 31, 23, 59, 59, tzinfo=UTC)
 
 
 class ExpiryGc(str, Enum):
-    """What to do when a leaf observes an expired entry on get/scan."""
+    """What to do when a leaf observes an expired entry on get/scan.
+
+    Explicit ``KvStore.gc_expired`` always deletes expired entries it finds,
+    regardless of this setting.
+    """
 
     LAZY_DELETE = "lazy_delete"
     """Delete the expired object/file from the medium (default)."""

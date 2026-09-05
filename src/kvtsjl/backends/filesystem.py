@@ -129,36 +129,39 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         path.unlink(missing_ok=True)
         self._expires_sidecar(path).unlink(missing_ok=True)
 
-    def _read_live(self, path: Path) -> bytes | None:
-        """Read file bytes, or ``None`` if missing / TTL-expired (lazy delete)."""
+    def _path_is_expired(self, path: Path) -> bool:
         if not path.is_file():
-            return None
+            return False
         sidecar = self._expires_sidecar(path)
         if sidecar.is_file():
             try:
                 token = sidecar.read_text(encoding="utf-8").strip()
             except OSError:
-                return None
-            if token != "none":
-                try:
-                    expires_at = float(token)
-                except ValueError:
-                    expires_at = 0.0
-                if time.time() >= expires_at:
-                    if self._expiry_gc is ExpiryGc.LAZY_DELETE:
-                        self._delete_with_sidecar(path)
-                    return None
-        else:
-            ttl = self.ttl_seconds()
-            if ttl is not None:
-                try:
-                    mtime = path.stat().st_mtime
-                except OSError:
-                    return None
-                if time.time() >= mtime + ttl:
-                    if self._expiry_gc is ExpiryGc.LAZY_DELETE:
-                        self._delete_with_sidecar(path)
-                    return None
+                return False
+            if token == "none":
+                return False
+            try:
+                expires_at = float(token)
+            except ValueError:
+                expires_at = 0.0
+            return time.time() >= expires_at
+        ttl = self.ttl_seconds()
+        if ttl is None:
+            return False
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        return time.time() >= mtime + ttl
+
+    def _read_live(self, path: Path) -> bytes | None:
+        """Read file bytes, or ``None`` if missing / TTL-expired (lazy delete)."""
+        if not path.is_file():
+            return None
+        if self._path_is_expired(path):
+            if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                self._delete_with_sidecar(path)
+            return None
         try:
             return path.read_bytes()
         except OSError:
@@ -257,3 +260,27 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
                 yield decoded, self.kvset.value_serde.deserialize(raw)
             else:
                 yield decoded, None
+
+    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        prefix = self._scan_prefix_blob(None)
+        ops = self.kvset.blob_ops
+        deleted: list[K] = []
+        for path in list(self._iter_data_files()):
+            if len(deleted) >= max_entries:
+                break
+            if not self._path_is_expired(path):
+                continue
+            try:
+                pk = self._physical_from_path(path)
+            except (ValueError, OSError):
+                continue
+            if not ops.startswith(pk, prefix):
+                continue
+            decoded = self._decode_key_from_physical(pk)
+            if decoded is None:
+                continue
+            self._delete_with_sidecar(path)
+            deleted.append(decoded)
+        return deleted
