@@ -14,6 +14,10 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
   metadata footprint.
 
 Use ``expiry_gc=HIDE`` to treat expired blobs as absent without deleting them.
+
+``batch_get`` runs concurrent point ``get`` capped by ``io_concurrency``
+(default 32). There is no multi-blob content download API; concurrency is
+client-side.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from typing import TYPE_CHECKING, cast
 
 from azure.core.exceptions import ResourceNotFoundError
 
-from kvtsjl.batching import chunk_sequence
+from kvtsjl.batching import DEFAULT_IO_CONCURRENCY, chunk_sequence, map_concurrent
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -84,6 +88,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
     - Collection = blob prefix ``{key_prefix}{name}/v{version}/``.
     - Pass an ``azure.storage.blob.ContainerClient``.
     - TTL: see ``ttl_mode`` / ``AzureTtlMode``.
+    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 32).
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -99,7 +104,10 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
         batch_size: int = 500,
+        io_concurrency: int = DEFAULT_IO_CONCURRENCY,
     ) -> None:
+        if io_concurrency < 1:
+            raise ValueError(f"io_concurrency must be >= 1, got {io_concurrency}")
         base = _normalize_prefix(key_prefix)
         if binder is None and binding is None:
             binder = NativeCollectionBinder[KBLOB, str](
@@ -118,6 +126,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         self._key_prefix = base
         self._ttl_mode = ttl_mode
         self._expiry_gc = expiry_gc
+        self.io_concurrency = io_concurrency
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
@@ -131,6 +140,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
+            io_concurrency=self.io_concurrency,
         )
 
     def _object_key(self, physical_key: KBLOB) -> str:
@@ -213,10 +223,14 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         return True
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        if not keys:
+            return {}
         out: dict[K, V] = {}
         for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                value = self.get(key)
+            values = map_concurrent(
+                chunk, self.get, max_workers=self.io_concurrency
+            )
+            for key, value in zip(chunk, values, strict=True):
                 if value is not None:
                     out[key] = value
         return out

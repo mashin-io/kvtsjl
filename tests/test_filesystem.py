@@ -31,6 +31,46 @@ def test_filesystem_batch(store: FilesystemKvStore[str, str, str]) -> None:
     assert_batch_ops(store)
 
 
+def test_filesystem_batch_get_matches_point_get(
+    str_bytes_kvset: KvSet[str, str, str, bytes], tmp_path: Path
+) -> None:
+    store = FilesystemKvStore(str_bytes_kvset, root=tmp_path, io_concurrency=4)
+    store.set("a", "va")
+    store.set("c", "vc")
+    keys = ["a", "b", "c", "missing"]
+    batched = store.batch_get(keys)
+    for key in keys:
+        assert batched.get(key) == store.get(key)
+    assert "b" not in batched
+    assert "missing" not in batched
+    assert store.batch_get([]) == {}
+
+
+def test_filesystem_batch_get_concurrent_lazy_delete_idempotent(tmp_path: Path) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    store = FilesystemKvStore(kvset, root=tmp_path, io_concurrency=8)
+    store.set("expired", "gone")
+    path = next(p for p in tmp_path.rglob("*") if p.is_file())
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    # Duplicate keys force overlapping workers on the same expired object.
+    assert store.batch_get(["expired"] * 16) == {}
+    assert store.get("expired") is None
+    assert not path.exists()
+
+
+def test_filesystem_io_concurrency_rejects_zero(
+    str_bytes_kvset: KvSet[str, str, str, bytes], tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="io_concurrency"):
+        FilesystemKvStore(str_bytes_kvset, root=tmp_path, io_concurrency=0)
+
+
 def test_filesystem_scan_and_scope(store: FilesystemKvStore[str, str, str]) -> None:
     assert_scan_and_scope(store)
 

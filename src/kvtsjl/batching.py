@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_BATCH_SIZE = 500
+DEFAULT_IO_CONCURRENCY = 32
+"""Default concurrent GETs for cloud object stores (S3 / GCS / Azure)."""
+
+DEFAULT_FS_IO_CONCURRENCY = 8
+"""Default concurrent GETs for ``FilesystemKvStore`` (local/dev-friendlier)."""
 
 
 def iter_chunks[T](iterable: Iterable[T], size: int) -> Iterator[list[T]]:
@@ -26,3 +32,25 @@ def chunk_sequence[T](items: Sequence[T], size: int) -> Iterator[Sequence[T]]:
         raise ValueError("chunk size must be >= 1")
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def map_concurrent[T, R](
+    items: Sequence[T],
+    fn: Callable[[T], R],
+    *,
+    max_workers: int,
+) -> list[R]:
+    """Apply ``fn`` to each item; return results in input order.
+
+    ``max_workers <= 1`` or a single item runs inline (no thread pool).
+    Worker exceptions propagate like a serial mid-batch failure.
+    """
+    if max_workers < 1:
+        raise ValueError(f"max_workers must be >= 1, got {max_workers}")
+    if not items:
+        return []
+    if max_workers <= 1 or len(items) <= 1:
+        return [fn(item) for item in items]
+    workers = min(max_workers, len(items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))

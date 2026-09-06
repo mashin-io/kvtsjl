@@ -14,6 +14,9 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
 
 This is not S3 Lifecycle (day-granularity bucket rules). Use ``expiry_gc=HIDE``
 to treat expired objects as absent without deleting them on get/scan.
+
+``batch_get`` runs concurrent point ``get`` capped by ``io_concurrency``
+(default 32). There is no multi-key GetObject API; concurrency is client-side.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
-from kvtsjl.batching import chunk_sequence
+from kvtsjl.batching import DEFAULT_IO_CONCURRENCY, chunk_sequence, map_concurrent
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -87,6 +90,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - Collection = key prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a boto3 S3 client (configure ``endpoint_url`` for MinIO).
     - TTL: see ``ttl_mode`` / ``S3TtlMode``.
+    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 32).
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -103,7 +107,10 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
         batch_size: int = 500,
+        io_concurrency: int = DEFAULT_IO_CONCURRENCY,
     ) -> None:
+        if io_concurrency < 1:
+            raise ValueError(f"io_concurrency must be >= 1, got {io_concurrency}")
         base = _normalize_prefix(key_prefix)
         if binder is None and binding is None:
             binder = NativeCollectionBinder[KBLOB, str](
@@ -123,6 +130,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         self._key_prefix = base
         self._ttl_mode = ttl_mode
         self._expiry_gc = expiry_gc
+        self.io_concurrency = io_concurrency
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
@@ -137,6 +145,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
+            io_concurrency=self.io_concurrency,
         )
 
     def _object_key(self, physical_key: KBLOB) -> str:
@@ -216,10 +225,14 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         return True
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        if not keys:
+            return {}
         out: dict[K, V] = {}
         for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                value = self.get(key)
+            values = map_concurrent(
+                chunk, self.get, max_workers=self.io_concurrency
+            )
+            for key, value in zip(chunk, values, strict=True):
                 if value is not None:
                     out[key] = value
         return out

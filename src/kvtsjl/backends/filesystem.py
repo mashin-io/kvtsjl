@@ -3,6 +3,9 @@
 Default ``ttl_mode=MTIME`` is footprint-free: one data file per key, TTL is
 ``mtime + KvSet.ttl_policy``. Opt in to ``SIDECAR`` only when you need per-write
 ``ttl=`` (writes ``{path}.expires``).
+
+``batch_get`` runs concurrent point ``get`` capped by ``io_concurrency``
+(default 8). For local/dev or FS-heavy zip with SQL, pass ``io_concurrency=1``.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from pathlib import Path
 import time
 from typing import cast
 
-from kvtsjl.batching import chunk_sequence
+from kvtsjl.batching import DEFAULT_FS_IO_CONCURRENCY, chunk_sequence, map_concurrent
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -65,6 +68,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
       paths are derived via ``KeyLayout``.
     - TTL: see ``ttl_mode`` / ``FilesystemTtlMode`` (default ``mtime``, no sidecars).
     - ``expiry_gc``: delete expired files on get/scan (default) or only hide them.
+    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 8).
     - Scan is supported only for ``KeyLayout.LITERAL`` (path ↔ key is reversible).
     """
 
@@ -79,7 +83,10 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         binder: NamespaceBinder[KBLOB, str] | None = None,
         binding: CollectionBinding[KBLOB, str] | None = None,
         batch_size: int = 500,
+        io_concurrency: int = DEFAULT_FS_IO_CONCURRENCY,
     ) -> None:
+        if io_concurrency < 1:
+            raise ValueError(f"io_concurrency must be >= 1, got {io_concurrency}")
         root_path = Path(root)
         if binder is None and binding is None:
             binder = NativeCollectionBinder[KBLOB, str](
@@ -97,6 +104,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         self._root = root_path
         self._ttl_mode = ttl_mode
         self._expiry_gc = expiry_gc
+        self.io_concurrency = io_concurrency
         assert self._binding.collection is not None
         self._collection_dir = Path(self._binding.collection)
         self._collection_dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +118,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             scope=scope,
             binding=self._binding,
             batch_size=self.batch_size,
+            io_concurrency=self.io_concurrency,
         )
 
     def _path_for_physical(self, physical_key: KBLOB) -> Path:
@@ -195,10 +204,14 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         return existed
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        if not keys:
+            return {}
         out: dict[K, V] = {}
         for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                value = self.get(key)
+            values = map_concurrent(
+                chunk, self.get, max_workers=self.io_concurrency
+            )
+            for key, value in zip(chunk, values, strict=True):
                 if value is not None:
                     out[key] = value
         return out
