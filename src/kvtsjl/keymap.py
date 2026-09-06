@@ -15,8 +15,10 @@ class KeyMap[K, T](ABC):
 
     ``KvStore`` uses ``T = V`` (documents). ``Index`` uses ``T = M`` (per-key
     metadata; ``set`` is metadata-only and typically errors if the key is not
-    already indexed). Batch methods default to looping; override for native
-    bulk APIs.
+    already indexed). Default ``batch_get`` / ``batch_set`` / ``batch_delete``
+    may loop over point ops; overrides should prefer native bulk. Composed maps
+    (``zip``, ``fallback``, ``mirror``, …) must delegate to each part's
+    ``batch_get`` (etc.), not reimplement ``N×get``.
 
     Algebraic operators (``map``, ``zip``, ``then``, ``expand``, …) return
     derived ``KeyMap`` views; see ``kvtsjl.keymap_algebra``.

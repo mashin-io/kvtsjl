@@ -24,6 +24,10 @@ class KvStore[K, V](KeyMap[K, V], ABC):
 
     Physical schema (``KvSet``, blob serdes, collection binding) lives on
     ``KvBackend`` / ``PhysicalBackend`` only. Logical wrappers delegate I/O to a leaf.
+
+    Batch contract: default ``batch_get`` may loop; leaf overrides should use
+    native bulk. Composed stores (``zip``, ``fallback``, ``mirror``, …) must
+    fan out to part ``batch_get``, not ``N×get``.
     """
 
     scope: Scope

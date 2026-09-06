@@ -37,6 +37,24 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
     def delete(self, key: K) -> bool:
         return any(part.delete(key) for part in self._parts)
 
+    def batch_get(self, keys: Sequence[K]) -> dict[K, tuple[Any, ...]]:
+        """Fan out to each part's ``batch_get`` once; assemble like point ``get``.
+
+        Empty ``keys`` returns ``{}`` without calling parts. Duplicate keys are
+        collapsed (order-preserving) before part calls; the result is a dict so
+        duplicates would last-win either way.
+        """
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        part_maps = [part.batch_get(unique) for part in self._parts]
+        out: dict[K, tuple[Any, ...]] = {}
+        for key in unique:
+            values = tuple(pm.get(key) for pm in part_maps)
+            if not all(v is None for v in values):
+                out[key] = values
+        return out
+
 
 class ZipWithKeyMap[K, V](KeyMap[K, V]):
     """``zip`` assembled via a dataclass (or constructor) with optional fields."""
@@ -82,3 +100,23 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
 
     def delete(self, key: K) -> bool:
         return any(part.delete(key) for part in self._parts.values())
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        """Fan out to each part's ``batch_get`` once; assemble like point ``get``.
+
+        Empty ``keys`` returns ``{}`` without calling parts. Duplicate keys are
+        collapsed (order-preserving) before part calls; the result is a dict so
+        duplicates would last-win either way.
+        """
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        part_found = {
+            name: part.batch_get(unique) for name, part in self._parts.items()
+        }
+        out: dict[K, V] = {}
+        for key in unique:
+            kwargs = {name: part_found[name].get(key) for name in self._field_names}
+            if not all(v is None for v in kwargs.values()):
+                out[key] = self._ctor(**kwargs)
+        return out

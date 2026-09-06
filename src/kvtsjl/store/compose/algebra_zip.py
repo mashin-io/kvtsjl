@@ -43,6 +43,9 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def get(self, key: K) -> tuple[Any, ...] | None:
         return self._view.get(key)
 
+    def batch_get(self, keys: Sequence[K]) -> dict[K, tuple[Any, ...]]:
+        return self._view.batch_get(keys)
+
     def set(
         self, key: K, value: tuple[Any, ...], *, ttl: TtlPolicy | None = None
     ) -> None:
@@ -115,6 +118,9 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
 
     def get(self, key: K) -> V | None:
         return self._view.get(key)
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        return self._view.batch_get(keys)
 
     def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
         for name in self._view._field_names:
