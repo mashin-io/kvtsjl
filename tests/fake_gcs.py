@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import TracebackType
 
 
 @dataclass
@@ -42,9 +44,29 @@ class FakeGcsBlob:
         self._store.pop(self.name, None)
 
 
+class _FakeGcsBatch(AbstractContextManager[None]):
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
+
+
+@dataclass
+class FakeGcsClient:
+    def batch(self) -> _FakeGcsBatch:
+        return _FakeGcsBatch()
+
+
 @dataclass
 class FakeGcsBucket:
     _objects: dict[str, _StoredObject] = field(default_factory=dict)
+    client: FakeGcsClient = field(default_factory=FakeGcsClient)
 
     def blob(self, blob_name: str) -> FakeGcsBlob:
         return FakeGcsBlob(name=blob_name, _store=self._objects)
@@ -60,6 +82,9 @@ class FakeGcsBucket:
             updated=stored.updated,
             time_created=stored.time_created,
         )
+
+    def delete_blob(self, blob_name: str) -> None:
+        self._objects.pop(blob_name, None)
 
     def list_blobs(self, *, prefix: str | None = None) -> Iterator[FakeGcsBlob]:
         prefix = prefix or ""

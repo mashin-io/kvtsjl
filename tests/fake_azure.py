@@ -88,6 +88,12 @@ class FakeAzureContainer:
     def get_blob_client(self, blob: str) -> FakeAzureBlobClient:
         return FakeAzureBlobClient(name=blob, _store=self._objects)
 
+    def delete_blobs(self, *blobs: str | FakeAzureBlobItem) -> Iterator[None]:
+        for blob in blobs:
+            name = blob if isinstance(blob, str) else blob.name
+            self._objects.pop(name, None)
+            yield None
+
     def list_blobs(
         self, *, name_starts_with: str | None = None
     ) -> Iterator[FakeAzureBlobItem]:

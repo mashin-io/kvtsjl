@@ -16,8 +16,8 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
 Use ``expiry_gc=HIDE`` to treat expired blobs as absent without deleting them.
 
 ``batch_get`` / ``batch_set`` run concurrent point ops capped by ``io_concurrency``
-(default 32). There is no multi-blob content upload/download API; concurrency is
-client-side.
+(default 32). ``batch_delete`` uses Azure ``delete_blobs`` (up to 256/request) after
+a concurrent existence probe so the return count matches point ``delete``.
 """
 
 from __future__ import annotations
@@ -30,7 +30,12 @@ from typing import TYPE_CHECKING, cast
 
 from azure.core.exceptions import ResourceNotFoundError
 
-from kvtsjl.batching import DEFAULT_IO_CONCURRENCY, chunk_sequence, map_concurrent
+from kvtsjl.batching import (
+    AZURE_DELETE_BLOBS_MAX,
+    DEFAULT_IO_CONCURRENCY,
+    chunk_sequence,
+    map_concurrent,
+)
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -88,8 +93,8 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
     - Collection = blob prefix ``{key_prefix}{name}/v{version}/``.
     - Pass an ``azure.storage.blob.ContainerClient``.
     - TTL: see ``ttl_mode`` / ``AzureTtlMode``.
-    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
-      (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs / existence probes (default 32).
+      ``batch_delete`` uses native ``delete_blobs``.
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -250,11 +255,28 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
         deleted = 0
-        for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                if self.delete(key):
-                    deleted += 1
+        limit = min(self.batch_size, AZURE_DELETE_BLOBS_MAX)
+        for chunk in chunk_sequence(unique, limit):
+
+            def _exists(key: K) -> str | None:
+                object_key = self._object_key(self._physical_key_blob(key))
+                blob = self._container.get_blob_client(object_key)
+                try:
+                    blob.get_blob_properties()
+                except ResourceNotFoundError:
+                    return None
+                return object_key
+
+            found = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
+            to_delete = [name for name in found if name is not None]
+            if to_delete:
+                # Consume the response iterator so the batch request completes.
+                list(self._container.delete_blobs(*to_delete))
+            deleted += len(to_delete)
         return deleted
 
     def _physical_from_object_key(self, object_key: str) -> KBLOB:

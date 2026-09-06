@@ -12,6 +12,15 @@ DEFAULT_IO_CONCURRENCY = 32
 DEFAULT_FS_IO_CONCURRENCY = 8
 """Default concurrent GETs for ``FilesystemKvStore`` (local/dev-friendlier)."""
 
+S3_DELETE_OBJECTS_MAX = 1000
+"""S3 ``delete_objects`` allows at most 1000 keys per request."""
+
+AZURE_DELETE_BLOBS_MAX = 256
+"""Azure Blob batch delete allows at most 256 blobs per request."""
+
+GCS_BATCH_OPS_MAX = 1000
+"""GCS JSON API batch requests allow at most 1000 ops."""
+
 
 def iter_chunks[T](iterable: Iterable[T], size: int) -> Iterator[list[T]]:
     """Yield lists of at most ``size`` items from ``iterable``."""

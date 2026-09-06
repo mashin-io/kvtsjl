@@ -16,7 +16,8 @@ This is not S3 Lifecycle (day-granularity bucket rules). Use ``expiry_gc=HIDE``
 to treat expired objects as absent without deleting them on get/scan.
 
 ``batch_get`` / ``batch_set`` run concurrent point ops capped by ``io_concurrency``
-(default 32). There is no multi-key Put/GetObject API; concurrency is client-side.
+(default 32). ``batch_delete`` uses S3 ``delete_objects`` (up to 1000 keys/request)
+after a concurrent existence probe so the return count matches point ``delete``.
 """
 
 from __future__ import annotations
@@ -29,7 +30,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
-from kvtsjl.batching import DEFAULT_IO_CONCURRENCY, chunk_sequence, map_concurrent
+from kvtsjl.batching import (
+    DEFAULT_IO_CONCURRENCY,
+    S3_DELETE_OBJECTS_MAX,
+    chunk_sequence,
+    map_concurrent,
+)
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -90,8 +96,8 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - Collection = key prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a boto3 S3 client (configure ``endpoint_url`` for MinIO).
     - TTL: see ``ttl_mode`` / ``S3TtlMode``.
-    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
-      (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs / existence probes (default 32).
+      ``batch_delete`` uses native ``delete_objects``.
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -252,11 +258,36 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
         deleted = 0
-        for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                if self.delete(key):
-                    deleted += 1
+        limit = min(self.batch_size, S3_DELETE_OBJECTS_MAX)
+        for chunk in chunk_sequence(unique, limit):
+
+            def _exists(key: K) -> bool:
+                object_key = self._object_key(self._physical_key_blob(key))
+                try:
+                    self._client.head_object(Bucket=self._bucket, Key=object_key)
+                except ClientError as exc:
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code in {"404", "NoSuchKey", "NotFound"}:
+                        return False
+                    raise
+                return True
+
+            flags = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
+            to_delete = [
+                {"Key": self._object_key(self._physical_key_blob(key))}
+                for key, ok in zip(chunk, flags, strict=True)
+                if ok
+            ]
+            if to_delete:
+                self._client.delete_objects(
+                    Bucket=self._bucket,
+                    Delete={"Objects": to_delete, "Quiet": True},  # type: ignore[arg-type]
+                )
+            deleted += sum(1 for ok in flags if ok)
         return deleted
 
     def _iter_object_keys(self) -> Iterator[tuple[str, datetime | None]]:

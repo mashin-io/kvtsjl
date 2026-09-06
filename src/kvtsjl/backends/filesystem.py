@@ -4,8 +4,9 @@ Default ``ttl_mode=MTIME`` is footprint-free: one data file per key, TTL is
 ``mtime + KvSet.ttl_policy``. Opt in to ``SIDECAR`` only when you need per-write
 ``ttl=`` (writes ``{path}.expires``).
 
-``batch_get`` / ``batch_set`` run concurrent point ops capped by ``io_concurrency``
-(default 8). For local/dev or FS-heavy zip with SQL, pass ``io_concurrency=1``.
+``batch_get`` / ``batch_set`` / ``batch_delete`` run concurrent point ops capped by
+``io_concurrency`` (default 8). For local/dev or FS-heavy zip with SQL, pass
+``io_concurrency=1``.
 """
 
 from __future__ import annotations
@@ -68,8 +69,8 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
       paths are derived via ``KeyLayout``.
     - TTL: see ``ttl_mode`` / ``FilesystemTtlMode`` (default ``mtime``, no sidecars).
     - ``expiry_gc``: delete expired files on get/scan (default) or only hide them.
-    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
-      (default 8).
+    - ``io_concurrency``: max concurrent point I/O in ``batch_get`` / ``batch_set`` /
+      ``batch_delete`` (default 8).
     - Scan is supported only for ``KeyLayout.LITERAL`` (path ↔ key is reversible).
     """
 
@@ -231,11 +232,15 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
         deleted = 0
-        for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                if self.delete(key):
-                    deleted += 1
+        for chunk in chunk_sequence(unique, self.batch_size):
+            flags = map_concurrent(
+                chunk, self.delete, max_workers=self.io_concurrency
+            )
+            deleted += sum(1 for ok in flags if ok)
         return deleted
 
     def _iter_data_files(self) -> Iterator[Path]:

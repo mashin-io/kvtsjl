@@ -18,8 +18,8 @@ Default ``OBJECT_TIME`` writes nothing extra. This is not GCS Object Lifecycle.
 Use ``expiry_gc=HIDE`` to treat expired objects as absent without deleting them.
 
 ``batch_get`` / ``batch_set`` use concurrent point ops (capped by ``io_concurrency``,
-default 32), not ``transfer_manager`` multi-file helpers: those still need per-key
-metadata for TTL and would force a two-phase path on reads.
+default 32), not ``transfer_manager`` multi-file helpers. ``batch_delete`` uses the
+GCS JSON API ``client.batch()`` for multi-delete (after a concurrent existence probe).
 """
 
 from __future__ import annotations
@@ -30,7 +30,12 @@ from enum import Enum
 import time
 from typing import TYPE_CHECKING, cast
 
-from kvtsjl.batching import DEFAULT_IO_CONCURRENCY, chunk_sequence, map_concurrent
+from kvtsjl.batching import (
+    DEFAULT_IO_CONCURRENCY,
+    GCS_BATCH_OPS_MAX,
+    chunk_sequence,
+    map_concurrent,
+)
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
@@ -91,8 +96,8 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - Collection = object prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a ``google.cloud.storage.Bucket``.
     - TTL: see ``ttl_mode`` / ``GcsTtlMode``.
-    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
-      (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs / existence probes (default 32).
+      ``batch_delete`` uses GCS ``client.batch()`` multi-delete.
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -252,11 +257,26 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
         deleted = 0
-        for chunk in chunk_sequence(keys, self.batch_size):
-            for key in chunk:
-                if self.delete(key):
-                    deleted += 1
+        limit = min(self.batch_size, GCS_BATCH_OPS_MAX)
+        for chunk in chunk_sequence(unique, limit):
+
+            def _exists(key: K) -> str | None:
+                object_key = self._object_key(self._physical_key_blob(key))
+                if self._bucket.get_blob(object_key) is None:
+                    return None
+                return object_key
+
+            found = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
+            to_delete = [name for name in found if name is not None]
+            if to_delete:
+                with self._bucket.client.batch():
+                    for object_key in to_delete:
+                        self._bucket.delete_blob(object_key)
+            deleted += len(to_delete)
         return deleted
 
     def _physical_from_object_key(self, object_key: str) -> KBLOB:

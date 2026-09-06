@@ -56,6 +56,15 @@ def test_filesystem_batch_set_concurrent(
     assert store.batch_get(list(items)) == items
 
 
+def test_filesystem_batch_delete_concurrent(
+    str_bytes_kvset: KvSet[str, str, str, bytes], tmp_path: Path
+) -> None:
+    store = FilesystemKvStore(str_bytes_kvset, root=tmp_path, io_concurrency=4)
+    store.batch_set({f"k{i}": f"v{i}" for i in range(10)})
+    assert store.batch_delete([f"k{i}" for i in range(10)] + ["missing"]) == 10
+    assert store.batch_get([f"k{i}" for i in range(10)]) == {}
+
+
 def test_filesystem_batch_get_concurrent_lazy_delete_idempotent(tmp_path: Path) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",
