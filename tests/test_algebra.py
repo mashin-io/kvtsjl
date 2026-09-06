@@ -237,6 +237,39 @@ def test_zip_with_batch_set_fans_out_once() -> None:
     assert body.batch_set.call_count == 1
 
 
+def test_zip_with_batch_delete_fans_out_once() -> None:
+    from unittest.mock import MagicMock
+
+    meta_s = _str_store("meta_bd")
+    body_s = _str_store("body_bd")
+
+    @dataclass
+    class Doc:
+        meta: str | None
+        body: str | None
+
+    articles = KvStore.zip_with(Doc, meta=meta_s, body=body_s)
+    articles.batch_set(
+        {
+            "a": Doc(meta="m1", body="b1"),
+            "b": Doc(meta="m2", body=None),
+            "c": Doc(meta=None, body="b3"),
+        }
+    )
+    meta = MagicMock(wraps=meta_s)
+    body = MagicMock(wraps=body_s)
+    zipped = KvStore.zip_with(Doc, meta=meta, body=body)
+    assert zipped.batch_delete(["a", "b", "c", "missing", "a"]) == 3
+    assert meta.batch_delete.call_count == 1
+    assert body.batch_delete.call_count == 1
+    meta.batch_delete.assert_called_with(["a", "b", "c", "missing"])
+    body.batch_delete.assert_called_with(["a", "b", "c", "missing"])
+    assert meta.delete.call_count == 0
+    assert body.delete.call_count == 0
+    assert zipped.batch_get(["a", "b", "c"]) == {}
+    assert zipped.batch_delete([]) == 0
+
+
 def test_zip_tuple_batch_set_fans_out_once() -> None:
     from unittest.mock import MagicMock
 

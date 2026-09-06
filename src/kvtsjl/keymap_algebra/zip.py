@@ -81,6 +81,28 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
             if to_delete:
                 part.batch_delete(to_delete)
 
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        """Fan out to each part's ``batch_delete`` once; count like point ``delete``.
+
+        A key counts as present if any part has it (probed via part ``batch_get``
+        before deletes). Duplicate keys in ``keys`` count at most once.
+        """
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
+        present: set[K] = set()
+        for part in self._parts:
+            present.update(part.batch_get(unique).keys())
+        for part in self._parts:
+            part.batch_delete(unique)
+        n = 0
+        seen: set[K] = set()
+        for key in keys:
+            if key in present and key not in seen:
+                n += 1
+                seen.add(key)
+        return n
+
 
 class ZipWithKeyMap[K, V](KeyMap[K, V]):
     """``zip`` assembled via a dataclass (or constructor) with optional fields."""
@@ -169,3 +191,25 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
                 part.batch_set(to_set)
             if to_delete:
                 part.batch_delete(to_delete)
+
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        """Fan out to each part's ``batch_delete`` once; count like point ``delete``.
+
+        A key counts as present if any part has it (probed via part ``batch_get``
+        before deletes). Duplicate keys in ``keys`` count at most once.
+        """
+        if not keys:
+            return 0
+        unique = list(dict.fromkeys(keys))
+        present: set[K] = set()
+        for part in self._parts.values():
+            present.update(part.batch_get(unique).keys())
+        for part in self._parts.values():
+            part.batch_delete(unique)
+        n = 0
+        seen: set[K] = set()
+        for key in keys:
+            if key in present and key not in seen:
+                n += 1
+                seen.add(key)
+        return n

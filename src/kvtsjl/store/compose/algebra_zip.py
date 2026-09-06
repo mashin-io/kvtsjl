@@ -85,6 +85,9 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
 
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        return self._view.batch_delete(keys)
+
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, tuple[Any, ...] | None]]:
         for key in _union_keys(self._parts, query):
             if query.include_values:
@@ -176,6 +179,9 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
+
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        return self._view.batch_delete(keys)
 
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         part_list = list(self._parts.values())
