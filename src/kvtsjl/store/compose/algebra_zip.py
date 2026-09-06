@@ -59,6 +59,29 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
             else:
                 part.set(key, item, ttl=ttl)
 
+    def batch_set(
+        self, items: Mapping[K, tuple[Any, ...]], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        if not items:
+            return
+        n = len(self._parts)
+        for value in items.values():
+            if len(value) != n:
+                raise ValueError(f"zip set expects {n}-tuple, got {len(value)}")
+        for index, part in enumerate(self._parts):
+            to_set: dict[K, Any] = {}
+            to_delete: list[K] = []
+            for key, value in items.items():
+                item = value[index]
+                if item is None:
+                    to_delete.append(key)
+                else:
+                    to_set[key] = item
+            if to_set:
+                part.batch_set(to_set, ttl=ttl)
+            if to_delete:
+                part.batch_delete(to_delete)
+
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
 
@@ -130,6 +153,26 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
                 part.delete(key)
             else:
                 part.set(key, item, ttl=ttl)
+
+    def batch_set(
+        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+    ) -> None:
+        if not items:
+            return
+        for name in self._view._field_names:
+            part = self._parts[name]
+            to_set: dict[K, Any] = {}
+            to_delete: list[K] = []
+            for key, value in items.items():
+                item = getattr(value, name)
+                if item is None:
+                    to_delete.append(key)
+                else:
+                    to_set[key] = item
+            if to_set:
+                part.batch_set(to_set, ttl=ttl)
+            if to_delete:
+                part.batch_delete(to_delete)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)

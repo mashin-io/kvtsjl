@@ -201,6 +201,87 @@ def test_zip_with_batch_get_fans_out_once() -> None:
     body.batch_get.assert_called_with(["k1", "k2"])
 
 
+def test_zip_with_batch_set_fans_out_once() -> None:
+    from unittest.mock import MagicMock
+
+    meta_s = _str_store("meta_bs")
+    body_s = _str_store("body_bs")
+    meta = MagicMock(wraps=meta_s)
+    body = MagicMock(wraps=body_s)
+
+    @dataclass
+    class Doc:
+        meta: str | None
+        body: str | None
+
+    articles = KvStore.zip_with(Doc, meta=meta, body=body)
+    items = {
+        "a": Doc(meta="m1", body="b1"),
+        "b": Doc(meta="m2", body=None),
+        "c": Doc(meta=None, body="b3"),
+    }
+    articles.batch_set(items)
+    meta.batch_set.assert_called_once_with({"a": "m1", "b": "m2"}, ttl=None)
+    body.batch_set.assert_called_once_with({"a": "b1", "c": "b3"}, ttl=None)
+    meta.batch_delete.assert_called_once_with(["c"])
+    body.batch_delete.assert_called_once_with(["b"])
+    assert meta.set.call_count == 0
+    assert body.set.call_count == 0
+    assert articles.batch_get(["a", "b", "c"]) == {
+        "a": Doc(meta="m1", body="b1"),
+        "b": Doc(meta="m2", body=None),
+        "c": Doc(meta=None, body="b3"),
+    }
+    articles.batch_set({})
+    assert meta.batch_set.call_count == 1
+    assert body.batch_set.call_count == 1
+
+
+def test_zip_tuple_batch_set_fans_out_once() -> None:
+    from unittest.mock import MagicMock
+
+    a_s = _str_store("za_bs")
+    b_s = _str_store("zb_bs")
+    a = MagicMock(wraps=a_s)
+    b = MagicMock(wraps=b_s)
+    zipped = KvStore.zip(a, b)
+    zipped.batch_set({"k1": ("1", None), "k2": (None, "2")})
+    a.batch_set.assert_called_once_with({"k1": "1"}, ttl=None)
+    b.batch_set.assert_called_once_with({"k2": "2"}, ttl=None)
+    a.batch_delete.assert_called_once_with(["k2"])
+    b.batch_delete.assert_called_once_with(["k1"])
+    assert zipped.batch_get(["k1", "k2"]) == {
+        "k1": ("1", None),
+        "k2": (None, "2"),
+    }
+
+
+def test_zip_keymap_batch_set_fans_out_once() -> None:
+    from unittest.mock import MagicMock
+
+    meta_m = DictKeyMap[str, str]({})
+    body_m = DictKeyMap[str, str]({})
+    meta = MagicMock(wraps=meta_m)
+    body = MagicMock(wraps=body_m)
+
+    @dataclass
+    class Doc:
+        meta: str | None
+        body: str | None
+
+    articles = KeyMap.zip_with(Doc, meta=meta, body=body)
+    articles.batch_set(
+        {
+            "a": Doc(meta="m1", body="b1"),
+            "b": Doc(meta="m2", body=None),
+        }
+    )
+    meta.batch_set.assert_called_once_with({"a": "m1", "b": "m2"})
+    body.batch_set.assert_called_once_with({"a": "b1"})
+    body.batch_delete.assert_called_once_with(["b"])
+    assert meta.batch_delete.call_count == 0
+
+
 def test_zip_with_batch_get_mixed_presence() -> None:
     meta_s = _str_store("meta_mix")
     body_s = _str_store("body_mix")

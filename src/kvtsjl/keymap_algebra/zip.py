@@ -55,6 +55,32 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
                 out[key] = values
         return out
 
+    def batch_set(self, items: Mapping[K, tuple[Any, ...]]) -> None:
+        """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
+
+        Per part: non-``None`` tuple slots are ``batch_set``; ``None`` slots are
+        ``batch_delete`` (same as point ``set``).
+        """
+        if not items:
+            return
+        n = len(self._parts)
+        for value in items.values():
+            if len(value) != n:
+                raise ValueError(f"zip set expects {n}-tuple, got {len(value)}")
+        for index, part in enumerate(self._parts):
+            to_set: dict[K, Any] = {}
+            to_delete: list[K] = []
+            for key, value in items.items():
+                item = value[index]
+                if item is None:
+                    to_delete.append(key)
+                else:
+                    to_set[key] = item
+            if to_set:
+                part.batch_set(to_set)
+            if to_delete:
+                part.batch_delete(to_delete)
+
 
 class ZipWithKeyMap[K, V](KeyMap[K, V]):
     """``zip`` assembled via a dataclass (or constructor) with optional fields."""
@@ -120,3 +146,26 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
             if not all(v is None for v in kwargs.values()):
                 out[key] = self._ctor(**kwargs)
         return out
+
+    def batch_set(self, items: Mapping[K, V]) -> None:
+        """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
+
+        Per field: non-``None`` values are ``batch_set``; ``None`` values are
+        ``batch_delete`` (same as point ``set``).
+        """
+        if not items:
+            return
+        for name in self._field_names:
+            part = self._parts[name]
+            to_set: dict[K, Any] = {}
+            to_delete: list[K] = []
+            for key, value in items.items():
+                item = getattr(value, name)
+                if item is None:
+                    to_delete.append(key)
+                else:
+                    to_set[key] = item
+            if to_set:
+                part.batch_set(to_set)
+            if to_delete:
+                part.batch_delete(to_delete)
