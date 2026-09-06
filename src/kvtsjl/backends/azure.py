@@ -15,8 +15,8 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
 
 Use ``expiry_gc=HIDE`` to treat expired blobs as absent without deleting them.
 
-``batch_get`` runs concurrent point ``get`` capped by ``io_concurrency``
-(default 32). There is no multi-blob content download API; concurrency is
+``batch_get`` / ``batch_set`` run concurrent point ops capped by ``io_concurrency``
+(default 32). There is no multi-blob content upload/download API; concurrency is
 client-side.
 """
 
@@ -88,7 +88,8 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
     - Collection = blob prefix ``{key_prefix}{name}/v{version}/``.
     - Pass an ``azure.storage.blob.ContainerClient``.
     - TTL: see ``ttl_mode`` / ``AzureTtlMode``.
-    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
+      (default 32).
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -238,9 +239,15 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
     def batch_set(
         self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
     ) -> None:
-        for chunk in chunk_sequence(list(items.items()), self.batch_size):
-            for key, value in chunk:
-                self.set(key, value, ttl=ttl)
+        pairs = list(items.items())
+        if not pairs:
+            return
+
+        def write(pair: tuple[K, V]) -> None:
+            self.set(pair[0], pair[1], ttl=ttl)
+
+        for chunk in chunk_sequence(pairs, self.batch_size):
+            map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

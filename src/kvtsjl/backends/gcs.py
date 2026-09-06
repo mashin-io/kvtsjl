@@ -17,9 +17,9 @@ construction via ``ttl_mode``:
 Default ``OBJECT_TIME`` writes nothing extra. This is not GCS Object Lifecycle.
 Use ``expiry_gc=HIDE`` to treat expired objects as absent without deleting them.
 
-``batch_get`` uses concurrent point ``get`` (capped by ``io_concurrency``,
-default 32), not ``transfer_manager.download_many``: that helper still needs
-per-key metadata for TTL and would force a two-phase metadata+download path.
+``batch_get`` / ``batch_set`` use concurrent point ops (capped by ``io_concurrency``,
+default 32), not ``transfer_manager`` multi-file helpers: those still need per-key
+metadata for TTL and would force a two-phase path on reads.
 """
 
 from __future__ import annotations
@@ -91,7 +91,8 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - Collection = object prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a ``google.cloud.storage.Bucket``.
     - TTL: see ``ttl_mode`` / ``GcsTtlMode``.
-    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
+      (default 32).
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -240,9 +241,15 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     def batch_set(
         self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
     ) -> None:
-        for chunk in chunk_sequence(list(items.items()), self.batch_size):
-            for key, value in chunk:
-                self.set(key, value, ttl=ttl)
+        pairs = list(items.items())
+        if not pairs:
+            return
+
+        def write(pair: tuple[K, V]) -> None:
+            self.set(pair[0], pair[1], ttl=ttl)
+
+        for chunk in chunk_sequence(pairs, self.batch_size):
+            map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

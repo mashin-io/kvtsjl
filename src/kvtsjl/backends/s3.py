@@ -15,8 +15,8 @@ TTL is lazy-delete on get/scan. How expiry is stored is set at construction via
 This is not S3 Lifecycle (day-granularity bucket rules). Use ``expiry_gc=HIDE``
 to treat expired objects as absent without deleting them on get/scan.
 
-``batch_get`` runs concurrent point ``get`` capped by ``io_concurrency``
-(default 32). There is no multi-key GetObject API; concurrency is client-side.
+``batch_get`` / ``batch_set`` run concurrent point ops capped by ``io_concurrency``
+(default 32). There is no multi-key Put/GetObject API; concurrency is client-side.
 """
 
 from __future__ import annotations
@@ -90,7 +90,8 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     - Collection = key prefix ``{key_prefix}{name}/v{version}/``.
     - Pass a boto3 S3 client (configure ``endpoint_url`` for MinIO).
     - TTL: see ``ttl_mode`` / ``S3TtlMode``.
-    - ``io_concurrency``: max concurrent GETs in ``batch_get`` (default 32).
+    - ``io_concurrency``: max concurrent GETs/SETs in ``batch_get`` / ``batch_set``
+      (default 32).
     - Scan requires ``KeyLayout.LITERAL``.
     """
 
@@ -240,9 +241,15 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     def batch_set(
         self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
     ) -> None:
-        for chunk in chunk_sequence(list(items.items()), self.batch_size):
-            for key, value in chunk:
-                self.set(key, value, ttl=ttl)
+        pairs = list(items.items())
+        if not pairs:
+            return
+
+        def write(pair: tuple[K, V]) -> None:
+            self.set(pair[0], pair[1], ttl=ttl)
+
+        for chunk in chunk_sequence(pairs, self.batch_size):
+            map_concurrent(chunk, write, max_workers=self.io_concurrency)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0
