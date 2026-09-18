@@ -100,6 +100,13 @@ class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):
     def get(self, key: K) -> None:
         return None
 
+    def exists(self, key: K) -> bool:
+        return key in self._keys()
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        present = self._keys()
+        return {key for key in keys if key in present}
+
     def meta_of(self, key: K, value: V, *, previous: None) -> None:
         return None
 
@@ -169,6 +176,13 @@ class MemoryTermIndex[K, V](NullMetaIndexBackend[str, K, V]):
 
     def get(self, key: K) -> None:
         return None
+
+    def exists(self, key: K) -> bool:
+        return key in self._postings().key_to_terms
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        present = self._postings().key_to_terms
+        return {key for key in keys if key in present}
 
     def meta_of(self, key: K, value: V, *, previous: None) -> None:
         return None

@@ -158,3 +158,27 @@ def test_redis_gc_expired_noop(
     redis_flat_store.set("a", "v")
     assert redis_flat_store.gc_expired(max_entries=10) == 0
     assert redis_flat_store.get("a") == "v"
+
+
+@pytest.mark.redis
+def test_redis_hash_created_at_raises(fake_redis: fakeredis.FakeRedis) -> None:
+    from datetime import UTC, datetime
+
+    kvset = KvSet.with_str_keys(
+        "hash",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+    )
+    store = RedisKvStore.hash_collection(kvset, fake_redis)
+    assert store.supports_write_clock is False
+    with pytest.raises(KvStoreTtlUnsupported, match="created_at"):
+        store.set("a", "v", created_at=datetime(2024, 1, 1, tzinfo=UTC))
+
+
+@pytest.mark.redis
+def test_redis_flat_batch_exists(
+    redis_flat_store: RedisKvStore[str, str, str, bytes, None],
+) -> None:
+    from tests.conformance import assert_batch_exists_and_stat
+
+    assert_batch_exists_and_stat(redis_flat_store)

@@ -23,7 +23,7 @@ a concurrent existence probe so the return count matches point ``delete``.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 import time
 from typing import TYPE_CHECKING, cast
@@ -51,7 +51,13 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
-from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy, require_explicit_ttl_supported
+from kvtsjl.store.schema.stat import RecordStat
+from kvtsjl.store.schema.ttl import (
+    ExpiryGc,
+    TtlPolicy,
+    require_explicit_ttl_supported,
+    require_write_clock_supported,
+)
 
 if TYPE_CHECKING:
     from azure.storage.blob import ContainerClient
@@ -136,6 +142,10 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._ttl_mode is AzureTtlMode.METADATA
+
     def _clone_with_scope(self, scope: Scope) -> AzureBlobKvStore[K, V, KBLOB]:
         return AzureBlobKvStore(
             self.kvset,
@@ -149,15 +159,27 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
             io_concurrency=self.io_concurrency,
         )
 
+    def _clock_base(self, created_at: datetime | None) -> float:
+        if created_at is None:
+            return time.time()
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=UTC).timestamp()
+        return created_at.timestamp()
+
     def _object_key(self, physical_key: KBLOB) -> str:
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
         return f"{self._collection_prefix}{rel}"
 
-    def _expires_meta_value(self, ttl: TtlPolicy) -> str:
+    def _expires_meta_value(
+        self,
+        ttl: TtlPolicy,
+        *,
+        created_at: datetime | None = None,
+    ) -> str:
         secs = self.resolve_ttl_seconds(ttl)
         if secs is None:
             return "none"
-        return str(time.time() + secs)
+        return str(self._clock_base(created_at) + secs)
 
     def _expired_from_props(
         self,
@@ -179,7 +201,9 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
             return False
         return time.time() >= last_modified.timestamp() + ttl
 
-    def _read_live(self, object_key: str) -> bytes | None:
+    def _props_live(
+        self, object_key: str
+    ) -> tuple[datetime | None, Mapping[str, str] | None, int | None, str | None] | None:
         blob = self._container.get_blob_client(object_key)
         try:
             props = blob.get_blob_properties()
@@ -192,6 +216,55 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
                 except ResourceNotFoundError:
                     pass
             return None
+        size_raw = getattr(props, "size", None)
+        size = size_raw if isinstance(size_raw, int) else None
+        etag_raw = getattr(props, "etag", None)
+        etag = etag_raw if isinstance(etag_raw, str) else None
+        if etag is not None:
+            etag = etag.strip('"')
+        return props.last_modified, props.metadata, size, etag
+
+    def _stat_from_props(
+        self,
+        last_modified: datetime | None,
+        metadata: Mapping[str, str] | None,
+        size: int | None,
+        etag: str | None,
+    ) -> RecordStat:
+        meta = metadata or {}
+        token = meta.get(_EXPIRES_META_KEY)
+        expires_at: datetime | None = None
+        persistent = False
+        if token is not None:
+            if token == "none":
+                persistent = True
+            else:
+                try:
+                    expires_at = datetime.fromtimestamp(float(token), tz=UTC)
+                except ValueError:
+                    expires_at = datetime.fromtimestamp(0, tz=UTC)
+        else:
+            ttl = self.ttl_seconds()
+            if ttl is None or last_modified is None:
+                persistent = True
+            else:
+                expires_at = datetime.fromtimestamp(
+                    last_modified.timestamp() + ttl, tz=UTC
+                )
+        return RecordStat(
+            created_at=last_modified,
+            modified_at=last_modified,
+            expires_at=expires_at,
+            size=size,
+            etag=etag,
+            persistent=persistent,
+        )
+
+    def _read_live(self, object_key: str) -> bytes | None:
+        live = self._props_live(object_key)
+        if live is None:
+            return None
+        blob = self._container.get_blob_client(object_key)
         try:
             data = blob.download_blob().readall()
         except ResourceNotFoundError:
@@ -204,10 +277,60 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return (
+            self._props_live(self._object_key(self._physical_key_blob(key))) is not None
+        )
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        if not keys:
+            return set()
+        out: set[K] = set()
+        for chunk in chunk_sequence(keys, self.batch_size):
+            flags = map_concurrent(
+                chunk, self.exists, max_workers=self.io_concurrency
+            )
+            for key, ok in zip(chunk, flags, strict=True):
+                if ok:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        live = self._props_live(self._object_key(self._physical_key_blob(key)))
+        if live is None:
+            return None
+        last_modified, metadata, size, etag = live
+        return self._stat_from_props(last_modified, metadata, size, etag)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        if not keys:
+            return {}
+        out: dict[K, RecordStat] = {}
+        for chunk in chunk_sequence(keys, self.batch_size):
+            stats = map_concurrent(
+                chunk, self.stat, max_workers=self.io_concurrency
+            )
+            for key, meta in zip(chunk, stats, strict=True):
+                if meta is not None:
+                    out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         require_explicit_ttl_supported(
             ttl,
             allowed=self._ttl_mode is AzureTtlMode.METADATA,
+            backend="AzureBlobKvStore",
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
             backend="AzureBlobKvStore",
         )
         object_key = self._object_key(self._physical_key_blob(key))
@@ -215,7 +338,9 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         body = self.kvset.value_serde.serialize(value)
         metadata: dict[str, str] | None = None
         if ttl is not None:
-            metadata = {_EXPIRES_META_KEY: self._expires_meta_value(ttl)}
+            metadata = {
+                _EXPIRES_META_KEY: self._expires_meta_value(ttl, created_at=created_at)
+            }
         blob.upload_blob(body, overwrite=True, metadata=metadata)
 
     def delete(self, key: K) -> bool:
@@ -242,14 +367,18 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         pairs = list(items.items())
         if not pairs:
             return
 
         def write(pair: tuple[K, V]) -> None:
-            self.set(pair[0], pair[1], ttl=ttl)
+            self.set(pair[0], pair[1], ttl=ttl, created_at=created_at)
 
         for chunk in chunk_sequence(pairs, self.batch_size):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
@@ -261,18 +390,12 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         deleted = 0
         limit = min(self.batch_size, AZURE_DELETE_BLOBS_MAX)
         for chunk in chunk_sequence(unique, limit):
-
-            def _exists(key: K) -> str | None:
-                object_key = self._object_key(self._physical_key_blob(key))
-                blob = self._container.get_blob_client(object_key)
-                try:
-                    blob.get_blob_properties()
-                except ResourceNotFoundError:
-                    return None
-                return object_key
-
-            found = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
-            to_delete = [name for name in found if name is not None]
+            present = self.batch_exists(chunk)
+            to_delete = [
+                self._object_key(self._physical_key_blob(key))
+                for key in chunk
+                if key in present
+            ]
             if to_delete:
                 # Consume the response iterator so the batch request completes.
                 list(self._container.delete_blobs(*to_delete))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreReadOnlyError
 from kvtsjl.scope import Scope
@@ -16,7 +17,14 @@ class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._underlying.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise KvStoreReadOnlyError("set on readonly store")
 
     def delete(self, key: K) -> bool:
@@ -26,7 +34,11 @@ class ReadonlyKvStore[K, V](DelegatingKvStore[K, V]):
         return self._underlying.batch_get(keys)
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         raise KvStoreReadOnlyError("batch_set on readonly store")
 

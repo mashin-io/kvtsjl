@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 import time
 from typing import Any, cast
 
@@ -19,11 +19,27 @@ from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
     ExpiryGc,
     TtlPolicy,
+    require_write_clock_supported,
 )
+
+
+def _utc_from_epoch(epoch: float | None) -> datetime | None:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=UTC)
+
+
+def _clock_base(created_at: datetime | None) -> float:
+    if created_at is None:
+        return time.time()
+    if created_at.tzinfo is None:
+        return created_at.replace(tzinfo=UTC).timestamp()
+    return created_at.timestamp()
 
 
 def _as_timestamp(value: Any) -> float | None:
@@ -83,6 +99,10 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         assert self._binding.collection is not None
         self._table = self._binding.collection
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return True
+
     def _clone_with_scope(self, scope: Scope) -> SqlDbKvStore[K, V]:
         return SqlDbKvStore(
             self._sql_kvset,
@@ -93,13 +113,22 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             batch_size=self.batch_size,
         )
 
-    def _expires_at_column(self, ttl: TtlPolicy | None) -> float | None:
+    def _presence_columns(self) -> tuple[str, ...]:
+        sk = self._sql_kvset
+        return (*sk.key_fields, sk.updated_at_field, sk.expires_at_field)
+
+    def _expires_at_column(
+        self,
+        ttl: TtlPolicy | None,
+        *,
+        created_at: datetime | None = None,
+    ) -> float | None:
         if ttl is None:
             return None
         secs = ttl.ttl_seconds()
         if secs is None:
             return TTL_NONE_EXPIRES_AT.timestamp()
-        return time.time() + secs
+        return _clock_base(created_at) + secs
 
     def _scope_by_kind(self) -> dict[str, str]:
         return {s.kind: s.id for s in self.scope.segments}
@@ -209,13 +238,39 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             )
         return None
 
-    def _build_write_row(self, key: K, value: V, *, ttl: TtlPolicy | None) -> SqlDbRow:
+    def _build_write_row(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None,
+        created_at: datetime | None = None,
+    ) -> SqlDbRow:
         serialized = dict(self.kvset.value_serde.serialize(value))
         sk = self._sql_kvset
         serialized.update(self._full_key_row(key, require_scope=True))
-        serialized[sk.updated_at_field] = time.time()
-        serialized[sk.expires_at_field] = self._expires_at_column(ttl)
+        base = _clock_base(created_at)
+        serialized[sk.updated_at_field] = base
+        serialized[sk.expires_at_field] = self._expires_at_column(
+            ttl, created_at=created_at
+        )
         return {col: serialized.get(col) for col in sk.write_columns()}
+
+    def _stat_from_row(self, row: SqlDbRow) -> RecordStat:
+        sk = self._sql_kvset
+        updated = _as_timestamp(row.get(sk.updated_at_field))
+        expires = _as_timestamp(row.get(sk.expires_at_field))
+        if expires is None:
+            ttl = self.ttl_seconds()
+            if ttl is not None and updated is not None:
+                expires = updated + ttl
+        persistent = expires is None
+        return RecordStat(
+            created_at=_utc_from_epoch(updated),
+            modified_at=_utc_from_epoch(updated),
+            expires_at=_utc_from_epoch(expires),
+            persistent=persistent,
+        )
 
     def get(self, key: K) -> V | None:
         sk = self._sql_kvset
@@ -231,8 +286,80 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             return None
         return self.kvset.value_serde.deserialize(row)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
-        row = self._build_write_row(key, value, ttl=ttl)
+    def exists(self, key: K) -> bool:
+        sk = self._sql_kvset
+        key_row = self._full_key_row(key, require_scope=True)
+        # Presence columns only (keys + TTL clock); still honour ExpiryGc via _live_row.
+        found = self._adapter.exists_by_keys(
+            table=self._table,
+            key_fields=sk.key_fields,
+            keys=[key_row],
+            columns=self._presence_columns(),
+        )
+        return self._live_row(found[0] if found else None) is not None
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        out: set[K] = set()
+        sk = self._sql_kvset
+        for chunk in chunk_sequence(list(keys), self.batch_size):
+            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
+            found = self._adapter.exists_by_keys(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=key_rows,
+                columns=self._presence_columns(),
+            )
+            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
+            for key, key_row in zip(chunk, key_rows, strict=True):
+                row = self._live_row(by_tuple.get(_key_tuple(key_row, sk.key_fields)))
+                if row is not None:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        sk = self._sql_kvset
+        key_row = self._full_key_row(key, require_scope=True)
+        found = self._adapter.exists_by_keys(
+            table=self._table,
+            key_fields=sk.key_fields,
+            keys=[key_row],
+            columns=self._presence_columns(),
+        )
+        row = self._live_row(found[0] if found else None)
+        if row is None:
+            return None
+        return self._stat_from_row(row)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out: dict[K, RecordStat] = {}
+        sk = self._sql_kvset
+        for chunk in chunk_sequence(list(keys), self.batch_size):
+            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
+            found = self._adapter.exists_by_keys(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=key_rows,
+                columns=self._presence_columns(),
+            )
+            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
+            for key, key_row in zip(chunk, key_rows, strict=True):
+                row = self._live_row(by_tuple.get(_key_tuple(key_row, sk.key_fields)))
+                if row is not None:
+                    out[key] = self._stat_from_row(row)
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        require_write_clock_supported(
+            created_at, allowed=True, backend="SqlDbKvStore"
+        )
+        row = self._build_write_row(key, value, ttl=ttl, created_at=created_at)
         sk = self._sql_kvset
         self._adapter.upsert_rows(
             table=self._table,
@@ -273,12 +400,22 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
+        require_write_clock_supported(
+            created_at, allowed=True, backend="SqlDbKvStore"
+        )
         sk = self._sql_kvset
         pairs = list(items.items())
         for chunk in chunk_sequence(pairs, self.batch_size):
-            rows = [self._build_write_row(k, v, ttl=ttl) for k, v in chunk]
+            rows = [
+                self._build_write_row(k, v, ttl=ttl, created_at=created_at)
+                for k, v in chunk
+            ]
             self._adapter.upsert_rows(
                 table=self._table,
                 key_fields=sk.key_fields,

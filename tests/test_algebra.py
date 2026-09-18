@@ -221,8 +221,12 @@ def test_zip_with_batch_set_fans_out_once() -> None:
         "c": Doc(meta=None, body="b3"),
     }
     articles.batch_set(items)
-    meta.batch_set.assert_called_once_with({"a": "m1", "b": "m2"}, ttl=None)
-    body.batch_set.assert_called_once_with({"a": "b1", "c": "b3"}, ttl=None)
+    meta.batch_set.assert_called_once_with(
+        {"a": "m1", "b": "m2"}, ttl=None, created_at=None
+    )
+    body.batch_set.assert_called_once_with(
+        {"a": "b1", "c": "b3"}, ttl=None, created_at=None
+    )
     meta.batch_delete.assert_called_once_with(["c"])
     body.batch_delete.assert_called_once_with(["b"])
     assert meta.set.call_count == 0
@@ -279,8 +283,8 @@ def test_zip_tuple_batch_set_fans_out_once() -> None:
     b = MagicMock(wraps=b_s)
     zipped = KvStore.zip(a, b)
     zipped.batch_set({"k1": ("1", None), "k2": (None, "2")})
-    a.batch_set.assert_called_once_with({"k1": "1"}, ttl=None)
-    b.batch_set.assert_called_once_with({"k2": "2"}, ttl=None)
+    a.batch_set.assert_called_once_with({"k1": "1"}, ttl=None, created_at=None)
+    b.batch_set.assert_called_once_with({"k2": "2"}, ttl=None, created_at=None)
     a.batch_delete.assert_called_once_with(["k2"])
     b.batch_delete.assert_called_once_with(["k1"])
     assert zipped.batch_get(["k1", "k2"]) == {

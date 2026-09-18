@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import time
 
 from kvtsjl.batching import chunk_sequence
@@ -16,13 +17,20 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery
-from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
+from kvtsjl.store.schema.stat import RecordStat
+from kvtsjl.store.schema.ttl import (
+    ExpiryGc,
+    TtlPolicy,
+    require_write_clock_supported,
+)
 
 
 @dataclass
 class _Entry[VBLOB]:
     value_blob: VBLOB
     expires_at: float | None = None
+    created_at: float | None = None  # expiry clock base (may be caller-supplied)
+    written_at: float | None = None  # wall time of this write
 
 
 @dataclass
@@ -34,6 +42,12 @@ class _MemoryRoot[KBLOB, VBLOB]:
         if key not in self.collections:
             self.collections[key] = {}
         return self.collections[key]
+
+
+def _utc_from_epoch(epoch: float | None) -> datetime | None:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=UTC)
 
 
 class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
@@ -60,6 +74,10 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
         self._root: _MemoryRoot[KBLOB, VBLOB] = root or _MemoryRoot()
         self._expiry_gc = expiry_gc
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return True
+
     def _clone_with_scope(self, scope: Scope) -> MemoryKvStore[K, V, KBLOB, VBLOB]:
         return MemoryKvStore(
             self.kvset,
@@ -76,13 +94,22 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     def _expired(self, entry: _Entry[VBLOB]) -> bool:
         return entry.expires_at is not None and time.time() >= entry.expires_at
 
-    def _expires_at(self, ttl: TtlPolicy | None = None) -> float | None:
+    def _clock_base(self, created_at: datetime | None) -> float:
+        if created_at is None:
+            return time.time()
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=UTC).timestamp()
+        return created_at.timestamp()
+
+    def _expires_at(
+        self, ttl: TtlPolicy | None = None, *, created_at: datetime | None = None
+    ) -> float | None:
         secs = self.resolve_ttl_seconds(ttl)
         if secs is None:
             return None
-        return time.time() + secs
+        return self._clock_base(created_at) + secs
 
-    def get(self, key: K) -> V | None:
+    def _live_entry(self, key: K) -> _Entry[VBLOB] | None:
         pk = self._physical_key_blob(key)
         bucket = self._bucket()
         entry = bucket.get(pk)
@@ -92,12 +119,60 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                 bucket.pop(pk, None)
             return None
+        return entry
+
+    def get(self, key: K) -> V | None:
+        entry = self._live_entry(key)
+        if entry is None:
+            return None
         return self.kvset.value_serde.deserialize(entry.value_blob)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return self._live_entry(key) is not None
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return {key for key in keys if self.exists(key)}
+
+    def stat(self, key: K) -> RecordStat | None:
+        entry = self._live_entry(key)
+        if entry is None:
+            return None
+        return RecordStat(
+            created_at=_utc_from_epoch(entry.created_at),
+            modified_at=_utc_from_epoch(entry.written_at),
+            expires_at=_utc_from_epoch(entry.expires_at),
+            persistent=entry.expires_at is None,
+        )
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out: dict[K, RecordStat] = {}
+        for key in keys:
+            meta = self.stat(key)
+            if meta is not None:
+                out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        require_write_clock_supported(
+            created_at, allowed=True, backend="MemoryKvStore"
+        )
         pk = self._physical_key_blob(key)
         blob = self.kvset.value_serde.serialize(value)
-        self._bucket()[pk] = _Entry(value_blob=blob, expires_at=self._expires_at(ttl))
+        base = self._clock_base(created_at)
+        written = time.time()
+        self._bucket()[pk] = _Entry(
+            value_blob=blob,
+            expires_at=self._expires_at(ttl, created_at=created_at),
+            created_at=base,
+            written_at=written,
+        )
 
     def delete(self, key: K) -> bool:
         pk = self._physical_key_blob(key)
@@ -113,12 +188,16 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         pairs = list(items.items())
         for chunk in chunk_sequence(pairs, self.batch_size):
             for key, value in chunk:
-                self.set(key, value, ttl=ttl)
+                self.set(key, value, ttl=ttl, created_at=created_at)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

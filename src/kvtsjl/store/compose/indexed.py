@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import fields, is_dataclass
+from datetime import datetime
 import logging
 from typing import Any, Literal, cast, overload
 
@@ -58,8 +59,15 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._underlying.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
-        self._underlying.set(key, value, ttl=ttl)
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._underlying.set(key, value, ttl=ttl, created_at=created_at)
         self._sync_upsert(key, value)
 
     def delete(self, key: K) -> bool:
@@ -72,9 +80,13 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         return self._underlying.batch_get(keys)
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
-        self._underlying.batch_set(items, ttl=ttl)
+        self._underlying.batch_set(items, ttl=ttl, created_at=created_at)
         self._sync_batch_upsert(items)
 
     def batch_delete(self, keys: Sequence[K]) -> int:

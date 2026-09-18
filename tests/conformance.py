@@ -123,3 +123,107 @@ def assert_gc_expired_cap(store: KvStore[str, str]) -> None:
         assert store.get("a") is None
         assert store.get("b") is None
         assert store.get("c") == "3"
+
+
+def assert_exists_ttl_expiry_gc(
+    make_store: Callable[[ExpiryGc], KvStore[str, str]],
+) -> None:
+    """exists × TTL × ExpiryGc — must fail if ExpiryGc is ignored.
+
+    After expiry, ``exists`` is False for both modes. Discriminator: HIDE still
+    has a row for ``gc_expired``; LAZY_DELETE already reaped on the exists probe.
+    """
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        hide = make_store(ExpiryGc.HIDE)
+        hide.set("h", "live")
+        lazy = make_store(ExpiryGc.LAZY_DELETE)
+        lazy.set("l", "live")
+        assert hide.exists("h") is True
+        assert lazy.exists("l") is True
+        frozen.move_to("2024-01-01 12:01:00")
+        assert hide.exists("h") is False
+        assert lazy.exists("l") is False
+        assert hide.gc_expired(max_entries=10) == 1
+        assert lazy.gc_expired(max_entries=10) == 0
+
+
+def assert_batch_exists_and_stat(store: KvStore[str, str]) -> None:
+    store.set("a", "1")
+    store.set("b", "2")
+    assert store.batch_exists(["a", "missing", "b"]) == {"a", "b"}
+    stats = store.batch_stat(["a", "missing", "b"])
+    assert set(stats) == {"a", "b"}
+    assert store.stat("missing") is None
+    assert store.exists("missing") is False
+
+
+def assert_mirror_created_at_preserves_expiry(
+    primary: KvStore[str, str],
+    secondary: KvStore[str, str],
+) -> None:
+    """Capable mirror pair: secondary expiry stays aligned with primary (≤1s).
+
+    Uses a ``created_at`` *before* frozen now so a secondary that ignores the
+    write clock diverges (same pattern as the OBJECT_TIME residual test).
+    """
+    from datetime import UTC, datetime
+
+    from kvtsjl import MirrorKvStore
+
+    assert primary.supports_write_clock and secondary.supports_write_clock
+    mirrored = MirrorKvStore(primary, secondary)
+    # 45s before frozen now — dropping created_at on secondary yields ~45s drift.
+    created = datetime(2024, 1, 1, 11, 59, 15, tzinfo=UTC)
+    with freeze_time("2024-01-01 12:00:00"):
+        mirrored.set("k", "v", created_at=created)
+        p_stat = primary.stat("k")
+        s_stat = secondary.stat("k")
+        assert p_stat is not None and s_stat is not None
+        assert p_stat.expires_at is not None and s_stat.expires_at is not None
+        drift = abs((p_stat.expires_at - s_stat.expires_at).total_seconds())
+        assert drift <= 1.0
+
+
+def assert_promote_preserves_expiry(
+    primary: KvStore[str, str],
+    secondary: KvStore[str, str],
+) -> None:
+    """Capable coalesce promote: primary keeps secondary's write clock (≤1s).
+
+    Advances time by half the remaining TTL after a past ``created_at`` write so
+    the secondary is still alive for ``get``, and short-TTL fixtures fail with an
+    explicit remaining-life assertion instead of a silent miss.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from kvtsjl import FallbackReadKvStore
+
+    assert primary.supports_write_clock and secondary.supports_write_clock
+    # 45s before frozen now — clock-drop on promote yields large expiry drift.
+    created = datetime(2024, 1, 1, 11, 59, 15, tzinfo=UTC)
+    noon = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    with freeze_time(noon) as frozen:
+        secondary.set("k", "v", created_at=created)
+        s0 = secondary.stat("k")
+        assert s0 is not None and s0.expires_at is not None, (
+            "secondary missing/expired right after set with a 45s-past created_at; "
+            "collection TTL must exceed that lookback (use >= 60s)"
+        )
+        remaining = (s0.expires_at - noon).total_seconds()
+        assert remaining > 5, (
+            f"promote helper needs >5s remaining TTL after past created_at, "
+            f"got {remaining}s — use a longer collection TTL"
+        )
+        advance = min(30.0, remaining / 2)
+        store = FallbackReadKvStore(primary, secondary, promote=True)
+        frozen.move_to(noon + timedelta(seconds=advance))
+        assert store.get("k") == "v", (
+            f"secondary expired before promote probe "
+            f"(advanced {advance}s with {remaining}s remaining)"
+        )
+        p_stat = primary.stat("k")
+        s_stat = secondary.stat("k")
+        assert p_stat is not None and s_stat is not None
+        assert p_stat.expires_at is not None and s_stat.expires_at is not None
+        drift = abs((p_stat.expires_at - s_stat.expires_at).total_seconds())
+        assert drift <= 1.0

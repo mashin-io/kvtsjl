@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from kvtsjl.keymap_algebra.zip import ZippedKeyMap, ZipWithKeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -28,6 +30,15 @@ def _union_keys[K](
                 yield key
 
 
+def _merge_part_stats(stats: Sequence[RecordStat]) -> RecordStat:
+    created = [s.created_at for s in stats if s.created_at is not None]
+    expires = [s.expires_at for s in stats if s.expires_at is not None]
+    return RecordStat(
+        created_at=max(created) if created else None,
+        expires_at=min(expires) if expires else None,
+    )
+
+
 class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def __init__(self, parts: Sequence[KvStore[K, Any]]) -> None:
         if len(parts) < 2:
@@ -36,6 +47,10 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
         self._view = ZippedKeyMap(parts)
         self.scope = parts[0].scope
         self.batch_size = parts[0].batch_size
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return all(part.supports_write_clock for part in self._parts)
 
     def key_layout(self) -> KeyLayout:
         return self._parts[0].key_layout()
@@ -46,8 +61,37 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def batch_get(self, keys: Sequence[K]) -> dict[K, tuple[Any, ...]]:
         return self._view.batch_get(keys)
 
+    def exists(self, key: K) -> bool:
+        return any(part.exists(key) for part in self._parts)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        found: set[K] = set()
+        for part in self._parts:
+            found |= part.batch_exists(keys)
+            if found.issuperset(keys):
+                break
+        return found
+
+    def stat(self, key: K) -> RecordStat | None:
+        present = [meta for part in self._parts if (meta := part.stat(key)) is not None]
+        if not present:
+            return None
+        return _merge_part_stats(present)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        per_key: dict[K, list[RecordStat]] = {}
+        for part in self._parts:
+            for key, meta in part.batch_stat(keys).items():
+                per_key.setdefault(key, []).append(meta)
+        return {key: _merge_part_stats(stats) for key, stats in per_key.items()}
+
     def set(
-        self, key: K, value: tuple[Any, ...], *, ttl: TtlPolicy | None = None
+        self,
+        key: K,
+        value: tuple[Any, ...],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         if len(value) != len(self._parts):
             raise ValueError(
@@ -57,10 +101,14 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
             if item is None:
                 part.delete(key)
             else:
-                part.set(key, item, ttl=ttl)
+                part.set(key, item, ttl=ttl, created_at=created_at)
 
     def batch_set(
-        self, items: Mapping[K, tuple[Any, ...]], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, tuple[Any, ...]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         if not items:
             return
@@ -78,7 +126,7 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
                 else:
                     to_set[key] = item
             if to_set:
-                part.batch_set(to_set, ttl=ttl)
+                part.batch_set(to_set, ttl=ttl, created_at=created_at)
             if to_delete:
                 part.batch_delete(to_delete)
 
@@ -139,6 +187,10 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
         self.scope = first.scope
         self.batch_size = first.batch_size
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return all(part.supports_write_clock for part in self._parts.values())
+
     def key_layout(self) -> KeyLayout:
         return next(iter(self._parts.values())).key_layout()
 
@@ -148,17 +200,56 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
         return self._view.batch_get(keys)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return any(part.exists(key) for part in self._parts.values())
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        found: set[K] = set()
+        for part in self._parts.values():
+            found |= part.batch_exists(keys)
+            if found.issuperset(keys):
+                break
+        return found
+
+    def stat(self, key: K) -> RecordStat | None:
+        present = [
+            meta
+            for part in self._parts.values()
+            if (meta := part.stat(key)) is not None
+        ]
+        if not present:
+            return None
+        return _merge_part_stats(present)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        per_key: dict[K, list[RecordStat]] = {}
+        for part in self._parts.values():
+            for key, meta in part.batch_stat(keys).items():
+                per_key.setdefault(key, []).append(meta)
+        return {key: _merge_part_stats(stats) for key, stats in per_key.items()}
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         for name in self._view._field_names:
             item = getattr(value, name)
             part = self._parts[name]
             if item is None:
                 part.delete(key)
             else:
-                part.set(key, item, ttl=ttl)
+                part.set(key, item, ttl=ttl, created_at=created_at)
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         if not items:
             return
@@ -173,7 +264,7 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
                 else:
                     to_set[key] = item
             if to_set:
-                part.batch_set(to_set, ttl=ttl)
+                part.batch_set(to_set, ttl=ttl, created_at=created_at)
             if to_delete:
                 part.batch_delete(to_delete)
 

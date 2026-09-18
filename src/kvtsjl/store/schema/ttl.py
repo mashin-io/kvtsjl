@@ -71,3 +71,16 @@ def require_explicit_ttl_supported(
         raise KvStoreTtlUnsupported(
             f"{backend} does not support per-write ttl with the current provision"
         )
+
+
+def require_write_clock_supported(
+    created_at: datetime | None,
+    *,
+    allowed: bool,
+    backend: str,
+) -> None:
+    """Raise if the caller passed ``created_at`` the backend cannot honour."""
+    if created_at is not None and not allowed:
+        raise KvStoreTtlUnsupported(
+            f"{backend} does not support created_at with the current provision"
+        )

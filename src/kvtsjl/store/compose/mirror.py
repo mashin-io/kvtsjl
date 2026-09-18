@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime
 import logging
 
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,32 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
         self._primary = primary
         self._secondary = secondary
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._primary.supports_write_clock
+
     def get(self, key: K) -> V | None:
         return self._primary.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
-        self._primary.set(key, value, ttl=ttl)
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        require_write_clock_supported(
+            created_at,
+            allowed=self._primary.supports_write_clock,
+            backend=type(self).__name__,
+        )
+        self._primary.set(key, value, ttl=ttl, created_at=created_at)
         try:
-            self._secondary.set(key, value, ttl=ttl)
+            sec_created = (
+                created_at if self._secondary.supports_write_clock else None
+            )
+            self._secondary.set(key, value, ttl=ttl, created_at=sec_created)
         except Exception:
             logger.exception("mirror set to secondary failed")
 
@@ -48,11 +68,23 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
         return self._primary.batch_get(keys)
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
-        self._primary.batch_set(items, ttl=ttl)
+        require_write_clock_supported(
+            created_at,
+            allowed=self._primary.supports_write_clock,
+            backend=type(self).__name__,
+        )
+        self._primary.batch_set(items, ttl=ttl, created_at=created_at)
         try:
-            self._secondary.batch_set(items, ttl=ttl)
+            sec_created = (
+                created_at if self._secondary.supports_write_clock else None
+            )
+            self._secondary.batch_set(items, ttl=ttl, created_at=sec_created)
         except Exception:
             logger.exception("mirror batch_set to secondary failed")
 

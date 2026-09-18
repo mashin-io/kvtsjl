@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime
 import logging
 
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
 
 
 class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
-    """Read primary then secondary; writes go to primary only. Scan: primary only."""
+    """Read primary then secondary; writes go to primary only. Scan: primary only.
+
+    ``exists`` / ``stat`` probe secondary on primary miss but **do not promote**
+    — only ``get`` / ``batch_get`` may write a secondary hit into the primary.
+    """
 
     def __init__(
         self,
@@ -29,6 +35,10 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         self._secondary = secondary
         self._promote = promote
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._primary.supports_write_clock
+
     def get(self, key: K) -> V | None:
         value = self._primary.get(key)
         if value is not None:
@@ -36,13 +46,45 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         value = self._secondary.get(key)
         if value is not None and self._promote:
             try:
-                self._primary.set(key, value)
+                self._promote_one(key, value)
             except Exception:
                 logger.exception("fallback promote failed for key")
         return value
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
-        self._primary.set(key, value, ttl=ttl)
+    def exists(self, key: K) -> bool:
+        if self._primary.exists(key):
+            return True
+        return self._secondary.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        found = self._primary.batch_exists(keys)
+        missing = [k for k in keys if k not in found]
+        if missing:
+            found |= self._secondary.batch_exists(missing)
+        return found
+
+    def stat(self, key: K) -> RecordStat | None:
+        meta = self._primary.stat(key)
+        if meta is not None:
+            return meta
+        return self._secondary.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out = self._primary.batch_stat(keys)
+        missing = [k for k in keys if k not in out]
+        if missing:
+            out.update(self._secondary.batch_stat(missing))
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._primary.set(key, value, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._primary.delete(key)
@@ -55,19 +97,45 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         secondary_found = self._secondary.batch_get(missing)
         if secondary_found and self._promote:
             try:
-                self._primary.batch_set(secondary_found)
+                self._promote_many(secondary_found)
             except Exception:
                 logger.exception("fallback batch promote failed")
         found.update(secondary_found)
         return found
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
-        self._primary.batch_set(items, ttl=ttl)
+        self._primary.batch_set(items, ttl=ttl, created_at=created_at)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._primary.batch_delete(keys)
+
+    def _promote_one(self, key: K, value: V) -> None:
+        if self._primary.supports_write_clock:
+            meta = self._secondary.stat(key)
+            clock = None
+            if meta is not None:
+                clock = meta.created_at or meta.modified_at
+            self._primary.set(key, value, created_at=clock)
+        else:
+            self._primary.set(key, value)
+
+    def _promote_many(self, items: Mapping[K, V]) -> None:
+        if not self._primary.supports_write_clock:
+            self._primary.batch_set(items)
+            return
+        stats = self._secondary.batch_stat(list(items.keys()))
+        for key, value in items.items():
+            meta = stats.get(key)
+            clock = None
+            if meta is not None:
+                clock = meta.created_at or meta.modified_at
+            self._primary.set(key, value, created_at=clock)
 
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._primary._scan_entries(query)

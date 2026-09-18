@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, overload
 
+from kvtsjl.store.schema.stat import RecordStat
+
 if TYPE_CHECKING:
     from kvtsjl.keymap_algebra.bundle import ZipPartsBundle
 
@@ -57,6 +59,43 @@ class KeyMap[K, T](ABC):
             if self.delete(key):
                 n += 1
         return n
+
+    def exists(self, key: K) -> bool:
+        """Whether ``key`` is logically present (honours expiry like ``get``)."""
+        return self.get(key) is not None
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        """Subset of ``keys`` that are logically present."""
+        return set(self.batch_get(keys).keys())
+
+    def stat(self, key: K) -> RecordStat | None:
+        """Metadata for ``key``, or ``None`` if absent / expired."""
+        if not self.exists(key):
+            return None
+        return RecordStat()
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        """``{key: RecordStat}`` for keys that are logically present."""
+        return {key: RecordStat() for key in self.batch_exists(keys)}
+
+    def get_with_stat(self, key: K) -> tuple[T, RecordStat] | None:
+        """Value and stat together, or ``None`` if absent / expired."""
+        value = self.get(key)
+        if value is None:
+            return None
+        meta = self.stat(key)
+        return value, meta if meta is not None else RecordStat()
+
+    def batch_get_with_stat(
+        self, keys: Sequence[K]
+    ) -> dict[K, tuple[T, RecordStat]]:
+        """``{key: (value, RecordStat)}`` for keys that exist."""
+        values = self.batch_get(keys)
+        stats = self.batch_stat(list(values.keys()))
+        return {
+            key: (value, stats.get(key, RecordStat()))
+            for key, value in values.items()
+        }
 
     def map[U](self, forward: Callable[[T], U]) -> KeyMap[K, U]:
         """Read-only value view."""

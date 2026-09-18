@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout
+from kvtsjl.store.schema.stat import RecordStat
 
 
 class DelegatingKvStore[K, V](KvStore[K, V]):
@@ -15,8 +18,24 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
         self.batch_size = underlying.batch_size
         self._underlying = underlying
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._underlying.supports_write_clock
+
     def key_layout(self) -> KeyLayout:
         return self._underlying.key_layout()
+
+    def exists(self, key: K) -> bool:
+        return self._underlying.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._underlying.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._underlying.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._underlying.batch_stat(keys)
 
     def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError

@@ -222,6 +222,18 @@ def test_index_bind_once_rejects_rebind() -> None:
         tags._bind(other)
 
 
+def test_null_meta_index_exists_reports_membership() -> None:
+    keys = MemoryKeyIndex[str, str]()
+    tags = MemoryTermIndex[str, str](terms_of=lambda _k, v: [v])
+    store = _memory_store().indexed_as(DocIndexes(tags=tags, keys=keys))
+    store.set("a", "red")
+    assert keys.exists("a") is True
+    assert keys.exists("missing") is False
+    assert keys.get("a") is None
+    assert tags.exists("a") is True
+    assert tags.batch_exists(["a", "missing"]) == {"a"}
+
+
 @dataclass(frozen=True, slots=True)
 class RankMeta:
     score: float

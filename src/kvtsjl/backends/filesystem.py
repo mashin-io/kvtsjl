@@ -12,6 +12,7 @@ Default ``ttl_mode=MTIME`` is footprint-free: one data file per key, TTL is
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import UTC, datetime
 from enum import Enum
 import os
 from pathlib import Path
@@ -34,11 +35,19 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     ExpiryGc,
     TtlPolicy,
     require_explicit_ttl_supported,
+    require_write_clock_supported,
 )
+
+
+def _utc_from_epoch(epoch: float | None) -> datetime | None:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=UTC)
 
 
 class FilesystemTtlMode(str, Enum):
@@ -111,6 +120,10 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         self._collection_dir = Path(self._binding.collection)
         self._collection_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return True
+
     def _clone_with_scope(self, scope: Scope) -> FilesystemKvStore[K, V, KBLOB]:
         return FilesystemKvStore(
             self.kvset,
@@ -122,6 +135,13 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             batch_size=self.batch_size,
             io_concurrency=self.io_concurrency,
         )
+
+    def _clock_base(self, created_at: datetime | None) -> float:
+        if created_at is None:
+            return time.time()
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=UTC).timestamp()
+        return created_at.timestamp()
 
     def _path_for_physical(self, physical_key: KBLOB) -> Path:
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
@@ -140,22 +160,30 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         path.unlink(missing_ok=True)
         self._expires_sidecar(path).unlink(missing_ok=True)
 
+    def _sidecar_expires_at(self, path: Path) -> float | None | str:
+        """Absolute expiry epoch, ``\"none\"`` for persistent sidecar, or ``None`` if absent."""
+        sidecar = self._expires_sidecar(path)
+        if not sidecar.is_file():
+            return None
+        try:
+            token = sidecar.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if token == "none":
+            return "none"
+        try:
+            return float(token)
+        except ValueError:
+            return 0.0
+
     def _path_is_expired(self, path: Path) -> bool:
         if not path.is_file():
             return False
-        sidecar = self._expires_sidecar(path)
-        if sidecar.is_file():
-            try:
-                token = sidecar.read_text(encoding="utf-8").strip()
-            except OSError:
-                return False
-            if token == "none":
-                return False
-            try:
-                expires_at = float(token)
-            except ValueError:
-                expires_at = 0.0
-            return time.time() >= expires_at
+        sidecar_exp = self._sidecar_expires_at(path)
+        if sidecar_exp == "none":
+            return False
+        if isinstance(sidecar_exp, float):
+            return time.time() >= sidecar_exp
         ttl = self.ttl_seconds()
         if ttl is None:
             return False
@@ -165,18 +193,57 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             return False
         return time.time() >= mtime + ttl
 
-    def _read_live(self, path: Path) -> bytes | None:
-        """Read file bytes, or ``None`` if missing / TTL-expired (lazy delete)."""
+    def _live_path(self, path: Path) -> Path | None:
+        """Return ``path`` if present and not expired; honour ``ExpiryGc`` (no body read)."""
         if not path.is_file():
             return None
         if self._path_is_expired(path):
             if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                 self._delete_with_sidecar(path)
             return None
+        return path
+
+    def _read_live(self, path: Path) -> bytes | None:
+        """Read file bytes, or ``None`` if missing / TTL-expired (lazy delete)."""
+        if self._live_path(path) is None:
+            return None
         try:
             return path.read_bytes()
         except OSError:
             return None
+
+    def _stat_for_path(self, path: Path) -> RecordStat | None:
+        if self._live_path(path) is None:
+            return None
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        mtime = st.st_mtime
+        sidecar_exp = self._sidecar_expires_at(path)
+        expires_at: float | None
+        persistent: bool
+        if sidecar_exp == "none":
+            expires_at = None
+            persistent = True
+        elif isinstance(sidecar_exp, float):
+            expires_at = sidecar_exp
+            persistent = False
+        else:
+            ttl = self.ttl_seconds()
+            if ttl is None:
+                expires_at = None
+                persistent = True
+            else:
+                expires_at = mtime + ttl
+                persistent = False
+        return RecordStat(
+            created_at=_utc_from_epoch(mtime),
+            modified_at=_utc_from_epoch(mtime),
+            expires_at=_utc_from_epoch(expires_at),
+            size=st.st_size,
+            persistent=persistent,
+        )
 
     def get(self, key: K) -> V | None:
         raw = self._read_live(self._path_for_physical(self._physical_key_blob(key)))
@@ -184,20 +251,73 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return (
+            self._live_path(self._path_for_physical(self._physical_key_blob(key)))
+            is not None
+        )
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        if not keys:
+            return set()
+        out: set[K] = set()
+        for chunk in chunk_sequence(keys, self.batch_size):
+            flags = map_concurrent(
+                chunk, self.exists, max_workers=self.io_concurrency
+            )
+            for key, ok in zip(chunk, flags, strict=True):
+                if ok:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._stat_for_path(
+            self._path_for_physical(self._physical_key_blob(key))
+        )
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        if not keys:
+            return {}
+        out: dict[K, RecordStat] = {}
+        for chunk in chunk_sequence(keys, self.batch_size):
+            stats = map_concurrent(
+                chunk, self.stat, max_workers=self.io_concurrency
+            )
+            for key, meta in zip(chunk, stats, strict=True):
+                if meta is not None:
+                    out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         require_explicit_ttl_supported(
             ttl,
             allowed=self._ttl_mode is FilesystemTtlMode.SIDECAR,
             backend="FilesystemKvStore",
         )
+        require_write_clock_supported(
+            created_at, allowed=True, backend="FilesystemKvStore"
+        )
         path = self._path_for_physical(self._physical_key_blob(key))
         self._write_atomic(path, self.kvset.value_serde.serialize(value))
+        base = self._clock_base(created_at)
+        if created_at is not None:
+            os.utime(path, (base, base))
         sidecar = self._expires_sidecar(path)
-        if ttl is None:
-            sidecar.unlink(missing_ok=True)
+        if self._ttl_mode is FilesystemTtlMode.SIDECAR and ttl is not None:
+            secs = self.resolve_ttl_seconds(ttl)
+            sidecar.write_text(
+                "none" if secs is None else str(base + secs),
+                encoding="utf-8",
+            )
             return
-        secs = self.resolve_ttl_seconds(ttl)
-        sidecar.write_text("none" if secs is None else str(time.time() + secs), encoding="utf-8")
+        sidecar.unlink(missing_ok=True)
 
     def delete(self, key: K) -> bool:
         path = self._path_for_physical(self._physical_key_blob(key))
@@ -219,14 +339,18 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, 
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         pairs = list(items.items())
         if not pairs:
             return
 
         def write(pair: tuple[K, V]) -> None:
-            self.set(pair[0], pair[1], ttl=ttl)
+            self.set(pair[0], pair[1], ttl=ttl, created_at=created_at)
 
         for chunk in chunk_sequence(pairs, self.batch_size):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)

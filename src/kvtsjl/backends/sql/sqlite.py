@@ -71,6 +71,34 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
                 out.append(_row_from_sqlite(row))
         return out
 
+    def exists_by_keys(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        keys: Sequence[SqlDbRow],
+        columns: Sequence[str] | None = None,
+    ) -> Sequence[SqlDbRow]:
+        if not keys:
+            return []
+        if not key_fields:
+            raise ValueError("key_fields must be non-empty")
+        select = columns if columns is not None else key_fields
+        cols = ", ".join(_quote_ident(c) for c in select)
+        t = _quote_ident(table)
+        out: list[SqlDbRow] = []
+        for key in keys:
+            preds = " AND ".join(f"{_quote_ident(f)}=?" for f in key_fields)
+            params = [key[f] for f in key_fields]
+            cur = self._conn.execute(
+                f"SELECT {cols} FROM {t} WHERE {preds}",
+                params,
+            )
+            row = cur.fetchone()
+            if row is not None:
+                out.append(_row_from_sqlite(row))
+        return out
+
     def upsert_rows(
         self,
         *,

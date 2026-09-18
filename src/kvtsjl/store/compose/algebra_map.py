@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKeyMap
@@ -10,6 +11,7 @@ from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -23,13 +25,36 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
         self._view = MappedKeyMap(underlying, forward)
         self._forward = forward
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._src.supports_write_clock
+
     def key_layout(self) -> KeyLayout:
         return self._src.key_layout()
 
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return self._src.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._src.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._src.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._src.batch_stat(keys)
+
+    def set(
+        self,
+        key: K,
+        value: U,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -81,14 +106,37 @@ class IMappedKvStore[K, V, U](KvStore[K, U]):
         self._forward = forward
         self._inverse = inverse
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._src.supports_write_clock
+
     def key_layout(self) -> KeyLayout:
         return self._src.key_layout()
 
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
-        self._src.set(key, self._inverse(value), ttl=ttl)
+    def exists(self, key: K) -> bool:
+        return self._src.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._src.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._src.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._src.batch_stat(keys)
+
+    def set(
+        self,
+        key: K,
+        value: U,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._src.set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
@@ -141,14 +189,47 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
         self._to_store = to_store
         self._from_store = from_store
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._src.supports_write_clock
+
     def key_layout(self) -> KeyLayout:
         return self._src.key_layout()
 
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
-        self._src.set(self._to_store(key), value, ttl=ttl)
+    def exists(self, key: K) -> bool:
+        return self._src.exists(self._to_store(key))
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        sk_to_k = {self._to_store(key): key for key in keys}
+        return {
+            sk_to_k[sk]
+            for sk in self._src.batch_exists(list(sk_to_k.keys()))
+            if sk in sk_to_k
+        }
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._src.stat(self._to_store(key))
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        sk_to_k = {self._to_store(key): key for key in keys}
+        return {
+            sk_to_k[sk]: meta
+            for sk, meta in self._src.batch_stat(list(sk_to_k.keys())).items()
+            if sk in sk_to_k
+        }
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._src.set(self._to_store(key), value, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._view.delete(key)

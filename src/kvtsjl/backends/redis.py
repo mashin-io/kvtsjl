@@ -12,6 +12,8 @@ expired keys are already gone before get/scan. ``gc_expired`` is a no-op (return
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import UTC, datetime
+import time
 from typing import TYPE_CHECKING, cast
 
 from kvtsjl.batching import chunk_sequence
@@ -26,7 +28,12 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery, supports_prefix_scan
-from kvtsjl.store.schema.ttl import TtlPolicy, require_explicit_ttl_supported
+from kvtsjl.store.schema.stat import RecordStat
+from kvtsjl.store.schema.ttl import (
+    TtlPolicy,
+    require_explicit_ttl_supported,
+    require_write_clock_supported,
+)
 
 if TYPE_CHECKING:
     from redis import Redis
@@ -49,6 +56,14 @@ def _as_redis_value(blob: object, *, what: str) -> RedisWire:
     if isinstance(blob, (str, bytes)):
         return blob
     raise TypeError(f"{what} requires str|bytes VBLOB, got {type(blob).__name__}")
+
+
+def _clock_base(created_at: datetime | None) -> float:
+    if created_at is None:
+        return time.time()
+    if created_at.tzinfo is None:
+        return created_at.replace(tzinfo=UTC).timestamp()
+    return created_at.timestamp()
 
 
 class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]):
@@ -84,6 +99,10 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
                 "RedisKvStore hash collections do not support KvSet.ttl_policy; "
                 "use a KvSet with TtlPolicy.none() (or omit ttl_policy)"
             )
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return not self._use_hash
 
     @classmethod
     def flat(
@@ -153,17 +172,77 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
             return None
         return self._deserialize_value(raw)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        pk = self._pk(key)
+        if self._use_hash:
+            return bool(self._client.hexists(self._collection_key(), pk))
+        return bool(self._client.exists(pk))
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        out: set[K] = set()
+        for chunk in chunk_sequence(keys, self.batch_size):
+            if not chunk:
+                continue
+            pipe = self._client.pipeline(transaction=False)
+            if self._use_hash:
+                coll = self._collection_key()
+                for key in chunk:
+                    pipe.hexists(coll, self._pk(key))
+            else:
+                for key in chunk:
+                    pipe.exists(self._pk(key))
+            for key, flag in zip(chunk, pipe.execute(), strict=True):
+                if flag:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        if not self.exists(key):
+            return None
+        if self._use_hash:
+            return RecordStat(persistent=True)
+        pttl = int(self._client.pttl(self._pk(key)))
+        if pttl < 0:
+            return RecordStat(persistent=True)
+        expires_at = datetime.fromtimestamp(time.time() + pttl / 1000.0, tz=UTC)
+        return RecordStat(expires_at=expires_at, persistent=False)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out: dict[K, RecordStat] = {}
+        for key in keys:
+            meta = self.stat(key)
+            if meta is not None:
+                out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         pk = self._pk(key)
         raw = self._serialize_value(value)
         require_explicit_ttl_supported(
             ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend="RedisKvStore",
         )
         ttl_secs = self.resolve_ttl_seconds(ttl)
         if self._use_hash:
             self._client.hset(self._collection_key(), pk, raw)
             if ttl_secs is not None:
                 self._client.expire(self._collection_key(), ttl_secs)
+            return
+        if created_at is not None and ttl_secs is not None:
+            self._client.set(pk, raw)
+            expire_at = int(_clock_base(created_at) + ttl_secs)
+            self._client.expireat(pk, expire_at)
         else:
             self._client.set(pk, raw, ex=ttl_secs)
 
@@ -192,10 +271,19 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         require_explicit_ttl_supported(
             ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend="RedisKvStore",
         )
         pairs = list(items.items())
         ttl_secs = self.resolve_ttl_seconds(ttl)
@@ -211,8 +299,15 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
                         self._client.expire(self._collection_key(), ttl_secs)
             else:
                 pipe = self._client.pipeline(transaction=False)
-                for k, v in chunk:
-                    pipe.set(self._pk(k), self._serialize_value(v), ex=ttl_secs)
+                if created_at is not None and ttl_secs is not None:
+                    expire_at = int(_clock_base(created_at) + ttl_secs)
+                    for k, v in chunk:
+                        pk = self._pk(k)
+                        pipe.set(pk, self._serialize_value(v))
+                        pipe.expireat(pk, expire_at)
+                else:
+                    for k, v in chunk:
+                        pipe.set(self._pk(k), self._serialize_value(v), ex=ttl_secs)
                 pipe.execute()
 
     def batch_delete(self, keys: Sequence[K]) -> int:

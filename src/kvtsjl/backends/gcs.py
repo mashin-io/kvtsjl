@@ -51,11 +51,13 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
     ExpiryGc,
     TtlPolicy,
     require_explicit_ttl_supported,
+    require_write_clock_supported,
 )
 
 if TYPE_CHECKING:
@@ -139,6 +141,10 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._ttl_mode is GcsTtlMode.CUSTOM_TIME
+
     def _clone_with_scope(self, scope: Scope) -> GcsKvStore[K, V, KBLOB]:
         return GcsKvStore(
             self.kvset,
@@ -152,17 +158,29 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             io_concurrency=self.io_concurrency,
         )
 
+    def _clock_base(self, created_at: datetime | None) -> float:
+        if created_at is None:
+            return time.time()
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=UTC).timestamp()
+        return created_at.timestamp()
+
     def _object_key(self, physical_key: KBLOB) -> str:
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
         return f"{self._collection_prefix}{rel}"
 
-    def _custom_time_expires_at(self, ttl: TtlPolicy | None = None) -> datetime | None:
+    def _custom_time_expires_at(
+        self,
+        ttl: TtlPolicy | None = None,
+        *,
+        created_at: datetime | None = None,
+    ) -> datetime | None:
         secs = self.resolve_ttl_seconds(ttl)
         if secs is None:
             if ttl is not None:
                 return TTL_NONE_EXPIRES_AT
             return None
-        return datetime.fromtimestamp(time.time() + secs, tz=UTC)
+        return datetime.fromtimestamp(self._clock_base(created_at) + secs, tz=UTC)
 
     def _object_reference_time(self, blob: Blob) -> datetime | None:
         updated = blob.updated
@@ -193,13 +211,46 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             return False
         return time.time() >= ref.timestamp() + ttl
 
-    def _read_live(self, object_key: str) -> bytes | None:
+    def _live_blob(self, object_key: str) -> Blob | None:
         blob = self._bucket.get_blob(object_key)
         if blob is None:
             return None
         if self._expired(blob):
             if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                 blob.delete()
+            return None
+        return blob
+
+    def _stat_from_blob(self, blob: Blob) -> RecordStat:
+        ref = self._object_reference_time(blob)
+        custom = blob.custom_time if isinstance(blob.custom_time, datetime) else None
+        size = blob.size if isinstance(blob.size, int) else None
+        etag = blob.etag if isinstance(blob.etag, str) else None
+        expires_at: datetime | None = None
+        persistent = False
+        if self._ttl_mode is GcsTtlMode.CUSTOM_TIME and custom is not None:
+            if custom.year >= 2099:
+                persistent = True
+            else:
+                expires_at = custom
+        else:
+            ttl = self.ttl_seconds()
+            if ttl is None or ref is None:
+                persistent = True
+            else:
+                expires_at = datetime.fromtimestamp(ref.timestamp() + ttl, tz=UTC)
+        return RecordStat(
+            created_at=ref,
+            modified_at=ref,
+            expires_at=expires_at,
+            size=size,
+            etag=etag,
+            persistent=persistent,
+        )
+
+    def _read_live(self, object_key: str) -> bytes | None:
+        blob = self._live_blob(object_key)
+        if blob is None:
             return None
         data = blob.download_as_bytes()
         return data if isinstance(data, bytes) else bytes(data)
@@ -210,16 +261,63 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return self._live_blob(self._object_key(self._physical_key_blob(key))) is not None
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        if not keys:
+            return set()
+        out: set[K] = set()
+        for chunk in chunk_sequence(keys, self.batch_size):
+            flags = map_concurrent(
+                chunk, self.exists, max_workers=self.io_concurrency
+            )
+            for key, ok in zip(chunk, flags, strict=True):
+                if ok:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        blob = self._live_blob(self._object_key(self._physical_key_blob(key)))
+        if blob is None:
+            return None
+        return self._stat_from_blob(blob)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        if not keys:
+            return {}
+        out: dict[K, RecordStat] = {}
+        for chunk in chunk_sequence(keys, self.batch_size):
+            stats = map_concurrent(
+                chunk, self.stat, max_workers=self.io_concurrency
+            )
+            for key, meta in zip(chunk, stats, strict=True):
+                if meta is not None:
+                    out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         require_explicit_ttl_supported(
             ttl,
             allowed=self._ttl_mode is GcsTtlMode.CUSTOM_TIME,
             backend="GcsKvStore",
         )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend="GcsKvStore",
+        )
         object_key = self._object_key(self._physical_key_blob(key))
         blob = self._bucket.blob(object_key)
         if self._ttl_mode is GcsTtlMode.CUSTOM_TIME:
-            blob.custom_time = self._custom_time_expires_at(ttl)
+            blob.custom_time = self._custom_time_expires_at(ttl, created_at=created_at)
         blob.upload_from_string(self.kvset.value_serde.serialize(value))
 
     def delete(self, key: K) -> bool:
@@ -244,14 +342,18 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         pairs = list(items.items())
         if not pairs:
             return
 
         def write(pair: tuple[K, V]) -> None:
-            self.set(pair[0], pair[1], ttl=ttl)
+            self.set(pair[0], pair[1], ttl=ttl, created_at=created_at)
 
         for chunk in chunk_sequence(pairs, self.batch_size):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
@@ -263,15 +365,12 @@ class GcsKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         deleted = 0
         limit = min(self.batch_size, GCS_BATCH_OPS_MAX)
         for chunk in chunk_sequence(unique, limit):
-
-            def _exists(key: K) -> str | None:
-                object_key = self._object_key(self._physical_key_blob(key))
-                if self._bucket.get_blob(object_key) is None:
-                    return None
-                return object_key
-
-            found = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
-            to_delete = [name for name in found if name is not None]
+            present = self.batch_exists(chunk)
+            to_delete = [
+                self._object_key(self._physical_key_blob(key))
+                for key in chunk
+                if key in present
+            ]
             if to_delete:
                 with self._bucket.client.batch():
                     for object_key in to_delete:

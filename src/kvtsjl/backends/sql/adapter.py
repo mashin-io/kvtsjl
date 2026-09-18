@@ -29,6 +29,21 @@ class SqlDbClientAdapter(ABC):
         """Return rows matching any of the full key rows (equality on all key fields)."""
 
     @abstractmethod
+    def exists_by_keys(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        keys: Sequence[SqlDbRow],
+        columns: Sequence[str] | None = None,
+    ) -> Sequence[SqlDbRow]:
+        """Return rows that exist (no value payload).
+
+        Selects ``columns`` when provided, otherwise ``key_fields``. Callers that
+        must honour TTL should pass key + clock columns (e.g. updated/expires).
+        """
+
+    @abstractmethod
     def upsert_rows(
         self,
         *,

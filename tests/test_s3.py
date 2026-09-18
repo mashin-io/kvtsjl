@@ -140,3 +140,34 @@ def test_s3_hashed_scan_unsupported(s3_client: object, s3_bucket: str) -> None:
     assert store.get("k") == "v"
     with pytest.raises(KvStoreScanUnsupported):
         list(store.scan())
+
+
+@pytest.mark.s3
+def test_object_time_mirror_secondary_resets_ttl_window(
+    s3_client: object, s3_bucket: str, str_bytes_kvset_ttl: KvSet[str, str, str, bytes]
+) -> None:
+    """Characterization: default OBJECT_TIME secondary ignores created_at.
+
+    If this starts failing because the secondary preserved the write clock, the
+    residual hole closed — update or remove this test.
+    """
+    from datetime import UTC, datetime
+
+    from kvtsjl import MemoryKvStore, MirrorKvStore
+
+    primary = MemoryKvStore(str_bytes_kvset_ttl)
+    secondary = S3KvStore(
+        str_bytes_kvset_ttl,
+        client=s3_client,  # type: ignore[arg-type]
+        bucket=s3_bucket,
+    )
+    assert primary.supports_write_clock is True
+    assert secondary.supports_write_clock is False
+    mirrored = MirrorKvStore(primary, secondary)
+    # At noon, stamp create 45s earlier → Memory expires in 15s; S3 LastModified=noon.
+    created = datetime(2024, 1, 1, 11, 59, 15, tzinfo=UTC)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        mirrored.set("k", "v", created_at=created)
+        frozen.move_to("2024-01-01 12:00:20")
+        assert primary.get("k") is None
+        assert secondary.get("k") == "v"

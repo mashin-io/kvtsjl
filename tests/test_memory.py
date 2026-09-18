@@ -147,3 +147,65 @@ def test_memory_ttl_expiry_gc_conformance() -> None:
         return MemoryKvStore(kvset, expiry_gc=gc)
 
     assert_ttl_expiry_gc(make_store)
+
+
+def test_memory_exists_ttl_expiry_gc_conformance() -> None:
+    from tests.conformance import assert_exists_ttl_expiry_gc
+
+    kvset = KvSet.with_str_keys(
+        "ttl-exists",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+
+    def make_store(gc: ExpiryGc) -> MemoryKvStore[str, str, str, bytes]:
+        return MemoryKvStore(kvset, expiry_gc=gc)
+
+    assert_exists_ttl_expiry_gc(make_store)
+
+
+def test_memory_batch_exists_and_stat(
+    store: MemoryKvStore[str, str, str, bytes],
+) -> None:
+    from tests.conformance import assert_batch_exists_and_stat
+
+    assert_batch_exists_and_stat(store)
+
+
+def test_memory_mirror_created_at_preserves_expiry(
+    str_bytes_kvset_ttl: KvSet[str, str, str, bytes],
+) -> None:
+    from tests.conformance import assert_mirror_created_at_preserves_expiry
+
+    assert_mirror_created_at_preserves_expiry(
+        MemoryKvStore(str_bytes_kvset_ttl),
+        MemoryKvStore(str_bytes_kvset_ttl),
+    )
+
+
+def test_memory_promote_preserves_expiry(
+    str_bytes_kvset_ttl: KvSet[str, str, str, bytes],
+) -> None:
+    from tests.conformance import assert_promote_preserves_expiry
+
+    assert_promote_preserves_expiry(
+        MemoryKvStore(str_bytes_kvset_ttl),
+        MemoryKvStore(str_bytes_kvset_ttl),
+    )
+
+
+def test_memory_created_at_rejected_when_unsupported() -> None:
+    """Direct leaf always supports write clock; hash redis is the raise case."""
+    from datetime import UTC, datetime
+
+    store = MemoryKvStore(
+        KvSet.with_str_keys(
+            "clk",
+            key_serde=SerDe.identity(str),
+            value_serde=SerDe.utf8_bytes(),
+        )
+    )
+    assert store.supports_write_clock is True
+    store.set("a", "v", created_at=datetime(2024, 1, 1, tzinfo=UTC))
+    assert store.get("a") == "v"

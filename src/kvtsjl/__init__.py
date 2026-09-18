@@ -54,6 +54,7 @@ from kvtsjl.store import (
     KvStore,
     MirrorKvStore,
     ReadonlyKvStore,
+    RecordStat,
     ScanQuery,
     TtlPolicy,
 )
@@ -103,6 +104,7 @@ __all__ = [
     "PhysicalRef",
     "PhysicalSchema",
     "ReadonlyKvStore",
+    "RecordStat",
     "ScanQuery",
     "Scope",
     "ScopeSegment",

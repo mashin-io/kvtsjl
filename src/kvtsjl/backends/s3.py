@@ -51,11 +51,13 @@ from kvtsjl.store.schema.layout import (
     layout_decode_for_fs,
     layout_encode_for_fs,
 )
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
     ExpiryGc,
     TtlPolicy,
     require_explicit_ttl_supported,
+    require_write_clock_supported,
 )
 
 if TYPE_CHECKING:
@@ -141,6 +143,10 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         assert self._binding.collection is not None
         self._collection_prefix = self._binding.collection
 
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._ttl_mode is S3TtlMode.EXPIRES
+
     def _clone_with_scope(self, scope: Scope) -> S3KvStore[K, V, KBLOB]:
         return S3KvStore(
             self.kvset,
@@ -154,6 +160,13 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             batch_size=self.batch_size,
             io_concurrency=self.io_concurrency,
         )
+
+    def _clock_base(self, created_at: datetime | None) -> float:
+        if created_at is None:
+            return time.time()
+        if created_at.tzinfo is None:
+            return created_at.replace(tzinfo=UTC).timestamp()
+        return created_at.timestamp()
 
     def _object_key(self, physical_key: KBLOB) -> str:
         rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
@@ -193,16 +206,123 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         data = body.read()
         return data if isinstance(data, bytes) else bytes(data)
 
+    def _head_live(self, object_key: str) -> Mapping[str, Any] | None:
+        try:
+            resp = self._client.head_object(Bucket=self._bucket, Key=object_key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+        last_modified = resp.get("LastModified")
+        last_modified_dt = last_modified if isinstance(last_modified, datetime) else None
+        if self._expired(last_modified_dt, self._expires_from_response(resp)):
+            if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                self._client.delete_object(Bucket=self._bucket, Key=object_key)
+            return None
+        return resp
+
+    def _stat_from_head(self, resp: Mapping[str, Any]) -> RecordStat:
+        last_modified = resp.get("LastModified")
+        last_modified_dt = last_modified if isinstance(last_modified, datetime) else None
+        expires = self._expires_from_response(resp)
+        size = resp.get("ContentLength")
+        etag = resp.get("ETag")
+        if isinstance(etag, str):
+            etag = etag.strip('"')
+        else:
+            etag = None
+        expires_at = expires
+        persistent = False
+        if self._ttl_mode is S3TtlMode.EXPIRES:
+            if expires is None:
+                ttl = self.ttl_seconds()
+                if ttl is None or last_modified_dt is None:
+                    persistent = True
+                else:
+                    expires_at = datetime.fromtimestamp(
+                        last_modified_dt.timestamp() + ttl, tz=UTC
+                    )
+            elif expires == TTL_NONE_EXPIRES_AT:
+                persistent = True
+                expires_at = None
+        else:
+            ttl = self.ttl_seconds()
+            if ttl is None or last_modified_dt is None:
+                persistent = True
+                expires_at = None
+            else:
+                expires_at = datetime.fromtimestamp(
+                    last_modified_dt.timestamp() + ttl, tz=UTC
+                )
+        return RecordStat(
+            created_at=last_modified_dt,
+            modified_at=last_modified_dt,
+            expires_at=expires_at,
+            size=int(size) if isinstance(size, int) else None,
+            etag=etag,
+            persistent=persistent,
+        )
+
     def get(self, key: K) -> V | None:
         raw = self._read_live(self._object_key(self._physical_key_blob(key)))
         if raw is None:
             return None
         return self.kvset.value_serde.deserialize(raw)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return (
+            self._head_live(self._object_key(self._physical_key_blob(key))) is not None
+        )
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        if not keys:
+            return set()
+        out: set[K] = set()
+        for chunk in chunk_sequence(keys, self.batch_size):
+            flags = map_concurrent(
+                chunk, self.exists, max_workers=self.io_concurrency
+            )
+            for key, ok in zip(chunk, flags, strict=True):
+                if ok:
+                    out.add(key)
+        return out
+
+    def stat(self, key: K) -> RecordStat | None:
+        head = self._head_live(self._object_key(self._physical_key_blob(key)))
+        if head is None:
+            return None
+        return self._stat_from_head(head)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        if not keys:
+            return {}
+        out: dict[K, RecordStat] = {}
+        for chunk in chunk_sequence(keys, self.batch_size):
+            stats = map_concurrent(
+                chunk, self.stat, max_workers=self.io_concurrency
+            )
+            for key, meta in zip(chunk, stats, strict=True):
+                if meta is not None:
+                    out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         require_explicit_ttl_supported(
             ttl,
             allowed=self._ttl_mode is S3TtlMode.EXPIRES,
+            backend="S3KvStore",
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
             backend="S3KvStore",
         )
         kwargs: dict[str, object] = {
@@ -215,7 +335,9 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
             kwargs["Expires"] = (
                 TTL_NONE_EXPIRES_AT
                 if secs is None
-                else datetime.fromtimestamp(time.time() + secs, tz=UTC)
+                else datetime.fromtimestamp(
+                    self._clock_base(created_at) + secs, tz=UTC
+                )
             )
         self._client.put_object(**kwargs)  # type: ignore[arg-type]
 
@@ -245,14 +367,18 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         return out
 
     def batch_set(
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
         pairs = list(items.items())
         if not pairs:
             return
 
         def write(pair: tuple[K, V]) -> None:
-            self.set(pair[0], pair[1], ttl=ttl)
+            self.set(pair[0], pair[1], ttl=ttl, created_at=created_at)
 
         for chunk in chunk_sequence(pairs, self.batch_size):
             map_concurrent(chunk, write, max_workers=self.io_concurrency)
@@ -264,30 +390,18 @@ class S3KvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
         deleted = 0
         limit = min(self.batch_size, S3_DELETE_OBJECTS_MAX)
         for chunk in chunk_sequence(unique, limit):
-
-            def _exists(key: K) -> bool:
-                object_key = self._object_key(self._physical_key_blob(key))
-                try:
-                    self._client.head_object(Bucket=self._bucket, Key=object_key)
-                except ClientError as exc:
-                    code = exc.response.get("Error", {}).get("Code", "")
-                    if code in {"404", "NoSuchKey", "NotFound"}:
-                        return False
-                    raise
-                return True
-
-            flags = map_concurrent(chunk, _exists, max_workers=self.io_concurrency)
+            present = self.batch_exists(chunk)
             to_delete = [
                 {"Key": self._object_key(self._physical_key_blob(key))}
-                for key, ok in zip(chunk, flags, strict=True)
-                if ok
+                for key in chunk
+                if key in present
             ]
             if to_delete:
                 self._client.delete_objects(
                     Bucket=self._bucket,
                     Delete={"Objects": to_delete, "Quiet": True},  # type: ignore[arg-type]
                 )
-            deleted += sum(1 for ok in flags if ok)
+            deleted += len(to_delete)
         return deleted
 
     def _iter_object_keys(self) -> Iterator[tuple[str, datetime | None]]:

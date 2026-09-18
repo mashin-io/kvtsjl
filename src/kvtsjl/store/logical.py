@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
 from kvtsjl.batching import chunk_sequence
@@ -11,7 +12,7 @@ from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
 if TYPE_CHECKING:
     from kvtsjl.index.logical.abc import Index
@@ -33,22 +34,49 @@ class KvStore[K, V](KeyMap[K, V], ABC):
     scope: Scope
     batch_size: int
 
+    @property
+    def supports_write_clock(self) -> bool:
+        """Whether ``created_at=`` on set can be honoured by this store.
+
+        Leaves that cannot set the expiry clock (e.g. object-store OBJECT_TIME)
+        return False. Compose wrappers report the parts that govern reads.
+        """
+        return False
+
     @abstractmethod
     def key_layout(self) -> KeyLayout:
         """Key physicalization policy (from the leaf ``KvSet``)."""
 
     @abstractmethod
     def set(  # type: ignore[override]
-        self, key: K, value: V, *, ttl: TtlPolicy | None = None
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
-        """Insert or replace ``key``. ``ttl=None`` uses the ``KvSet`` policy."""
+        """Insert or replace ``key``. ``ttl=None`` uses the ``KvSet`` policy.
+
+        ``created_at`` is only accepted when ``supports_write_clock`` is True;
+        otherwise raise (same family as unsupported per-write ``ttl=``).
+        """
 
     def batch_set(  # type: ignore[override]
-        self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
     ) -> None:
-        """Insert or replace many entries with the same optional ``ttl``."""
+        """Insert or replace many entries with the same optional ``ttl`` / clock."""
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend=type(self).__name__,
+        )
         for key, value in items.items():
-            self.set(key, value, ttl=ttl)
+            self.set(key, value, ttl=ttl, created_at=created_at)
 
     @abstractmethod
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:

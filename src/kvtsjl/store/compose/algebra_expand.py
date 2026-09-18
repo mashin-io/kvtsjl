@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 
 from kvtsjl.keymap import KeyMap
 from kvtsjl.keymap_algebra.expand import ExpandKeyMap, ExpandMapKeyMap
@@ -10,6 +11,7 @@ from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -33,7 +35,26 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
     def get(self, key: K) -> KeyMap[SK, SV] | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: KeyMap[SK, SV], *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return self._src.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._src.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._src.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._src.batch_stat(keys)
+
+    def set(
+        self,
+        key: K,
+        value: KeyMap[SK, SV],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -93,7 +114,26 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
     def get(self, key: K) -> U | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        return self._src.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._src.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._src.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._src.batch_stat(keys)
+
+    def set(
+        self,
+        key: K,
+        value: U,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:

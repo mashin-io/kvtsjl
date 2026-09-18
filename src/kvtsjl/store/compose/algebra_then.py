@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime
 
 from kvtsjl.keymap_algebra.then import ThenKeyMap, ThenWithKeyMap
 from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -26,7 +28,37 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        mid = self._left.get(key)
+        if mid is None:
+            return False
+        return self._right.exists(mid)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return {key for key in keys if self.exists(key)}
+
+    def stat(self, key: K) -> RecordStat | None:
+        mid = self._left.get(key)
+        if mid is None:
+            return None
+        return self._right.stat(mid)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out: dict[K, RecordStat] = {}
+        for key in keys:
+            meta = self.stat(key)
+            if meta is not None:
+                out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
@@ -90,7 +122,37 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
     def get(self, key: K) -> V | None:
         return self._view.get(key)
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None) -> None:
+    def exists(self, key: K) -> bool:
+        mid = self._left.get(key)
+        if mid is None:
+            return False
+        return self._right.exists(self._key_of(key, mid))
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return {key for key in keys if self.exists(key)}
+
+    def stat(self, key: K) -> RecordStat | None:
+        mid = self._left.get(key)
+        if mid is None:
+            return None
+        return self._right.stat(self._key_of(key, mid))
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        out: dict[K, RecordStat] = {}
+        for key in keys:
+            meta = self.stat(key)
+            if meta is not None:
+                out[key] = meta
+        return out
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         raise_readonly("set")
 
     def delete(self, key: K) -> bool:
