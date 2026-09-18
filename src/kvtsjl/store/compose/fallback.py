@@ -21,6 +21,10 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
 
     ``exists`` / ``stat`` probe secondary on primary miss but **do not promote**
     — only ``get`` / ``batch_get`` may write a secondary hit into the primary.
+
+    Promote failures are **best-effort**: the read still returns the secondary
+    value; a failed promote is logged (correct behaviour after a successful
+    read, not a sync bug).
     """
 
     def __init__(
@@ -48,7 +52,12 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
             try:
                 self._promote_one(key, value)
             except Exception:
-                logger.exception("fallback promote failed for key")
+                # BEST_EFFORT: keep the read result; promote is non-fatal.
+                try:
+                    logger.exception("fallback promote failed for key")
+                except Exception:
+                    # Logging must not replace the successful read result.
+                    pass
         return value
 
     def exists(self, key: K) -> bool:
@@ -99,7 +108,12 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
             try:
                 self._promote_many(secondary_found)
             except Exception:
-                logger.exception("fallback batch promote failed")
+                # BEST_EFFORT: keep the read result; promote is non-fatal.
+                try:
+                    logger.exception("fallback batch promote failed")
+                except Exception:
+                    # Logging must not replace the successful read result.
+                    pass
         found.update(secondary_found)
         return found
 

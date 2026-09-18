@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 import logging
 from typing import Any, Literal, cast, overload
 
-from kvtsjl.exceptions import KvStoreIndexError
+from kvtsjl.exceptions import KvStoreIndexError, PartialSyncError
 from kvtsjl.index.logical.abc import Index, IndexHit
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _index_fanout_label(i: int, index: Index[Any, Any, Any, Any]) -> str:
+    """Stable unique label; must not raise (runs on the failure path)."""
+    name = getattr(getattr(index, "index_set", None), "name", None) or type(index).__name__
+    return f"{i}:{name}"
 
 
 class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
@@ -29,6 +36,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         *,
         default_index: Index[Any, K, V, Any] | None = None,
         bundle: ViaT | None = None,
+        sync_policy: SyncPolicy = SyncPolicy.REQUIRED,
     ) -> None:
         super().__init__(underlying)
         self._indexes: tuple[Index[Any, K, V, Any], ...] = tuple(indexes)
@@ -37,8 +45,13 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
             raise KvStoreIndexError("default_index must be one of the attached indexes")
         self._default_index = default_index
         self._bundle = bundle
+        self._sync_policy = sync_policy
         for index in self._indexes:
             index._bind(self)
+
+    @property
+    def sync_policy(self) -> SyncPolicy:
+        return self._sync_policy
 
     @property
     def via(self) -> ViaT | None:
@@ -100,7 +113,9 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
         keys = self._underlying._gc_expired_keys(max_entries=max_entries)
         if keys:
-            self._sync_batch_delete(keys)
+            # Always BEST_EFFORT: raising would fail a successful cleanup;
+            # leftover index entries are phantoms filtered by _hydrate.
+            self._sync_batch_delete(keys, policy=SyncPolicy.BEST_EFFORT)
         return keys
 
     def _clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
@@ -115,6 +130,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
                 else None
             ),
             bundle=self._remap_bundle(remap),
+            sync_policy=self._sync_policy,
         )
 
     def _remap_bundle(
@@ -145,6 +161,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
             "IndexedKvStore",
             underlying=self._underlying,
             indexes=list(self._indexes),
+            sync_policy=self._sync_policy,
         )
 
     def _require_attached[Q, M](self, index: Index[Q, K, V, M]) -> Index[Q, K, V, M]:
@@ -152,45 +169,86 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
             raise KvStoreIndexError("index is not attached to this store")
         return index
 
-    def _sync_upsert(self, key: K, value: V) -> None:
-        for index in self._indexes:
+    def _finish_fanout(
+        self,
+        failures: dict[str, Exception],
+        *,
+        policy: SyncPolicy,
+        what: str,
+    ) -> None:
+        if not failures:
+            return
+        if policy is SyncPolicy.BEST_EFFORT:
+            for label, exc in failures.items():
+                try:
+                    logger.exception(
+                        "index %s failed (%s)",
+                        what,
+                        label,
+                        exc_info=exc,
+                    )
+                except Exception:
+                    # Logging must not replace the sync failure already in `failures`.
+                    pass
+            return
+        first = next(iter(failures.values()))
+        raise PartialSyncError(
+            f"index {what} failed for {len(failures)} target(s)",
+            failures=failures,
+        ) from first
+
+    def _run_index_ops(
+        self,
+        op: Callable[[Index[Any, K, V, Any]], object],
+        *,
+        what: str,
+        policy: SyncPolicy | None = None,
+    ) -> None:
+        effective = policy if policy is not None else self._sync_policy
+        failures: dict[str, Exception] = {}
+        for i, index in enumerate(self._indexes):
             if not index.sync_on_write:
                 continue
             try:
-                index.sync(key, value)
-            except Exception:
-                logger.exception("index upsert failed (%s)", type(index).__name__)
+                op(index)
+            except Exception as exc:
+                label = _index_fanout_label(i, index)
+                failures[label] = exc
+        self._finish_fanout(failures, policy=effective, what=what)
+
+    def _sync_upsert(self, key: K, value: V) -> None:
+        self._run_index_ops(
+            lambda index: index.sync(key, value),
+            what="upsert",
+        )
 
     def _sync_batch_upsert(self, items: Mapping[K, V]) -> None:
         if not items:
             return
-        for index in self._indexes:
-            if not index.sync_on_write:
-                continue
-            try:
-                index.batch_sync(items)
-            except Exception:
-                logger.exception("index batch upsert failed (%s)", type(index).__name__)
+        self._run_index_ops(
+            lambda index: index.batch_sync(items),
+            what="batch upsert",
+        )
 
     def _sync_delete(self, key: K) -> None:
-        for index in self._indexes:
-            if not index.sync_on_write:
-                continue
-            try:
-                index.delete(key)
-            except Exception:
-                logger.exception("index delete failed (%s)", type(index).__name__)
+        self._run_index_ops(
+            lambda index: index.delete(key),
+            what="delete",
+        )
 
-    def _sync_batch_delete(self, keys: Sequence[K]) -> None:
+    def _sync_batch_delete(
+        self,
+        keys: Sequence[K],
+        *,
+        policy: SyncPolicy | None = None,
+    ) -> None:
         if not keys:
             return
-        for index in self._indexes:
-            if not index.sync_on_write:
-                continue
-            try:
-                index.batch_delete(keys)
-            except Exception:
-                logger.exception("index batch delete failed (%s)", type(index).__name__)
+        self._run_index_ops(
+            lambda index: index.batch_delete(keys),
+            what="batch delete",
+            policy=policy,
+        )
 
     def search_hits[Q, M](
         self, index: Index[Q, K, V, M], query: Q, *, limit: int = 100

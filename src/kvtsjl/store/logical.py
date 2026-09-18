@@ -12,6 +12,7 @@ from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
+from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
 if TYPE_CHECKING:
@@ -276,11 +277,16 @@ class KvStore[K, V](KeyMap[K, V], ABC):
         """Left-biased merge — alias of ``fallback_read``."""
         return self.fallback_read(other, promote=promote)
 
-    def mirror(self, secondary: KvStore[K, V]) -> KvStore[K, V]:
+    def mirror(
+        self,
+        secondary: KvStore[K, V],
+        *,
+        sync_policy: SyncPolicy = SyncPolicy.REQUIRED,
+    ) -> KvStore[K, V]:
         """Write-through to secondary; reads stay on primary."""
         from kvtsjl.store.compose.mirror import MirrorKvStore
 
-        return MirrorKvStore(self, secondary)
+        return MirrorKvStore(self, secondary, sync_policy=sync_policy)
 
     def map[U](self, forward: Callable[[V], U]) -> KvStore[K, U]:  # type: ignore[override]
         from kvtsjl.store.compose.algebra_map import MappedKvStore
@@ -406,14 +412,22 @@ class KvStore[K, V](KeyMap[K, V], ABC):
         index: Index[Any, K, V, Any],
         /,
         *more: Index[Any, K, V, Any],
+        sync_policy: SyncPolicy = SyncPolicy.REQUIRED,
     ) -> IndexedKvStore[K, V, None]:
         from kvtsjl.store.compose.indexed import IndexedKvStore
 
         indexes = (index, *more)
         default = index if not more else None
-        return IndexedKvStore(self, indexes, default_index=default)
+        return IndexedKvStore(
+            self, indexes, default_index=default, sync_policy=sync_policy
+        )
 
-    def indexed_as[ViaT](self, bundle: ViaT) -> IndexedKvStore[K, V, ViaT]:
+    def indexed_as[ViaT](
+        self,
+        bundle: ViaT,
+        *,
+        sync_policy: SyncPolicy = SyncPolicy.REQUIRED,
+    ) -> IndexedKvStore[K, V, ViaT]:
         from kvtsjl.index.logical.bundle import indexes_from_bundle
         from kvtsjl.store.compose.indexed import IndexedKvStore
 
@@ -424,4 +438,5 @@ class KvStore[K, V](KeyMap[K, V], ABC):
             indexes,  # type: ignore[arg-type]
             default_index=default,  # type: ignore[arg-type]
             bundle=bundle,
+            sync_policy=sync_policy,
         )

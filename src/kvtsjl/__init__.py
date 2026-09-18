@@ -25,6 +25,7 @@ from kvtsjl.exceptions import (
     KvStoreScopeError,
     KvStoreSerDeError,
     KvStoreTtlUnsupported,
+    PartialSyncError,
 )
 from kvtsjl.index import (
     EmptyEnvelope,
@@ -56,6 +57,7 @@ from kvtsjl.store import (
     ReadonlyKvStore,
     RecordStat,
     ScanQuery,
+    SyncPolicy,
     TtlPolicy,
 )
 
@@ -100,6 +102,7 @@ __all__ = [
     "NamespaceBinder",
     "NativeCollectionBinder",
     "NativeStrCollectionBinder",
+    "PartialSyncError",
     "PhysicalBackend",
     "PhysicalRef",
     "PhysicalSchema",
@@ -110,6 +113,7 @@ __all__ = [
     "ScopeSegment",
     "SerDe",
     "StrBlobOps",
+    "SyncPolicy",
     "TtlPolicy",
     "VectorEnvelope",
     "VectorIndex",

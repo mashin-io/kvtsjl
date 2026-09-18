@@ -35,6 +35,8 @@ def _omit_field(key: str, value: Any) -> bool:
         return True
     if key == "sync_on_write" and value is True:
         return True
+    if key == "sync_policy" and getattr(value, "value", value) == "required":
+        return True
     return False
 
 

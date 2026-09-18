@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kvtsjl.store.schema.kvset import KvSet, join_blobs
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
+from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
 
@@ -13,6 +14,7 @@ __all__ = [
     "KvSet",
     "RecordStat",
     "ScanQuery",
+    "SyncPolicy",
     "TtlPolicy",
     "join_blobs",
     "supports_prefix_scan",
