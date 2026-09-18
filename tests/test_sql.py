@@ -31,6 +31,20 @@ def test_sql_scan_and_scope(sql_store: SqlDbKvStore[str, str]) -> None:
 
 
 @pytest.mark.sql
+def test_sql_scope_isolation(sql_store: SqlDbKvStore[str, str]) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(sql_store)
+
+
+@pytest.mark.sql
+def test_sql_batch_return_counts(sql_store: SqlDbKvStore[str, str]) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(sql_store)
+
+
+@pytest.mark.sql
 def test_sql_ttl_collection_updated_at(sqlite_conn: sqlite3.Connection) -> None:
     sql_kvset = make_sql_kvset(
         "ttl",

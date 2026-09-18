@@ -125,22 +125,101 @@ def test_scoped_default_search() -> None:
     store.set("a", "red")
     assert store.search("red") == ["red"]
     scoped = store.scoped(tenant="t")
+    # Remapped default_index must be one of the scoped indexes.
+    assert scoped.default_index is not None
+    assert scoped.default_index in scoped.indexes
+    assert id(scoped.default_index) != id(by_tag)
     scoped.set("b", "blue")
     assert scoped.search("blue") == ["blue"]
+    assert scoped.search("red") == []
+    assert store.search("red") == ["red"]
     assert scoped.via is None
 
 
-def test_scoped_via_rebinds() -> None:
+def test_scoped_via_remaps_bundle() -> None:
     tags = MemoryTermIndex[str, str](terms_of=lambda _k, v: v.split())
-    store = _memory_store().indexed_as(DocIndexes(tags=tags, keys=MemoryKeyIndex()))
+    keys = MemoryKeyIndex[str, str]()
+    store = _memory_store().indexed_as(DocIndexes(tags=tags, keys=keys))
     store.set("a", "red")
     scoped = store.scoped(tenant="t")
     assert scoped.via is not None
+    assert scoped.via.tags in scoped.indexes
+    assert scoped.via.keys in scoped.indexes
+    assert id(scoped.via.tags) != id(tags)
     scoped.set("b", "blue")
     assert scoped.via.tags("blue") == ["blue"]
-    # Parent via access rebinds for parent store hydration.
+    assert scoped.via.tags("red") == []
     assert store.via is not None
     assert store.via.tags("red") == ["red"]
+    assert store.via.tags("blue") == []
+
+
+def test_cross_scope_term_search_isolated() -> None:
+    idx = MemoryTermIndex[str, str](terms_of=lambda _k, v: [v])
+    root = _memory_store().indexed(idx)
+    acme, zeta = root.scoped(tenant="acme"), root.scoped(tenant="zeta")
+    acme.set("doc1", "acme-secret")
+    zeta.set("doc1", "zeta-secret")
+    assert acme.get("doc1") == "acme-secret"
+    assert acme.search("zeta-secret") == []
+    assert acme.search("acme-secret") == ["acme-secret"]
+    assert zeta.search("zeta-secret") == ["zeta-secret"]
+    assert zeta.search("acme-secret") == []
+    with pytest.raises(KvStoreIndexError, match="not attached"):
+        acme.search(idx, "acme-secret")
+
+
+def test_scope_slash_in_id_does_not_collide_index_buckets() -> None:
+    """``path_display()`` joins with ``/``; segment tuples must stay distinct."""
+    idx = MemoryTermIndex[str, str](terms_of=lambda _k, v: [v])
+    root = _memory_store().indexed(idx)
+    nested = root.scoped(tenant="a").scoped(x="b")
+    slash_id = root.scoped(**{"tenant": "a/x/b"})
+    nested.set("doc1", "A-secret")
+    slash_id.set("doc1", "B-secret")
+    assert nested.get("doc1") == "A-secret"
+    assert slash_id.get("doc1") == "B-secret"
+    assert nested.search("A-secret") == ["A-secret"]
+    assert nested.search("B-secret") == []
+    assert slash_id.search("B-secret") == ["B-secret"]
+    assert slash_id.search("A-secret") == []
+
+
+def test_scoped_via_resolves_against_scoped_store() -> None:
+    tags = MemoryTermIndex[str, str](terms_of=lambda _k, v: [v])
+    root = _memory_store().indexed_as(DocIndexes(tags=tags, keys=MemoryKeyIndex()))
+    acme = root.scoped(tenant="acme")
+    zeta = root.scoped(tenant="zeta")
+    assert acme.via is not None and zeta.via is not None
+    acme.set("doc1", "acme-secret")
+    zeta.set("doc1", "zeta-secret")
+    assert acme.via.tags("acme-secret") == ["acme-secret"]
+    assert acme.via.tags("zeta-secret") == []
+    assert zeta.via.tags("zeta-secret") == ["zeta-secret"]
+    assert zeta.via.tags("acme-secret") == []
+    assert acme.via.tags("acme-secret") == acme.search(acme.via.tags, "acme-secret")
+
+
+def test_rescope_idempotent_search() -> None:
+    idx = MemoryTermIndex[str, str](terms_of=lambda _k, v: [v])
+    root = _memory_store().indexed(idx)
+    a1 = root.scoped(tenant="acme")
+    a1.set("doc1", "hello")
+    a2 = root.scoped(tenant="acme")
+    assert a1.get("doc1") == "hello"
+    assert a1.search("hello") == ["hello"]
+    assert a2.search("hello") == ["hello"]
+    a2.set("doc2", "world")
+    assert a1.search("world") == ["world"]
+    assert a2.search("world") == ["world"]
+
+
+def test_index_bind_once_rejects_rebind() -> None:
+    tags = MemoryTermIndex[str, str](terms_of=lambda _k, v: v.split())
+    store = _memory_store().indexed(tags)
+    other = _memory_store().indexed(MemoryKeyIndex())
+    with pytest.raises(KvStoreIndexError, match="already bound"):
+        tags._bind(other)
 
 
 @dataclass(frozen=True, slots=True)

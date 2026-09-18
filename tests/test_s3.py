@@ -29,6 +29,20 @@ def test_s3_scan_and_scope(s3_store: S3KvStore[str, str, str]) -> None:
 
 
 @pytest.mark.s3
+def test_s3_scope_isolation(s3_store: S3KvStore[str, str, str]) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(s3_store)
+
+
+@pytest.mark.s3
+def test_s3_batch_return_counts(s3_store: S3KvStore[str, str, str]) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(s3_store)
+
+
+@pytest.mark.s3
 def test_s3_ttl_via_last_modified(s3_client: object, s3_bucket: str) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",

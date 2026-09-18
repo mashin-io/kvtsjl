@@ -21,7 +21,7 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
-from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.kvset import KvSet
@@ -79,6 +79,11 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
         )
         self._client = client
         self._use_hash = self._binding.collection is not None
+        if self._use_hash and self.kvset.ttl_policy.ttl_seconds() is not None:
+            raise KvStoreTtlUnsupported(
+                "RedisKvStore hash collections do not support KvSet.ttl_policy; "
+                "use a KvSet with TtlPolicy.none() (or omit ttl_policy)"
+            )
 
     @classmethod
     def flat(

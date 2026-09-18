@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import fields, is_dataclass
 import logging
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 
 from kvtsjl.exceptions import KvStoreIndexError
 from kvtsjl.index.logical.abc import Index, IndexHit
@@ -91,12 +92,39 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         return keys
 
     def _clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
+        clones = [idx.clone_with_scope(scope) for idx in self._indexes]
+        remap = {id(o): c for o, c in zip(self._indexes, clones, strict=True)}
         return IndexedKvStore(
             self._underlying._clone_with_scope(scope),
-            self._indexes,
-            default_index=self._default_index,
-            bundle=self._bundle,
+            clones,
+            default_index=(
+                remap[id(self._default_index)]
+                if self._default_index is not None
+                else None
+            ),
+            bundle=self._remap_bundle(remap),
         )
+
+    def _remap_bundle(
+        self, remap: dict[int, Index[Any, K, V, Any]]
+    ) -> ViaT | None:
+        bundle = self._bundle
+        if bundle is None:
+            return None
+        # Reconstruct over init fields only — dataclasses.replace rejects
+        # init=False fields, and Index fields are already required to be init.
+        if not is_dataclass(bundle) or isinstance(bundle, type):
+            return bundle
+        kwargs = {
+            f.name: (
+                remap[id(getattr(bundle, f.name))]
+                if id(getattr(bundle, f.name)) in remap
+                else getattr(bundle, f.name)
+            )
+            for f in fields(bundle)
+            if f.init
+        }
+        return cast(ViaT, type(bundle)(**kwargs))
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr

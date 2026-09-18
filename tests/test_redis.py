@@ -57,6 +57,54 @@ def test_redis_hash_scan_and_scope(
 
 
 @pytest.mark.redis
+def test_redis_flat_scope_isolation(
+    redis_flat_store: RedisKvStore[str, str, str, bytes, None],
+) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(redis_flat_store)
+
+
+@pytest.mark.redis
+def test_redis_flat_batch_return_counts(
+    redis_flat_store: RedisKvStore[str, str, str, bytes, None],
+) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(redis_flat_store)
+
+
+@pytest.mark.redis
+def test_redis_hash_scope_isolation(
+    redis_hash_store: RedisKvStore[str, str, str, bytes, str],
+) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(redis_hash_store)
+
+
+@pytest.mark.redis
+def test_redis_hash_batch_return_counts(
+    redis_hash_store: RedisKvStore[str, str, str, bytes, str],
+) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(redis_hash_store)
+
+
+@pytest.mark.redis
+def test_redis_hash_rejects_collection_ttl(fake_redis: fakeredis.FakeRedis) -> None:
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy.hourly(),
+    )
+    with pytest.raises(KvStoreTtlUnsupported, match="hash"):
+        RedisKvStore.hash_collection(kvset, fake_redis)
+
+
+@pytest.mark.redis
 def test_redis_flat_ttl(fake_redis: fakeredis.FakeRedis) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",

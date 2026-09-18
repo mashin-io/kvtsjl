@@ -28,6 +28,18 @@ def test_memory_scan_and_scope(store: MemoryKvStore[str, str, str, bytes]) -> No
     assert_scan_and_scope(store)
 
 
+def test_memory_scope_isolation(store: MemoryKvStore[str, str, str, bytes]) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(store)
+
+
+def test_memory_batch_return_counts(store: MemoryKvStore[str, str, str, bytes]) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(store)
+
+
 def test_memory_get_or_set(store: MemoryKvStore[str, str, str, bytes]) -> None:
     calls = {"n": 0}
 
@@ -119,3 +131,19 @@ def test_readonly_gc_expired_raises(
 
     with pytest.raises(KvStoreReadOnlyError):
         store.readonly().gc_expired(max_entries=1)
+
+
+def test_memory_ttl_expiry_gc_conformance() -> None:
+    from tests.conformance import assert_ttl_expiry_gc
+
+    kvset = KvSet.with_str_keys(
+        "ttl",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.utf8_bytes(),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+
+    def make_store(gc: ExpiryGc) -> MemoryKvStore[str, str, str, bytes]:
+        return MemoryKvStore(kvset, expiry_gc=gc)
+
+    assert_ttl_expiry_gc(make_store)

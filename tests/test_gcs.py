@@ -30,6 +30,20 @@ def test_gcs_scan_and_scope(gcs_store: GcsKvStore[str, str, str]) -> None:
 
 
 @pytest.mark.gcs
+def test_gcs_scope_isolation(gcs_store: GcsKvStore[str, str, str]) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(gcs_store)
+
+
+@pytest.mark.gcs
+def test_gcs_batch_return_counts(gcs_store: GcsKvStore[str, str, str]) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(gcs_store)
+
+
+@pytest.mark.gcs
 def test_gcs_ttl_object_time_default(fake_gcs_bucket: FakeGcsBucket) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",

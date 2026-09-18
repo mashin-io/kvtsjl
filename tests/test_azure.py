@@ -30,6 +30,20 @@ def test_azure_scan_and_scope(azure_store: AzureBlobKvStore[str, str, str]) -> N
 
 
 @pytest.mark.azure
+def test_azure_scope_isolation(azure_store: AzureBlobKvStore[str, str, str]) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(azure_store)
+
+
+@pytest.mark.azure
+def test_azure_batch_return_counts(azure_store: AzureBlobKvStore[str, str, str]) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(azure_store)
+
+
+@pytest.mark.azure
 def test_azure_ttl_object_time_default(fake_azure_container: FakeAzureContainer) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",

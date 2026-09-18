@@ -5,10 +5,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, Self, overload
 
-from kvtsjl.exceptions import KvStoreIndexError
+from kvtsjl.exceptions import KvStoreIndexError, KvStoreScopeError
 from kvtsjl.keymap import KeyMap
+from kvtsjl.scope import Scope
 
 if TYPE_CHECKING:
     from kvtsjl.store.compose.indexed import IndexedKvStore
@@ -35,7 +36,20 @@ class Index[Q, K, V, M](KeyMap[K, M], ABC):
     _store: IndexedKvStore[K, V, Any] | None = None
 
     def _bind(self, store: IndexedKvStore[K, V, Any]) -> None:
+        if self._store is not None and self._store is not store:
+            raise KvStoreIndexError(
+                f"{type(self).__name__} is already bound to another store"
+            )
         self._store = store
+
+    def clone_with_scope(self, scope: Scope) -> Self:
+        """Return a scoped view of this index, or raise if unsupported.
+
+        Isolation boundary: indexes that cannot partition must fail closed.
+        """
+        raise KvStoreScopeError(
+            f"{type(self).__name__} cannot be scoped with the store"
+        )
 
     @abstractmethod
     def search(self, query: Q, *, limit: int = 100) -> Sequence[IndexHit[K, M]]:

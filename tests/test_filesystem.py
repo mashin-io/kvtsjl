@@ -94,6 +94,22 @@ def test_filesystem_scan_and_scope(store: FilesystemKvStore[str, str, str]) -> N
     assert_scan_and_scope(store)
 
 
+def test_filesystem_scope_isolation(
+    str_bytes_kvset: KvSet[str, str, str, bytes], tmp_path: Path
+) -> None:
+    from tests.conformance import assert_scope_isolation
+
+    assert_scope_isolation(FilesystemKvStore(str_bytes_kvset, root=tmp_path))
+
+
+def test_filesystem_batch_return_counts(
+    str_bytes_kvset: KvSet[str, str, str, bytes], tmp_path: Path
+) -> None:
+    from tests.conformance import assert_batch_return_counts
+
+    assert_batch_return_counts(FilesystemKvStore(str_bytes_kvset, root=tmp_path))
+
+
 def test_filesystem_no_meta_sidecars(
     store: FilesystemKvStore[str, str, str], tmp_path: Path
 ) -> None:
