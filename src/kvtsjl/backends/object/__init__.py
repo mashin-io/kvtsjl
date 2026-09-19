@@ -10,6 +10,7 @@ from kvtsjl.backends.object.binding import (
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
 from kvtsjl.backends.object.ttl import (
+    AzureMetadataTtl,
     GcsCustomTimeTtl,
     ObjectTimeTtl,
     S3ExpiresTtl,
@@ -17,6 +18,7 @@ from kvtsjl.backends.object.ttl import (
 )
 
 __all__ = [
+    "AzureMetadataTtl",
     "BlobDriver",
     "BlobStat",
     "GcsCustomTimeTtl",

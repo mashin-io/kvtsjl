@@ -24,7 +24,7 @@ GCS JSON API ``client.batch()`` for multi-delete (after a concurrent existence p
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from kvtsjl.backends.object.binding import normalize_key_prefix, object_collection_binder
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from google.cloud.storage import Bucket  # google-cloud-storage is not py.typed
 
 
-class GcsTtlMode(str, Enum):
+class GcsTtlMode(StrEnum):
     """How ``GcsKvStore`` applies ``TtlPolicy``."""
 
     OBJECT_TIME = "object_time"

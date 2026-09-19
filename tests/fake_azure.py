@@ -28,6 +28,9 @@ class _FakeDownload:
 class FakeAzureBlobProperties:
     last_modified: datetime
     metadata: dict[str, str]
+    size: int | None = None
+    etag: str | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -35,6 +38,8 @@ class FakeAzureBlobItem:
     name: str
     last_modified: datetime
     metadata: dict[str, str]
+    size: int | None = None
+    etag: str | None = None
 
 
 @dataclass
@@ -76,6 +81,8 @@ class FakeAzureBlobClient:
         return FakeAzureBlobProperties(
             last_modified=stored.last_modified,
             metadata=dict(stored.metadata),
+            size=len(stored.body),
+            name=self.name,
         )
 
 
@@ -104,4 +111,5 @@ class FakeAzureContainer:
                     name=name,
                     last_modified=stored.last_modified,
                     metadata=dict(stored.metadata),
+                    size=len(stored.body),
                 )

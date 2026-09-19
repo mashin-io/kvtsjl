@@ -230,3 +230,64 @@ class GcsCustomTimeTtl(TtlSource):
         return {
             "custom_time": datetime.fromtimestamp(clock_base + ttl_seconds, tz=UTC)
         }
+
+
+class AzureMetadataTtl(TtlSource):
+    """Blob metadata ``expires`` on explicit ``ttl=``; write-clock capable."""
+
+    _META_KEY = "expires"
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return True
+
+    @property
+    def supports_per_write_ttl(self) -> bool:
+        return True
+
+    def is_expired(
+        self, stat: BlobStat, *, collection_ttl_seconds: int | None
+    ) -> bool:
+        if stat.native_expires_at is not None:
+            return time.time() >= stat.native_expires_at.timestamp()
+        if collection_ttl_seconds is None or stat.modified_at is None:
+            return False
+        return time.time() >= stat.modified_at.timestamp() + collection_ttl_seconds
+
+    def to_record_stat(
+        self, stat: BlobStat, *, collection_ttl_seconds: int | None
+    ) -> RecordStat:
+        modified = stat.modified_at
+        expires = stat.native_expires_at
+        persistent = False
+        expires_at = expires
+        if expires is None:
+            if collection_ttl_seconds is None or modified is None:
+                persistent = True
+            else:
+                expires_at = datetime.fromtimestamp(
+                    modified.timestamp() + collection_ttl_seconds, tz=UTC
+                )
+        elif expires == TTL_NONE_EXPIRES_AT:
+            persistent = True
+            expires_at = None
+        return RecordStat(
+            created_at=modified,
+            modified_at=modified,
+            expires_at=expires_at,
+            size=stat.size,
+            etag=stat.etag,
+            persistent=persistent,
+        )
+
+    def write_headers(
+        self,
+        *,
+        ttl_seconds: int | None,
+        clock_base: float,
+        explicit_ttl: bool,
+    ) -> dict[str, Any]:
+        if not explicit_ttl:
+            return {}
+        token = "none" if ttl_seconds is None else str(clock_base + ttl_seconds)
+        return {"metadata": {self._META_KEY: token}}

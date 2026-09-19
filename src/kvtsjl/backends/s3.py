@@ -23,7 +23,7 @@ with concurrent chunks; existence probe keeps the return count matching point
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from kvtsjl.backends.object.binding import normalize_key_prefix, object_collection_binder
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
 
-class S3TtlMode(str, Enum):
+class S3TtlMode(StrEnum):
     """How ``S3KvStore`` applies TTL."""
 
     OBJECT_TIME = "object_time"

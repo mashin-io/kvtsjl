@@ -44,6 +44,15 @@ def test_azure_batch_return_counts(azure_store: AzureBlobKvStore[str, str, str])
 
 
 @pytest.mark.azure
+def test_azure_key_only_scan_skips_body_reads(
+    azure_store: AzureBlobKvStore[str, str, str],
+) -> None:
+    from tests.conformance import assert_key_only_scan_skips_body_reads
+
+    assert_key_only_scan_skips_body_reads(azure_store)
+
+
+@pytest.mark.azure
 def test_azure_ttl_object_time_default(fake_azure_container: FakeAzureContainer) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",
