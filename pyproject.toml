@@ -127,6 +127,9 @@ reportUnnecessaryIsInstance = false
 reportUnnecessaryComparison = false
 
 # F19: SDK stub Unknowns / optional-import noise scoped to backends.
+# Keep AttributeAccessIssue + GeneralTypeIssues on (typo/API misuse).
+# redis-py: import the client class from redis.client — ``from redis import Redis``
+# mis-resolves to the module when reportUnknownMemberType is none.
 [[tool.pyright.executionEnvironments]]
 root = "src/kvtsjl/backends"
 reportUnknownMemberType = "none"
@@ -135,5 +138,3 @@ reportUnknownArgumentType = "none"
 reportUnknownLambdaType = "none"
 reportUnknownParameterType = "none"
 reportMissingImports = "none"
-reportAttributeAccessIssue = "none"
-reportGeneralTypeIssues = "none"

@@ -37,7 +37,9 @@ from kvtsjl.store.schema.ttl import (
 )
 
 if TYPE_CHECKING:
-    from redis import Redis
+    # Prefer redis.client: under backends' reportUnknownMemberType=none,
+    # ``from redis import Redis`` resolves to the module, not the client class.
+    from redis.client import Redis
 
 RedisWire = str | bytes
 # Matches redis-py ``EncodableT`` for ``hset(..., mapping=)`` (Mapping is invariant).
