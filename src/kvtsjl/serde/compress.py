@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import gzip
+import importlib
 from typing import TYPE_CHECKING, Literal, TypeVar
 import zlib
 
@@ -44,7 +45,7 @@ def _decompress_zlib(data: bytes) -> bytes:
 
 def _compress_zstd(data: bytes) -> bytes:
     try:
-        import zstandard  # type: ignore[import-not-found]
+        zstandard = importlib.import_module("zstandard")
     except ImportError as exc:
         raise _missing_extra("zstd", "zstd") from exc
     return zstandard.ZstdCompressor().compress(data)
@@ -52,7 +53,7 @@ def _compress_zstd(data: bytes) -> bytes:
 
 def _decompress_zstd(data: bytes) -> bytes:
     try:
-        import zstandard  # type: ignore[import-not-found]
+        zstandard = importlib.import_module("zstandard")
     except ImportError as exc:
         raise _missing_extra("zstd", "zstd") from exc
     return zstandard.ZstdDecompressor().decompress(data)
@@ -60,18 +61,18 @@ def _decompress_zstd(data: bytes) -> bytes:
 
 def _compress_lz4(data: bytes) -> bytes:
     try:
-        import lz4.frame  # type: ignore[import-not-found]
+        lz4_frame = importlib.import_module("lz4.frame")
     except ImportError as exc:
         raise _missing_extra("lz4", "lz4") from exc
-    return lz4.frame.compress(data)
+    return lz4_frame.compress(data)
 
 
 def _decompress_lz4(data: bytes) -> bytes:
     try:
-        import lz4.frame  # type: ignore[import-not-found]
+        lz4_frame = importlib.import_module("lz4.frame")
     except ImportError as exc:
         raise _missing_extra("lz4", "lz4") from exc
-    return lz4.frame.decompress(data)
+    return lz4_frame.decompress(data)
 
 
 _COMPRESSORS: dict[CompressionCodec, Callable[[bytes], bytes]] = {

@@ -18,7 +18,7 @@ def as_keymap[SK, SV](
         return col
     if isinstance(col, Mapping):
         return DictKeyMap(col)
-    return DictKeyMap.from_pairs(col)
+    return DictKeyMap[SK, SV].from_pairs(col)
 
 
 def dataclass_field_names(cls: type[Any]) -> tuple[str, ...]:

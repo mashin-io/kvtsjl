@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
@@ -456,10 +456,10 @@ class ReadableKeyMap[K, T](ABC):
         if parts and all(isinstance(p, KvStore) for p in parts):
             from kvtsjl.store.compose.algebra_zip import ZippedKvStore
 
-            return ZippedKvStore(parts)  # type: ignore[arg-type]
+            return ZippedKvStore(cast(Sequence[KvStore[Any, Any]], parts))
         from kvtsjl.keymap_algebra.zip import ZippedKeyMap
 
-        return ZippedKeyMap(parts)  # type: ignore[arg-type]
+        return ZippedKeyMap(cast(Sequence[KeyMap[Any, Any]], parts))
 
     @overload
     @classmethod
@@ -489,10 +489,10 @@ class ReadableKeyMap[K, T](ABC):
         if parts and all(isinstance(p, KvStore) for p in parts.values()):
             from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
 
-            return ZipWithKvStore(ctor, parts)  # type: ignore[arg-type]
+            return ZipWithKvStore(ctor, cast(Mapping[str, KvStore[ZipK, Any]], parts))
         from kvtsjl.keymap_algebra.zip import ZipWithKeyMap
 
-        return ZipWithKeyMap(ctor, parts)  # type: ignore[arg-type]
+        return ZipWithKeyMap(ctor, cast(Mapping[str, KeyMap[ZipK, Any]], parts))
 
     @classmethod
     def zip_as[ZipK, W](
@@ -508,7 +508,7 @@ class ReadableKeyMap[K, T](ABC):
         if all(isinstance(p, KvStore) for p in mapped.values()):
             from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
 
-            return ZipWithKvStore(ctor, mapped)  # type: ignore[arg-type]
+            return ZipWithKvStore(ctor, cast(Mapping[str, KvStore[ZipK, Any]], mapped))
         from kvtsjl.keymap_algebra.zip import ZipWithKeyMap
 
         return ZipWithKeyMap(ctor, mapped)

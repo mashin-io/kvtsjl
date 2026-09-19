@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.keymap import KeyMap
@@ -146,8 +146,8 @@ class KvStore[K, V](
         default = indexes[0] if len(indexes) == 1 else None
         return IndexedKvStore(
             self,
-            indexes,  # type: ignore[arg-type]
-            default_index=default,  # type: ignore[arg-type]
+            cast(Any, indexes),
+            default_index=cast(Any, default),
             bundle=bundle,
             sync_policy=sync_policy,
         )

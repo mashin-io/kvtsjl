@@ -219,7 +219,7 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
             raise KvStoreScanUnsupported(
                 "prefix scan unsupported through imap_keys (prefix is in caller key space)"
             )
-        src_query = ScanQuery(
+        src_query: ScanQuery[SK] = ScanQuery(
             prefix=None,
             include_values=query.include_values,
             page_size=query.page_size,

@@ -337,7 +337,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         if not isinstance(index_or_query, Index):
             raise TypeError("search(index, query) requires an Index as the first argument")
         return self._hydrate(
-            index_or_query,
+            cast(Index[Any, K, V, Any], index_or_query),
             query,
             limit=limit,
             include_keys=include_keys,

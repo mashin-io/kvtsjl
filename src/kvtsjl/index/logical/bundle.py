@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
-from typing import Any
+from typing import Any, cast
 
 from kvtsjl.index.logical.abc import Index
 
@@ -25,7 +25,7 @@ def indexes_from_bundle(bundle: object) -> tuple[Index[Any, Any, Any, Any], ...]
                     f"Index field {f.name!r} must be an init field "
                     "(scoped remapping cannot set init=False fields)"
                 )
-            found.append(value)
+            found.append(cast(Index[Any, Any, Any, Any], value))
     if not found:
         raise ValueError("dataclass bundle has no Index fields")
     return tuple(found)

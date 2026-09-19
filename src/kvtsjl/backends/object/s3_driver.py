@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from botocore.exceptions import ClientError
 
@@ -60,7 +60,7 @@ class S3BlobDriver(BlobDriver):
         }
         if headers:
             kwargs.update(headers)
-        self._client.put_object(**kwargs)  # type: ignore[arg-type]
+        self._client.put_object(**cast(Any, kwargs))
 
     def delete(self, key: str) -> bool:
         try:
@@ -124,7 +124,7 @@ class S3BlobDriver(BlobDriver):
         objects = [{"Key": k} for k in keys]
         self._client.delete_objects(
             Bucket=self._bucket,
-            Delete={"Objects": objects, "Quiet": True},  # type: ignore[arg-type]
+            Delete=cast(Any, {"Objects": objects, "Quiet": True}),
         )
         return len(keys)
 

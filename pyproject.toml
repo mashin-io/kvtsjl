@@ -122,12 +122,18 @@ typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
 extraPaths = ["src"]
-# google-cloud-storage / azure-storage-blob / some redis stubs leave Unknowns;
-# keep value checks strict.
 reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportUnknownVariableType = false
-reportUnknownArgumentType = false
-reportUnknownLambdaType = false
 reportUnnecessaryIsInstance = false
 reportUnnecessaryComparison = false
+
+# F19: SDK stub Unknowns / optional-import noise scoped to backends.
+[[tool.pyright.executionEnvironments]]
+root = "src/kvtsjl/backends"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownParameterType = "none"
+reportMissingImports = "none"
+reportAttributeAccessIssue = "none"
+reportGeneralTypeIssues = "none"

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Sequence, Sized
 from dataclasses import dataclass
+from typing import cast
 
 from kvtsjl.index.logical.abc import Index
 
@@ -18,7 +19,7 @@ def query_has_content(content: object | None) -> bool:
     if isinstance(content, str):
         return content != ""
     if isinstance(content, (bytes, bytearray, memoryview)):
-        return len(content) > 0
+        return len(cast(Sized, content)) > 0
     return True
 
 

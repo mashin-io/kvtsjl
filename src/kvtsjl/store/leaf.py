@@ -35,7 +35,9 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     ) -> Self:
         """Wrap an already-built backend (used by ``clone_with_scope``)."""
         inst = object.__new__(cls)
-        LeafKvStore.__init__(inst, backend)
+        inst._backend = backend
+        inst.scope = backend.scope
+        inst.batch_size = backend.batch_size
         return inst
 
     @property

@@ -7,10 +7,9 @@ Install with::
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast, override
 
 from kvtsjl.bind import NativeStrCollectionBinder
@@ -104,14 +103,15 @@ class ChromaVectorIndex[K, V, D, META](
     def _domain_from_wire(self, wire: META | Mapping[str, Any] | None) -> D:
         if wire is None:
             raise KvStoreIndexError("missing Chroma metadata for indexed id")
-        return self.index_set.meta_serde.deserialize(wire)  # type: ignore[arg-type]
+        return self.index_set.meta_serde.deserialize(cast(Any, wire))
 
     @staticmethod
     def _embedding_tuple(raw: object | None) -> tuple[float, ...] | None:
         if raw is None:
             return None
-        if hasattr(raw, "tolist"):
-            raw = raw.tolist()  # type: ignore[union-attr]  # numpy from chromadb
+        tolist = getattr(raw, "tolist", None)
+        if callable(tolist):
+            raw = tolist()
         if not isinstance(raw, Sequence):
             return None
         return tuple(float(x) for x in raw)
@@ -155,7 +155,7 @@ class ChromaVectorIndex[K, V, D, META](
             kwargs["documents"] = [document]
         if embedding is not None:
             kwargs["embeddings"] = [list(embedding)]
-        self._collection.upsert(**kwargs)  # type: ignore[arg-type]
+        self._collection.upsert(**cast(Any, kwargs))
 
     @override
     def search(
@@ -179,7 +179,7 @@ class ChromaVectorIndex[K, V, D, META](
             kwargs["query_uris"] = [query.uri]
         else:
             kwargs["query_embeddings"] = [list(query.embedding or [])]
-        result = self._collection.query(**kwargs)  # type: ignore[arg-type]
+        result = self._collection.query(**cast(Any, kwargs))
         ids_batch = result.get("ids") or [[]]
         metas_batch = result.get("metadatas") or [[]]
         docs_batch = result.get("documents") or [[]]
@@ -229,7 +229,7 @@ class ChromaVectorIndex[K, V, D, META](
         else:
             document = None
         emb = self._first_field(result, "embeddings")
-        data = self._domain_from_wire(wire)  # type: ignore[arg-type]
+        data = self._domain_from_wire(cast(Any, wire))
         return self._record_from_parts(
             data=data,
             document=document,
@@ -275,7 +275,7 @@ class ChromaVectorIndex[K, V, D, META](
             for key, (value, meta) in items.items():
                 self._upsert_row(key, value, meta)
             return
-        self._collection.upsert(**kwargs)  # type: ignore[arg-type]
+        self._collection.upsert(**cast(Any, kwargs))
 
     @override
     def set(self, key: K, value: VectorRecord[D], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
