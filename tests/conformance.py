@@ -7,18 +7,63 @@ store with a finite ``KvSet.ttl_policy`` is unconstructable by design.
 TTL leaves). Filesystem default ``MTIME`` TTL needs ``os.utime`` instead — see
 ``tests/test_filesystem.py`` (``test_filesystem_ttl_via_mtime`` /
 ``test_filesystem_expiry_gc_hide``).
+
+Object-store behaviour matrix (S3 / GCS / Azure / Filesystem)
+-------------------------------------------------------------
+Pin every row where the four leaves currently diverge before sharing a
+template — otherwise green tests only certify that untested divergences
+survived in whatever direction the template picked.
+
+| Row | S3 / GCS / Azure | Filesystem |
+|-----|------------------|------------|
+| Key-only scan body reads | only when ``include_values`` | today: unconditional ``_read_live`` (amplification); template target: skip bodies |
+| ``batch_delete`` request size | native bulk caps 1000 / 1000 / 256 | ``max_bulk_delete=1`` (no bulk API) |
+| ``batch_delete`` parallelism | ``io_concurrency`` (default 32) over bulk chunks | ``io_concurrency`` (default 8) over single deletes — must stay concurrent, not serial size-1 chunks |
+| ``batch_delete`` return count | present keys only (probe then delete) | same — see ``assert_batch_return_counts`` |
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from freezegun import freeze_time
+import pytest
 
 from kvtsjl.store import KvStore
 from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
 
 StoreFactory = Callable[[], KvStore[str, str]]
+
+
+def assert_key_only_scan_skips_body_reads(store: KvStore[str, str]) -> None:
+    """Key-only scan must not call the leaf body-read path.
+
+    Instruments ``_read_live`` when present. Object-store template target;
+    filesystem still fails this until its port lands (see xfail in leaf tests).
+    """
+    read_live = getattr(store, "_read_live", None)
+    if read_live is None:
+        pytest.skip(f"{type(store).__name__} has no _read_live to instrument")
+    calls: list[Any] = []
+    original = read_live
+
+    def counting(arg: Any) -> Any:
+        calls.append(arg)
+        return original(arg)
+
+    setattr(store, "_read_live", counting)
+    try:
+        store.set("a", "1")
+        store.set("b", "2")
+        keys = list(store.scan(include_values=False))
+        assert sorted(keys) == ["a", "b"]
+        assert calls == [], (
+            f"key-only scan issued {len(calls)} body read(s); "
+            "expected none"
+        )
+    finally:
+        setattr(store, "_read_live", original)
 
 
 def assert_basic_crud(store: KvStore[str, str]) -> None:

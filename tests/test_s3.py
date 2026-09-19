@@ -43,6 +43,13 @@ def test_s3_batch_return_counts(s3_store: S3KvStore[str, str, str]) -> None:
 
 
 @pytest.mark.s3
+def test_s3_key_only_scan_skips_body_reads(s3_store: S3KvStore[str, str, str]) -> None:
+    from tests.conformance import assert_key_only_scan_skips_body_reads
+
+    assert_key_only_scan_skips_body_reads(s3_store)
+
+
+@pytest.mark.s3
 def test_s3_ttl_via_last_modified(s3_client: object, s3_bucket: str) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",
@@ -117,7 +124,7 @@ def test_s3_expiry_gc_hide(s3_client: object, s3_bucket: str) -> None:
             expiry_gc=ExpiryGc.HIDE,
         )
         store.set("a", "live")
-        object_key = store._object_key(store._physical_key_blob("a"))
+        object_key = store._key_codec.encode_physical("a")
         frozen.move_to("2024-01-01 12:01:00")
         assert store.get("a") is None
         s3_client.head_object(Bucket=s3_bucket, Key=object_key)  # type: ignore[attr-defined]
