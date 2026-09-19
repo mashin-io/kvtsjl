@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from kvtsjl.keymap import ReadableKeyMap
 
@@ -21,6 +21,16 @@ class ThenKeyMap[K, J, V](ReadableKeyMap[K, V]):
         if join is None:
             return None
         return self._right.get(join)
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        """Two part ``batch_get`` calls; mid keys are deduped before the right hop."""
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        left_found = self._left.batch_get(unique)
+        mids = list(dict.fromkeys(j for j in left_found.values() if j is not None))
+        right_found = self._right.batch_get(mids)
+        return {k: right_found[j] for k, j in left_found.items() if j in right_found}
 
 
 class ThenWithKeyMap[K, T, J, V](ReadableKeyMap[K, V]):
@@ -41,3 +51,14 @@ class ThenWithKeyMap[K, T, J, V](ReadableKeyMap[K, V]):
         if value is None:
             return None
         return self._right.get(self._key_of(key, value))
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        """Two part ``batch_get`` calls; derived mids are deduped before the right hop."""
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        left_found = self._left.batch_get(unique)
+        mid_of = {k: self._key_of(k, v) for k, v in left_found.items()}
+        mids = list(dict.fromkeys(mid_of.values()))
+        right_found = self._right.batch_get(mids)
+        return {k: right_found[j] for k, j in mid_of.items() if j in right_found}

@@ -103,9 +103,9 @@ class KvStore[K, V](
         promote: bool = True,
     ) -> KvStore[K, V]:
         """Read-through secondary on miss (e.g. new version → old version)."""
-        from kvtsjl.store.compose.fallback import FallbackReadKvStore
+        from kvtsjl.keymap_algebra.build import build_coalesce
 
-        return FallbackReadKvStore(self, secondary, promote=promote)
+        return cast(KvStore[K, V], build_coalesce(self, secondary, promote=promote))
 
     def mirror(
         self,

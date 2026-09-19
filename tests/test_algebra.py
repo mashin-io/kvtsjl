@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
 
@@ -464,6 +465,19 @@ def test_coalesce_alias() -> None:
     assert primary.get("x") == "from-s"
 
 
+def test_coalesce_scan_does_not_promote() -> None:
+    primary = _StoreProbe(_str_store("p_scan_np"))
+    secondary = _str_store("s_scan_np")
+    primary.set("a", "pa")
+    secondary.set("b", "sb")  # only on secondary — not in primary scan
+    hot = primary.coalesce(secondary, promote=True)
+    rows = list(hot.scan(include_values=True, page_size=50))
+    assert dict(rows) == {"a": "pa"}
+    assert primary.m_set.call_count == 1  # only the initial set("a")
+    assert primary.m_batch_set.call_count == 0
+    assert primary.get("b") is None
+
+
 def test_then_fk() -> None:
     orders = _str_store("orders")
     users = _str_store("users")
@@ -483,6 +497,207 @@ def test_then_with() -> None:
     authors.set("a1", "Alice")
     joined = docs.then_with(lambda _k, v: v.split("|", 1)[0], authors)
     assert joined.get("d1") == "Alice"
+
+
+def test_then_batch_get_fans_out_once() -> None:
+    orders = _StoreProbe(_str_store("orders_bg"))
+    users = _StoreProbe(_str_store("users_bg"))
+    orders.set("o1", "u1")
+    orders.set("o2", "u1")
+    orders.set("o3", "u2")
+    users.set("u1", "alice")
+    users.set("u2", "bob")
+    joined = orders.then(users)
+    keys = ["o1", "o2", "o3", "missing"]
+    assert joined.batch_get(keys) == {"o1": "alice", "o2": "alice", "o3": "bob"}
+    orders.m_batch_get.assert_called_once_with(keys)
+    # many-to-one: two orders share u1 — right batch sees unique mids only
+    users.m_batch_get.assert_called_once_with(["u1", "u2"])
+    assert orders.m_get.call_count == 0
+    assert users.m_get.call_count == 0
+    assert joined.batch_get([]) == {}
+    assert orders.m_batch_get.call_count == 1
+    assert users.m_batch_get.call_count == 1
+
+
+def test_then_with_batch_get_dedupes_mids() -> None:
+    docs = _StoreProbe(_str_store("docs_bg"))
+    authors = _StoreProbe(_str_store("authors_bg"))
+    docs.set("d1", "a1|Hello")
+    docs.set("d2", "a1|World")
+    docs.set("d3", "a2|X")
+    authors.set("a1", "Alice")
+    authors.set("a2", "Bob")
+    joined = docs.then_with(lambda _k, v: v.split("|", 1)[0], authors)
+    assert joined.batch_get(["d1", "d2", "d3"]) == {
+        "d1": "Alice",
+        "d2": "Alice",
+        "d3": "Bob",
+    }
+    docs.m_batch_get.assert_called_once()
+    authors.m_batch_get.assert_called_once_with(["a1", "a2"])
+    assert docs.m_get.call_count == 0
+    assert authors.m_get.call_count == 0
+
+
+def test_expand_batch_get_fans_out_once() -> None:
+    users = _StoreProbe(_str_store("users_exp_bg"))
+    users.set("u1", "alice")
+    users.set("u2", "bob")
+
+    def emails_of(user_id: str, _name: str) -> dict[str, bool]:
+        if user_id == "u1":
+            return {"a@x.com": True}
+        return {"b@x.com": True}
+
+    per_user = users.expand(emails_of)
+    found = per_user.batch_get(["u1", "u2", "missing"])
+    assert set(found) == {"u1", "u2"}
+    assert found["u1"].get("a@x.com") is True
+    assert found["u2"].get("b@x.com") is True
+    users.m_batch_get.assert_called_once_with(["u1", "u2", "missing"])
+    assert users.m_get.call_count == 0
+
+    summaries = users.expand_map(
+        emails_of,
+        lambda _k, name, c: f"{name}:{len(list(c.keys()))}",
+    )
+    users.m_batch_get.reset_mock()
+    users.m_get.reset_mock()
+    assert summaries.batch_get(["u1", "u2"]) == {"u1": "alice:1", "u2": "bob:1"}
+    users.m_batch_get.assert_called_once_with(["u1", "u2"])
+    assert users.m_get.call_count == 0
+
+
+def test_map_batch_get_fans_out_and_drops_none() -> None:
+    store = _StoreProbe(_str_store("map_bg"))
+    store.set("a", "xx")
+    store.set("b", "")
+    store.set("c", "yyy")
+    view = store.map(lambda s: len(s) or None)  # type: ignore[arg-type, return-value]
+    assert view.batch_get(["a", "b", "c", "missing"]) == {"a": 2, "c": 3}
+    store.m_batch_get.assert_called_once()
+    assert store.m_get.call_count == 0
+
+
+def test_imap_keys_batch_get_without_inverse() -> None:
+    underlying = _StoreProbe(_str_store("hash_bg"))
+    to_store = lambda k: hashlib.sha256(k.encode()).hexdigest()
+    hashed = underlying.imap_keys(to_store, None)
+    hashed.set("alice", "doc")
+    hashed.set("bob", "doc2")
+    assert hashed.batch_get(["alice", "bob", "missing"]) == {
+        "alice": "doc",
+        "bob": "doc2",
+    }
+    underlying.m_batch_get.assert_called_once()
+    assert underlying.m_get.call_count == 0
+    with pytest.raises(KvStoreScanUnsupported):
+        list(hashed.scan())
+
+
+def test_zip_scan_include_values_pages_batch_get() -> None:
+    """include_values scan must page via batch_get, not N×get."""
+    a = _StoreProbe(_str_store("za_scan"))
+    b = _StoreProbe(_str_store("zb_scan"))
+    n = 250
+    page_size = 100
+    for i in range(n):
+        a.set(f"k{i}", f"a{i}")
+        b.set(f"k{i}", f"b{i}")
+    zipped = KvStore.zip(a, b)
+    rows = list(zipped.scan(include_values=True, page_size=page_size))
+    assert len(rows) == n
+    # pages × parts (ceil(250/100)=3 pages × 2 parts)
+    assert a.m_batch_get.call_count == 3
+    assert b.m_batch_get.call_count == 3
+    assert a.m_get.call_count == 0
+    assert b.m_get.call_count == 0
+
+
+def test_zip_mandatory_and_or() -> None:
+    left = _str_store("mand_l")
+    right = _str_store("mand_r")
+    left.set("both", "L")
+    right.set("both", "R")
+    left.set("left_only", "L")
+    right.set("right_only", "R")
+
+    or_zip = KvStore.zip(left, right)  # default OR
+    assert or_zip.get("both") == ("L", "R")
+    assert or_zip.get("left_only") == ("L", None)
+    assert or_zip.get("right_only") == (None, "R")
+
+    and_zip = KvStore.zip(left, right, mandatory=(True, True))
+    assert and_zip.get("both") == ("L", "R")
+    assert and_zip.get("left_only") is None
+    assert and_zip.get("right_only") is None
+
+    left_req = KvStore.zip(left, right, mandatory=(True, False))
+    assert left_req.get("both") == ("L", "R")
+    assert left_req.get("left_only") == ("L", None)
+    assert left_req.get("right_only") is None
+
+    with pytest.raises(ValueError, match="mandatory length"):
+        KvStore.zip(left, right, mandatory=(True,))
+
+
+def test_zip_created_at_merge() -> None:
+    from datetime import datetime, timezone
+
+    a = _str_store("cam_a")
+    b = _str_store("cam_b")
+    t0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    t1 = datetime(2024, 6, 1, tzinfo=timezone.utc)
+    a.set("k", "va", created_at=t0)
+    b.set("k", "vb", created_at=t1)
+
+    def earliest(vals: Sequence[datetime | None]) -> datetime | None:
+        present = [v for v in vals if v is not None]
+        return min(present) if present else None
+
+    default = KvStore.zip(a, b)
+    custom = KvStore.zip(a, b, created_at_merge=earliest)
+    assert default.stat("k") is not None
+    assert default.stat("k").created_at == t1  # max
+    assert custom.stat("k") is not None
+    assert custom.stat("k").created_at == t0  # min via merge
+
+
+def test_zip_scan_pages_times_parts_rt_gate() -> None:
+    """5-part zip × 10k keys × page_size=100 → ≈ pages×parts batch_get RTs."""
+    n = 10_000
+    page_size = 100
+    parts = [_StoreProbe(_str_store(f"rt{i}")) for i in range(5)]
+    for i in range(n):
+        key = f"k{i:05d}"
+        for p in parts:
+            p.set(key, "v")
+    zipped = KvStore.zip(*parts)
+    rows = list(zipped.scan(include_values=True, page_size=page_size))
+    assert len(rows) == n
+    pages = (n + page_size - 1) // page_size  # 100
+    for p in parts:
+        assert p.m_batch_get.call_count == pages
+        assert p.m_get.call_count == 0
+
+
+def test_then_scan_include_values_pages_batch_get() -> None:
+    orders = _StoreProbe(_str_store("orders_scan"))
+    users = _StoreProbe(_str_store("users_scan"))
+    n = 250
+    page_size = 100
+    users.set("u0", "alice")
+    for i in range(n):
+        orders.set(f"o{i}", "u0")
+    joined = orders.then(users)
+    rows = list(joined.scan(include_values=True, page_size=page_size))
+    assert len(rows) == n
+    assert all(v == "alice" for _, v in rows)
+    assert orders.m_batch_get.call_count == 3  # left pages
+    assert users.m_batch_get.call_count == 3  # right once per page (deduped mid)
+    assert orders.m_get.call_count == 0
+    assert users.m_get.call_count == 0
 
 
 def test_expand_and_fold() -> None:

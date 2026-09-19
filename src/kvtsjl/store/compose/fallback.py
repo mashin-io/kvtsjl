@@ -1,22 +1,30 @@
-"""Read-through fallback logical store."""
+"""Coalesce / fallback-read — left-biased merge with optional promote."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 import logging
+from typing import cast
 
+from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
 from kvtsjl.scope import Scope
-from kvtsjl.store.compose.delegating import DelegatingKvStore
+from kvtsjl.store.fanout import GcFanoutMixin, ScanPrimaryMixin, ScopeFanoutMixin
 from kvtsjl.store.logical import KvStore
-from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
 
 
-class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
+class CoalescedKvStore[K, V](
+    CoalescedKeyMap[K, V],
+    ScanPrimaryMixin[K, V],
+    GcFanoutMixin[K],
+    ScopeFanoutMixin,
+    KvStore[K, V],
+):
     """Read primary then secondary; writes go to primary only. Scan: primary only.
 
     ``exists`` / ``stat`` probe secondary on primary miss but **do not promote**
@@ -25,6 +33,8 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
     Promote failures are **best-effort**: the read still returns the secondary
     value; a failed promote is logged (correct behaviour after a successful
     read, not a sync bug).
+
+    Scan never promotes: values come from ``primary.batch_get``, not ``self.batch_get``.
     """
 
     def __init__(
@@ -34,14 +44,26 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         *,
         promote: bool = True,
     ) -> None:
-        super().__init__(primary)
+        super().__init__(primary, secondary, promote=promote)
+        self.scope = primary.scope
+        self.batch_size = primary.batch_size
         self._primary = primary
         self._secondary = secondary
-        self._promote = promote
+        self._scan_primary = primary
+        self._gc_parts = (primary, secondary)
+
+    def _left_store(self) -> KvStore[K, V]:
+        return cast(KvStore[K, V], self._left)
+
+    def _right_store(self) -> KvStore[K, V]:
+        return cast(KvStore[K, V], self._right)
 
     @property
     def supports_write_clock(self) -> bool:
         return self._primary.supports_write_clock
+
+    def key_layout(self) -> KeyLayout:
+        return self._primary.key_layout()
 
     def get(self, key: K) -> V | None:
         value = self._primary.get(key)
@@ -151,21 +173,8 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
                 clock = meta.created_at or meta.modified_at
             self._primary.set(key, value, created_at=clock)
 
-    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        yield from self._primary.scan_entries(query)
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        if max_entries < 1:
-            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-        deleted = self._primary.gc_expired_keys(max_entries=max_entries)
-        remaining = max_entries - len(deleted)
-        if remaining < 1:
-            return deleted
-        deleted.extend(self._secondary.gc_expired_keys(max_entries=remaining))
-        return deleted
-
-    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
-        return FallbackReadKvStore(
+    def _clone_fanout(self, scope: Scope) -> CoalescedKvStore[K, V]:
+        return CoalescedKvStore(
             self._primary.clone_with_scope(scope),
             self._secondary.clone_with_scope(scope),
             promote=self._promote,
@@ -175,8 +184,12 @@ class FallbackReadKvStore[K, V](DelegatingKvStore[K, V]):
         from kvtsjl.store.repr_util import compose_repr
 
         return compose_repr(
-            "FallbackReadKvStore",
+            type(self).__name__,
             primary=self._primary,
             secondary=self._secondary,
             promote=self._promote,
         )
+
+
+# Public alias — same class, preserve import path and historical name.
+FallbackReadKvStore = CoalescedKvStore

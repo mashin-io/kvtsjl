@@ -1,4 +1,4 @@
-"""Pointwise ``zip`` / ``zip_with`` (optional parts)."""
+"""Pointwise ``zip`` / ``zip_with`` (optional parts; configurable presence)."""
 
 from __future__ import annotations
 
@@ -11,17 +11,46 @@ from kvtsjl.keymap import KeyMap
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
-class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
-    """Pointwise product: row if any part present; missing parts are ``None``."""
+def normalize_mandatory(
+    n: int, mandatory: Sequence[bool] | None
+) -> tuple[bool, ...]:
+    """``None`` → all False (OR). Length must match ``n`` when provided."""
+    if mandatory is None:
+        return tuple(False for _ in range(n))
+    if len(mandatory) != n:
+        raise ValueError(
+            f"mandatory length {len(mandatory)} must match number of parts ({n})"
+        )
+    return tuple(bool(m) for m in mandatory)
 
-    def __init__(self, parts: Sequence[KeyMap[K, Any]]) -> None:
+
+def row_present(values: Sequence[Any | None], mandatory: Sequence[bool]) -> bool:
+    """Row exists iff every mandatory slot is present and not all values are None."""
+    if all(v is None for v in values):
+        return False
+    for value, required in zip(values, mandatory, strict=True):
+        if required and value is None:
+            return False
+    return True
+
+
+class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
+    """Pointwise product; presence controlled by ``mandatory`` (default OR)."""
+
+    def __init__(
+        self,
+        parts: Sequence[KeyMap[K, Any]],
+        *,
+        mandatory: Sequence[bool] | None = None,
+    ) -> None:
         if len(parts) < 2:
             raise ValueError("zip requires at least two KeyMaps")
         self._parts = tuple(parts)
+        self._mandatory = normalize_mandatory(len(parts), mandatory)
 
     def get(self, key: K) -> tuple[Any, ...] | None:
         values = tuple(part.get(key) for part in self._parts)
-        if all(v is None for v in values):
+        if not row_present(values, self._mandatory):
             return None
         return values
 
@@ -53,7 +82,7 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
         out: dict[K, tuple[Any, ...]] = {}
         for key in unique:
             values = tuple(pm.get(key) for pm in part_maps)
-            if not all(v is None for v in values):
+            if row_present(values, self._mandatory):
                 out[key] = values
         return out
 
@@ -115,6 +144,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         parts: Mapping[str, KeyMap[K, Any]],
         *,
         field_names: Sequence[str] | None = None,
+        mandatory: Sequence[bool] | None = None,
     ) -> None:
         if not parts:
             raise ValueError("zip_with requires at least one part")
@@ -132,11 +162,13 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         extra = [n for n in self._parts if n not in self.field_names]
         if extra:
             raise ValueError(f"zip_with unknown part names: {extra}")
+        self._mandatory = normalize_mandatory(len(self.field_names), mandatory)
 
     def get(self, key: K) -> V | None:
-        kwargs = {name: self._parts[name].get(key) for name in self.field_names}
-        if all(v is None for v in kwargs.values()):
+        values = tuple(self._parts[name].get(key) for name in self.field_names)
+        if not row_present(values, self._mandatory):
             return None
+        kwargs = dict(zip(self.field_names, values, strict=True))
         return self._ctor(**kwargs)
 
     def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
@@ -166,8 +198,9 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         }
         out: dict[K, V] = {}
         for key in unique:
-            kwargs = {name: part_found[name].get(key) for name in self.field_names}
-            if not all(v is None for v in kwargs.values()):
+            values = tuple(part_found[name].get(key) for name in self.field_names)
+            if row_present(values, self._mandatory):
+                kwargs = dict(zip(self.field_names, values, strict=True))
                 out[key] = self._ctor(**kwargs)
         return out
 

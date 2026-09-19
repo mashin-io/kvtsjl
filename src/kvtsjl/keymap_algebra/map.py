@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
@@ -23,6 +23,16 @@ class MappedKeyMap[K, T, U](ReadableKeyMap[K, U]):
             return None
         return self._forward(value)
 
+    def batch_get(self, keys: Sequence[K]) -> dict[K, U]:
+        """One underlying ``batch_get``; ``None`` forward means absent (matches ``get``)."""
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        found = self._underlying.batch_get(unique)
+        return {
+            k: u for k, v in found.items() if (u := self._forward(v)) is not None
+        }
+
 
 class IMappedKeyMap[K, T, U](KeyMap[K, U]):
     """Invertible value codec: store ``inverse(u)``, expose ``forward(t)``."""
@@ -42,6 +52,16 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
         if value is None:
             return None
         return self._forward(value)
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, U]:
+        """One underlying ``batch_get``; ``None`` forward means absent (matches ``get``)."""
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        found = self._underlying.batch_get(unique)
+        return {
+            k: u for k, v in found.items() if (u := self._forward(v)) is not None
+        }
 
     def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(key, self._inverse(value), ttl=ttl, created_at=created_at)
@@ -65,6 +85,15 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
 
     def get(self, key: K) -> T | None:
         return self._underlying.get(self._to_store(key))
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, T]:
+        """Batch via ``to_store`` only — no ``from_store`` (hashed / no-inverse safe)."""
+        if not keys:
+            return {}
+        unique = list(dict.fromkeys(keys))
+        to_sk = {key: self._to_store(key) for key in unique}
+        found = self._underlying.batch_get(list(dict.fromkeys(to_sk.values())))
+        return {k: found[sk] for k, sk in to_sk.items() if sk in found}
 
     def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(self._to_store(key), value, ttl=ttl, created_at=created_at)

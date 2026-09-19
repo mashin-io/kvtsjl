@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast, overload
+from typing import TYPE_CHECKING, Any, overload
 
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
@@ -88,15 +88,9 @@ class ReadableKeyMap[K, T](ABC):
 
     def map[U](self, forward: Callable[[T], U]) -> ReadableKeyMap[K, U]:
         """Read-only value view."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_map
 
-        if isinstance(self, KvStore):
-            from kvtsjl.store.compose.algebra_map import MappedKvStore
-
-            return MappedKvStore(self, forward)
-        from kvtsjl.keymap_algebra.map import MappedKeyMap
-
-        return MappedKeyMap(self, forward)
+        return build_map(self, forward)
 
     @overload
     def then[V](self: KvStore[K, T], other: KvStore[T, V]) -> ReadableKvStore[K, V]: ...
@@ -111,15 +105,9 @@ class ReadableKeyMap[K, T](ABC):
 
     def then[V](self, other: ReadableKeyMap[T, V]) -> ReadableKeyMap[K, V]:
         """``other[self[k]]`` — compose partial maps (read-only view)."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_then
 
-        if isinstance(self, KvStore) and isinstance(other, KvStore):
-            from kvtsjl.store.compose.algebra_then import ThenKvStore
-
-            return ThenKvStore(self, other)
-        from kvtsjl.keymap_algebra.then import ThenKeyMap
-
-        return ThenKeyMap(self, other)
+        return build_then(self, other)
 
     @overload
     def then_with[J, V](
@@ -148,15 +136,9 @@ class ReadableKeyMap[K, T](ABC):
         other: ReadableKeyMap[J, V],
     ) -> ReadableKeyMap[K, V]:
         """``other[key_of(k, self[k])]`` (read-only view)."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_then_with
 
-        if isinstance(self, KvStore) and isinstance(other, KvStore):
-            from kvtsjl.store.compose.algebra_then import ThenWithKvStore
-
-            return ThenWithKvStore(self, key_of, other)
-        from kvtsjl.keymap_algebra.then import ThenWithKeyMap
-
-        return ThenWithKeyMap(self, key_of, other)
+        return build_then_with(self, key_of, other)
 
     @overload
     def expand[SK, SV](
@@ -189,15 +171,9 @@ class ReadableKeyMap[K, T](ABC):
         ],
     ) -> ReadableKeyMap[K, ReadableKeyMap[SK, SV]]:
         """Nest a collection under each key (same outer ``K``; read-only)."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_expand
 
-        if isinstance(self, KvStore):
-            from kvtsjl.store.compose.algebra_expand import ExpandKvStore
-
-            return ExpandKvStore(self, expander)
-        from kvtsjl.keymap_algebra.expand import ExpandKeyMap
-
-        return ExpandKeyMap(self, expander)
+        return build_expand(self, expander)
 
     @overload
     def expand_map[SK, SV, U](
@@ -234,15 +210,9 @@ class ReadableKeyMap[K, T](ABC):
         aggregate: Callable[[K, T, ReadableKeyMap[SK, SV]], U],
     ) -> ReadableKeyMap[K, U]:
         """Expand then fold ``(k, v, col) → U`` (read-only)."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_expand_map
 
-        if isinstance(self, KvStore):
-            from kvtsjl.store.compose.algebra_expand import ExpandMapKvStore
-
-            return ExpandMapKvStore(self, expander, aggregate)
-        from kvtsjl.keymap_algebra.expand import ExpandMapKeyMap
-
-        return ExpandMapKeyMap(self, expander, aggregate)
+        return build_expand_map(self, expander, aggregate)
 
     # --- writability-preserving algebra (three overload levels) ---
 
@@ -273,18 +243,9 @@ class ReadableKeyMap[K, T](ABC):
         self, other: ReadableKeyMap[K, T], *, promote: bool = True
     ) -> ReadableKeyMap[K, T]:
         """Left-biased merge: prefer ``self``, else ``other`` (writes to ``self`` when writable)."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_coalesce
 
-        if isinstance(self, KvStore) and isinstance(other, KvStore):
-            return self.fallback_read(other, promote=promote)
-        if isinstance(self, KeyMap) and isinstance(other, KeyMap):
-            from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
-
-            return CoalescedKeyMap(self, other, promote=promote)
-        raise TypeError(
-            f"coalesce requires writable KeyMap or KvStore parts, got "
-            f"{type(self).__name__} and {type(other).__name__}"
-        )
+        return build_coalesce(self, other, promote=promote)
 
     @overload
     def imap[U](
@@ -318,17 +279,12 @@ class ReadableKeyMap[K, T](ABC):
         self, forward: Callable[[T], U], inverse: Callable[[U], T]
     ) -> ReadableKeyMap[K, U]:
         """Invertible value codec."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap import KeyMap
+        from kvtsjl.keymap_algebra.build import build_imap
 
-        if isinstance(self, KvStore):
-            from kvtsjl.store.compose.algebra_map import IMappedKvStore
-
-            return IMappedKvStore(self, forward, inverse)
-        if isinstance(self, KeyMap):
-            from kvtsjl.keymap_algebra.map import IMappedKeyMap
-
-            return IMappedKeyMap(self, forward, inverse)
-        raise TypeError(f"imap requires a writable KeyMap, got {type(self).__name__}")
+        if not isinstance(self, KeyMap):
+            raise TypeError(f"imap requires a writable KeyMap, got {type(self).__name__}")
+        return build_imap(self, forward, inverse)
 
     @overload
     def imap_keys[NK](
@@ -364,19 +320,14 @@ class ReadableKeyMap[K, T](ABC):
         from_store: Callable[[K], NK] | None = None,
     ) -> ReadableKeyMap[NK, T]:
         """Caller keys ``NK`` mapped onto this map's keys ``K``."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap import KeyMap
+        from kvtsjl.keymap_algebra.build import build_imap_keys
 
-        if isinstance(self, KvStore):
-            from kvtsjl.store.compose.algebra_map import IMappedKeysKvStore
-
-            return IMappedKeysKvStore(self, to_store, from_store)
-        if isinstance(self, KeyMap):
-            from kvtsjl.keymap_algebra.map import IMappedKeysKeyMap
-
-            return IMappedKeysKeyMap(self, to_store, from_store)
-        raise TypeError(
-            f"imap_keys requires a writable KeyMap, got {type(self).__name__}"
-        )
+        if not isinstance(self, KeyMap):
+            raise TypeError(
+                f"imap_keys requires a writable KeyMap, got {type(self).__name__}"
+            )
+        return build_imap_keys(self, to_store, from_store)
 
     @overload
     @classmethod
@@ -449,23 +400,33 @@ class ReadableKeyMap[K, T](ABC):
     ) -> KeyMap[ZipK, tuple[A | None, B | None, C | None, D | None, E | None]]: ...
 
     @classmethod
-    def zip(cls, *parts: ReadableKeyMap[Any, Any]) -> ReadableKeyMap[Any, tuple[Any, ...]]:
-        """Pointwise product; missing parts are ``None`` in the tuple."""
-        from kvtsjl.store.logical import KvStore
+    def zip(
+        cls,
+        *parts: ReadableKeyMap[Any, Any],
+        mandatory: Sequence[bool] | None = None,
+        created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
+        | None = None,
+    ) -> ReadableKeyMap[Any, tuple[Any, ...]]:
+        """Pointwise product; missing parts are ``None`` in the tuple.
 
-        if parts and all(isinstance(p, KvStore) for p in parts):
-            from kvtsjl.store.compose.algebra_zip import ZippedKvStore
+        ``mandatory``: per-part presence flags (``None`` → all False → OR).
+        ``created_at_merge``: optional store ``stat`` merge (KvStore parts only).
+        """
+        from kvtsjl.keymap_algebra.build import build_zip
 
-            return ZippedKvStore(cast(Sequence[KvStore[Any, Any]], parts))
-        from kvtsjl.keymap_algebra.zip import ZippedKeyMap
-
-        return ZippedKeyMap(cast(Sequence[KeyMap[Any, Any]], parts))
+        return build_zip(
+            *parts, mandatory=mandatory, created_at_merge=created_at_merge
+        )
 
     @overload
     @classmethod
     def zip_with[ZipK, W](
         cls,
         ctor: Callable[..., W],
+        *,
+        mandatory: Sequence[bool] | None = None,
+        created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
+        | None = None,
         **parts: KvStore[ZipK, Any],
     ) -> KvStore[ZipK, W]: ...
 
@@ -474,6 +435,10 @@ class ReadableKeyMap[K, T](ABC):
     def zip_with[ZipK, W](
         cls,
         ctor: Callable[..., W],
+        *,
+        mandatory: Sequence[bool] | None = None,
+        created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
+        | None = None,
         **parts: KeyMap[ZipK, Any],
     ) -> KeyMap[ZipK, W]: ...
 
@@ -481,38 +446,42 @@ class ReadableKeyMap[K, T](ABC):
     def zip_with[ZipK, W](
         cls,
         ctor: Callable[..., W],
+        *,
+        mandatory: Sequence[bool] | None = None,
+        created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
+        | None = None,
         **parts: ReadableKeyMap[ZipK, Any],
     ) -> ReadableKeyMap[ZipK, W]:
         """Assemble a dataclass (or constructor) from named part maps."""
-        from kvtsjl.store.logical import KvStore
+        from kvtsjl.keymap_algebra.build import build_zip_with
 
-        if parts and all(isinstance(p, KvStore) for p in parts.values()):
-            from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
-
-            return ZipWithKvStore(ctor, cast(Mapping[str, KvStore[ZipK, Any]], parts))
-        from kvtsjl.keymap_algebra.zip import ZipWithKeyMap
-
-        return ZipWithKeyMap(ctor, cast(Mapping[str, KeyMap[ZipK, Any]], parts))
+        return build_zip_with(
+            ctor,
+            mandatory=mandatory,
+            created_at_merge=created_at_merge,
+            **parts,
+        )
 
     @classmethod
     def zip_as[ZipK, W](
         cls,
         ctor: type[W],
         parts: ZipPartsBundle[ZipK],
+        *,
+        mandatory: Sequence[bool] | None = None,
+        created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
+        | None = None,
     ) -> ReadableKeyMap[ZipK, W]:
         """Assemble from a dataclass bundle of part maps (strict field typing)."""
+        from kvtsjl.keymap_algebra.build import build_zip_with
         from kvtsjl.keymap_algebra.bundle import parts_from_bundle
-        from kvtsjl.store.logical import KvStore
 
-        mapped = parts_from_bundle(parts)
-        if all(isinstance(p, KvStore) for p in mapped.values()):
-            from kvtsjl.store.compose.algebra_zip import ZipWithKvStore
-
-            return ZipWithKvStore(ctor, cast(Mapping[str, KvStore[ZipK, Any]], mapped))
-        from kvtsjl.keymap_algebra.zip import ZipWithKeyMap
-
-        return ZipWithKeyMap(ctor, mapped)
-
+        return build_zip_with(
+            ctor,
+            mandatory=mandatory,
+            created_at_merge=created_at_merge,
+            **parts_from_bundle(parts),
+        )
 
 class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
     """Writable keyed entries ``K → T`` (``ReadableKeyMap`` + mutations).
