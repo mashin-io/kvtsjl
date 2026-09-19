@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from kvtsjl.keymap import KeyMap
-from kvtsjl.keymap_algebra.util import raise_readonly
+from kvtsjl.keymap import ReadableKeyMap
 
 
-class ThenKeyMap[K, J, V](KeyMap[K, V]):
-    """``get(k) = other.get(self.get(k))``; mutations unsupported."""
+class ThenKeyMap[K, J, V](ReadableKeyMap[K, V]):
+    """``get(k) = other.get(self.get(k))``."""
 
-    def __init__(self, left: KeyMap[K, J], right: KeyMap[J, V]) -> None:
+    def __init__(
+        self, left: ReadableKeyMap[K, J], right: ReadableKeyMap[J, V]
+    ) -> None:
         self._left = left
         self._right = right
 
@@ -21,22 +22,15 @@ class ThenKeyMap[K, J, V](KeyMap[K, V]):
             return None
         return self._right.get(join)
 
-    def set(self, key: K, value: V) -> None:
-        raise_readonly("set")
 
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover
-
-
-class ThenWithKeyMap[K, T, J, V](KeyMap[K, V]):
-    """``get(k) = other.get(f(k, self.get(k)))``; mutations unsupported."""
+class ThenWithKeyMap[K, T, J, V](ReadableKeyMap[K, V]):
+    """``get(k) = other.get(f(k, self.get(k)))``."""
 
     def __init__(
         self,
-        left: KeyMap[K, T],
+        left: ReadableKeyMap[K, T],
         key_of: Callable[[K, T], J],
-        right: KeyMap[J, V],
+        right: ReadableKeyMap[J, V],
     ) -> None:
         self._left = left
         self._key_of = key_of
@@ -47,10 +41,3 @@ class ThenWithKeyMap[K, T, J, V](KeyMap[K, V]):
         if value is None:
             return None
         return self._right.get(self._key_of(key, value))
-
-    def set(self, key: K, value: V) -> None:
-        raise_readonly("set")
-
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover

@@ -39,7 +39,7 @@ from kvtsjl.index import (
     VectorQuery,
     VectorRecord,
 )
-from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap import KeyMap, ReadableKeyMap
 from kvtsjl.keymap_algebra import DictKeyMap
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
@@ -54,6 +54,7 @@ from kvtsjl.store import (
     KvSet,
     KvStore,
     MirrorKvStore,
+    ReadableKvStore,
     ReadonlyKvStore,
     RecordStat,
     ScanQuery,
@@ -106,6 +107,8 @@ __all__ = [
     "PhysicalBackend",
     "PhysicalRef",
     "PhysicalSchema",
+    "ReadableKeyMap",
+    "ReadableKvStore",
     "ReadonlyKvStore",
     "RecordStat",
     "ScanQuery",

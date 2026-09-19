@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Callable
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.keymap import KeyMap
-from kvtsjl.keymap_algebra.util import raise_readonly
+from kvtsjl.keymap import KeyMap, ReadableKeyMap
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
-class MappedKeyMap[K, T, U](KeyMap[K, U]):
-    """Read-only value view: ``get`` applies ``forward``; mutations unsupported."""
+class MappedKeyMap[K, T, U](ReadableKeyMap[K, U]):
+    """Read-only value view: ``get`` applies ``forward``."""
 
-    def __init__(self, underlying: KeyMap[K, T], forward: Callable[[T], U]) -> None:
+    def __init__(self, underlying: ReadableKeyMap[K, T], forward: Callable[[T], U]) -> None:
         self._underlying = underlying
         self._forward = forward
 
@@ -21,13 +23,6 @@ class MappedKeyMap[K, T, U](KeyMap[K, U]):
         if value is None:
             return None
         return self._forward(value)
-
-    def set(self, key: K, value: U) -> None:
-        raise_readonly("set")
-
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover
 
 
 class IMappedKeyMap[K, T, U](KeyMap[K, U]):
@@ -49,8 +44,8 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
             return None
         return self._forward(value)
 
-    def set(self, key: K, value: U) -> None:
-        self._underlying.set(key, self._inverse(value))
+    def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
+        self._underlying.set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(key)
@@ -72,8 +67,8 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
     def get(self, key: K) -> T | None:
         return self._underlying.get(self._to_store(key))
 
-    def set(self, key: K, value: T) -> None:
-        self._underlying.set(self._to_store(key), value)
+    def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
+        self._underlying.set(self._to_store(key), value, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(self._to_store(key))

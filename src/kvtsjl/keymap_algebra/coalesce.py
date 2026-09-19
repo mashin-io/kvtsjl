@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Mapping, Sequence
 
 from kvtsjl.keymap import KeyMap
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class CoalescedKeyMap[K, T](KeyMap[K, T]):
@@ -30,8 +33,8 @@ class CoalescedKeyMap[K, T](KeyMap[K, T]):
             self._left.set(key, value)
         return value
 
-    def set(self, key: K, value: T) -> None:
-        self._left.set(key, value)
+    def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
+        self._left.set(key, value, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return self._left.delete(key)
@@ -47,8 +50,8 @@ class CoalescedKeyMap[K, T](KeyMap[K, T]):
         found.update(secondary)
         return found
 
-    def batch_set(self, items: Mapping[K, T]) -> None:
-        self._left.batch_set(items)
+    def batch_set(self, items: Mapping[K, T], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
+        self._left.batch_set(items, ttl=ttl, created_at=created_at)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._left.batch_delete(keys)

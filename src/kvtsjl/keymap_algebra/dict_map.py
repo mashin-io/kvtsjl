@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Iterable, Mapping
 
 from kvtsjl.keymap import KeyMap
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class DictKeyMap[K, T](KeyMap[K, T]):
@@ -20,7 +23,7 @@ class DictKeyMap[K, T](KeyMap[K, T]):
     def get(self, key: K) -> T | None:
         return self._data.get(key)
 
-    def set(self, key: K, value: T) -> None:
+    def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._data[key] = value
 
     def delete(self, key: K) -> bool:

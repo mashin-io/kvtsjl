@@ -10,6 +10,7 @@ from kvtsjl.store.compose import (
     ReadonlyKvStore,
 )
 from kvtsjl.store.logical import KvStore
+from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema import KeyLayout, KvSet, RecordStat, ScanQuery, SyncPolicy, TtlPolicy
 from kvtsjl.store.schema.ttl import ExpiryGc
 
@@ -22,6 +23,7 @@ __all__ = [
     "KvSet",
     "KvStore",
     "MirrorKvStore",
+    "ReadableKvStore",
     "ReadonlyKvStore",
     "RecordStat",
     "ScanQuery",

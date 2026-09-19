@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Callable, Sequence
 import math
 from typing import cast, override
@@ -12,6 +14,7 @@ from kvtsjl.index.logical.abc import IndexHit
 from kvtsjl.index.logical.vector import VectorQuery, VectorRecord, query_has_content
 from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.index.vector_backend import VectorIndexBackend
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:
@@ -109,7 +112,7 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
         self._records[key] = stored
 
     @override
-    def set(self, key: K, value: VectorRecord[D]) -> None:
+    def set(self, key: K, value: VectorRecord[D], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         if key not in self._records:
             raise KvStoreIndexError("key is not in the index")
         old = self._records[key]

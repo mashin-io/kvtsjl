@@ -7,15 +7,15 @@ from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKeyMap
-from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
+from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
-class MappedKvStore[K, V, U](KvStore[K, U]):
+class MappedKvStore[K, V, U](ReadableKvStore[K, U]):
     """Read-only value ``map`` over a ``KvStore``."""
 
     def __init__(self, underlying: KvStore[K, V], forward: Callable[[V], U]) -> None:
@@ -24,10 +24,6 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
         self._src = underlying
         self._view = MappedKeyMap(underlying, forward)
         self._forward = forward
-
-    @property
-    def supports_write_clock(self) -> bool:
-        return self._src.supports_write_clock
 
     def key_layout(self) -> KeyLayout:
         return self._src.key_layout()
@@ -47,20 +43,6 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         return self._src.batch_stat(keys)
 
-    def set(
-        self,
-        key: K,
-        value: U,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        raise_readonly("set")
-
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover
-
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
         for key, value in self._src.scan_entries(
             ScanQuery(
@@ -74,11 +56,8 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
             else:
                 yield key, self._forward(value)
 
-    def clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
+    def clone_with_scope(self, scope: Scope) -> ReadableKvStore[K, U]:
         return MappedKvStore(self._src.clone_with_scope(scope), self._forward)
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr

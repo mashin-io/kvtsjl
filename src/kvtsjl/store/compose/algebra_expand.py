@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from datetime import datetime
 
-from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap import ReadableKeyMap
 from kvtsjl.keymap_algebra.expand import ExpandKeyMap, ExpandMapKeyMap
-from kvtsjl.keymap_algebra.util import raise_readonly
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
+from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.stat import RecordStat
-from kvtsjl.store.schema.ttl import TtlPolicy
 
 
-class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
+class ExpandKvStore[K, V, SK, SV](ReadableKvStore[K, ReadableKeyMap[SK, SV]]):
     def __init__(
         self,
         underlying: KvStore[K, V],
         expander: Callable[
-            [K, V], KeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]]
+            [K, V],
+            ReadableKeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]],
         ],
     ) -> None:
         self.scope = underlying.scope
@@ -32,7 +31,7 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
     def key_layout(self) -> KeyLayout:
         return self._src.key_layout()
 
-    def get(self, key: K) -> KeyMap[SK, SV] | None:
+    def get(self, key: K) -> ReadableKeyMap[SK, SV] | None:
         return self._view.get(key)
 
     def exists(self, key: K) -> bool:
@@ -47,23 +46,9 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         return self._src.batch_stat(keys)
 
-    def set(
-        self,
-        key: K,
-        value: KeyMap[SK, SV],
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        raise_readonly("set")
-
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover
-
     def scan_entries(
         self, query: ScanQuery[K]
-    ) -> Iterator[tuple[K, KeyMap[SK, SV] | None]]:
+    ) -> Iterator[tuple[K, ReadableKeyMap[SK, SV] | None]]:
         for key, _ in self._src.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
@@ -76,11 +61,8 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
             else:
                 yield key, None
 
-    def clone_with_scope(self, scope: Scope) -> KvStore[K, KeyMap[SK, SV]]:
+    def clone_with_scope(self, scope: Scope) -> ReadableKvStore[K, ReadableKeyMap[SK, SV]]:
         return ExpandKvStore(self._src.clone_with_scope(scope), self._expander)
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr
@@ -92,14 +74,15 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
         )
 
 
-class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
+class ExpandMapKvStore[K, V, SK, SV, U](ReadableKvStore[K, U]):
     def __init__(
         self,
         underlying: KvStore[K, V],
         expander: Callable[
-            [K, V], KeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]]
+            [K, V],
+            ReadableKeyMap[SK, SV] | Mapping[SK, SV] | Sequence[tuple[SK, SV]],
         ],
-        aggregate: Callable[[K, V, KeyMap[SK, SV]], U],
+        aggregate: Callable[[K, V, ReadableKeyMap[SK, SV]], U],
     ) -> None:
         self.scope = underlying.scope
         self.batch_size = underlying.batch_size
@@ -126,20 +109,6 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         return self._src.batch_stat(keys)
 
-    def set(
-        self,
-        key: K,
-        value: U,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        raise_readonly("set")
-
-    def delete(self, key: K) -> bool:
-        raise_readonly("delete")
-        return False  # pragma: no cover
-
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
         for key, _ in self._src.scan_entries(
             ScanQuery(
@@ -153,15 +122,12 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
             else:
                 yield key, None
 
-    def clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
+    def clone_with_scope(self, scope: Scope) -> ReadableKvStore[K, U]:
         return ExpandMapKvStore(
             self._src.clone_with_scope(scope),
             self._expander,
             self._aggregate,
         )
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr

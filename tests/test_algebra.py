@@ -18,7 +18,7 @@ from kvtsjl import (
     TtlPolicy,
     VectorQuery,
 )
-from kvtsjl.exceptions import KvStoreReadOnlyError, KvStoreScanUnsupported
+from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra import DictKeyMap
 
 
@@ -29,6 +29,69 @@ def _str_store(name: str = "s") -> MemoryKvStore[str, str, str, bytes]:
         value_serde=SerDe.utf8_bytes(),
     )
     return MemoryKvStore(kvset)
+
+
+class _StoreProbe(KvStore[str, str]):
+    """KvStore spy: isinstance-compatible; records fan-out via ``m_*`` MagicMocks.
+
+    ``m_batch_*`` wraps the underlying store's batch ops (which may call the
+    underlying point ops). ``m_get`` / ``m_set`` / ``m_delete`` only see calls
+    that go through this probe — same as ``MagicMock(wraps=)``.
+    """
+
+    def __init__(self, underlying: KvStore[str, str]) -> None:
+        from unittest.mock import MagicMock
+
+        self._u = underlying
+        self.scope = underlying.scope
+        self.batch_size = underlying.batch_size
+        self.m_get = MagicMock(wraps=underlying.get)
+        self.m_set = MagicMock(wraps=underlying.set)
+        self.m_delete = MagicMock(wraps=underlying.delete)
+        self.m_batch_get = MagicMock(wraps=underlying.batch_get)
+        self.m_batch_set = MagicMock(wraps=underlying.batch_set)
+        self.m_batch_delete = MagicMock(wraps=underlying.batch_delete)
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._u.supports_write_clock
+
+    def key_layout(self):  # type: ignore[no-untyped-def]
+        return self._u.key_layout()
+
+    def get(self, key: str) -> str | None:
+        return self.m_get(key)
+
+    def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        ttl=None,  # type: ignore[no-untyped-def]
+        created_at=None,
+    ) -> None:
+        self.m_set(key, value, ttl=ttl, created_at=created_at)
+
+    def delete(self, key: str) -> bool:
+        return self.m_delete(key)
+
+    def batch_get(self, keys):  # type: ignore[no-untyped-def]
+        return self.m_batch_get(keys)
+
+    def batch_set(self, items, *, ttl=None, created_at=None):  # type: ignore[no-untyped-def]
+        return self.m_batch_set(items, ttl=ttl, created_at=created_at)
+
+    def batch_delete(self, keys):  # type: ignore[no-untyped-def]
+        return self.m_batch_delete(keys)
+
+    def scan_entries(self, query):  # type: ignore[no-untyped-def]
+        yield from self._u.scan_entries(query)
+
+    def clone_with_scope(self, scope):  # type: ignore[no-untyped-def]
+        return _StoreProbe(self._u.clone_with_scope(scope))
+
+    def gc_expired_keys(self, *, max_entries: int) -> list[str]:
+        return self._u.gc_expired_keys(max_entries=max_entries)
 
 
 def test_imap_roundtrip() -> None:
@@ -68,8 +131,8 @@ def test_map_readonly() -> None:
     store.set("a", "x")
     view = store.map(lambda s: len(s))
     assert view.get("a") == 1
-    with pytest.raises(KvStoreReadOnlyError):
-        view.set("a", 2)
+    with pytest.raises(AttributeError):
+        view.set("a", 2)  # type: ignore[attr-defined]
 
 
 def test_imap_keys_hash() -> None:
@@ -165,16 +228,15 @@ def test_zip_tuple() -> None:
 
 
 def test_zip_with_batch_get_fans_out_once() -> None:
-    from unittest.mock import MagicMock
-
-    meta_s = _str_store("meta_bg")
-    body_s = _str_store("body_bg")
-    meta_s.set("k1", "m1")
-    body_s.set("k1", "b1")
-    meta_s.set("k2", "m2")
-
-    meta = MagicMock(wraps=meta_s)
-    body = MagicMock(wraps=body_s)
+    meta = _StoreProbe(_str_store("meta_bg"))
+    body = _StoreProbe(_str_store("body_bg"))
+    meta.set("k1", "m1")
+    body.set("k1", "b1")
+    meta.set("k2", "m2")
+    meta.m_set.reset_mock()
+    body.m_set.reset_mock()
+    meta.m_get.reset_mock()
+    body.m_get.reset_mock()
 
     @dataclass
     class Doc:
@@ -187,27 +249,23 @@ def test_zip_with_batch_get_fans_out_once() -> None:
         "k1": Doc(meta="m1", body="b1"),
         "k2": Doc(meta="m2", body=None),
     }
-    meta.batch_get.assert_called_once_with(keys)
-    body.batch_get.assert_called_once_with(keys)
-    assert meta.get.call_count == 0
-    assert body.get.call_count == 0
+    meta.m_batch_get.assert_called_once_with(keys)
+    body.m_batch_get.assert_called_once_with(keys)
+    assert meta.m_get.call_count == 0
+    assert body.m_get.call_count == 0
 
     assert articles.batch_get([]) == {}
-    assert meta.batch_get.call_count == 1
-    assert body.batch_get.call_count == 1
+    assert meta.m_batch_get.call_count == 1
+    assert body.m_batch_get.call_count == 1
 
     articles.batch_get(["k1", "k1", "k2"])
-    meta.batch_get.assert_called_with(["k1", "k2"])
-    body.batch_get.assert_called_with(["k1", "k2"])
+    meta.m_batch_get.assert_called_with(["k1", "k2"])
+    body.m_batch_get.assert_called_with(["k1", "k2"])
 
 
 def test_zip_with_batch_set_fans_out_once() -> None:
-    from unittest.mock import MagicMock
-
-    meta_s = _str_store("meta_bs")
-    body_s = _str_store("body_bs")
-    meta = MagicMock(wraps=meta_s)
-    body = MagicMock(wraps=body_s)
+    meta = _StoreProbe(_str_store("meta_bs"))
+    body = _StoreProbe(_str_store("body_bs"))
 
     @dataclass
     class Doc:
@@ -221,38 +279,36 @@ def test_zip_with_batch_set_fans_out_once() -> None:
         "c": Doc(meta=None, body="b3"),
     }
     articles.batch_set(items)
-    meta.batch_set.assert_called_once_with(
+    meta.m_batch_set.assert_called_once_with(
         {"a": "m1", "b": "m2"}, ttl=None, created_at=None
     )
-    body.batch_set.assert_called_once_with(
+    body.m_batch_set.assert_called_once_with(
         {"a": "b1", "c": "b3"}, ttl=None, created_at=None
     )
-    meta.batch_delete.assert_called_once_with(["c"])
-    body.batch_delete.assert_called_once_with(["b"])
-    assert meta.set.call_count == 0
-    assert body.set.call_count == 0
+    meta.m_batch_delete.assert_called_once_with(["c"])
+    body.m_batch_delete.assert_called_once_with(["b"])
+    assert meta.m_set.call_count == 0
+    assert body.m_set.call_count == 0
     assert articles.batch_get(["a", "b", "c"]) == {
         "a": Doc(meta="m1", body="b1"),
         "b": Doc(meta="m2", body=None),
         "c": Doc(meta=None, body="b3"),
     }
     articles.batch_set({})
-    assert meta.batch_set.call_count == 1
-    assert body.batch_set.call_count == 1
+    assert meta.m_batch_set.call_count == 1
+    assert body.m_batch_set.call_count == 1
 
 
 def test_zip_with_batch_delete_fans_out_once() -> None:
-    from unittest.mock import MagicMock
-
-    meta_s = _str_store("meta_bd")
-    body_s = _str_store("body_bd")
+    meta = _StoreProbe(_str_store("meta_bd"))
+    body = _StoreProbe(_str_store("body_bd"))
 
     @dataclass
     class Doc:
         meta: str | None
         body: str | None
 
-    articles = KvStore.zip_with(Doc, meta=meta_s, body=body_s)
+    articles = KvStore.zip_with(Doc, meta=meta, body=body)
     articles.batch_set(
         {
             "a": Doc(meta="m1", body="b1"),
@@ -260,33 +316,30 @@ def test_zip_with_batch_delete_fans_out_once() -> None:
             "c": Doc(meta=None, body="b3"),
         }
     )
-    meta = MagicMock(wraps=meta_s)
-    body = MagicMock(wraps=body_s)
-    zipped = KvStore.zip_with(Doc, meta=meta, body=body)
-    assert zipped.batch_delete(["a", "b", "c", "missing", "a"]) == 3
-    assert meta.batch_delete.call_count == 1
-    assert body.batch_delete.call_count == 1
-    meta.batch_delete.assert_called_with(["a", "b", "c", "missing"])
-    body.batch_delete.assert_called_with(["a", "b", "c", "missing"])
-    assert meta.delete.call_count == 0
-    assert body.delete.call_count == 0
-    assert zipped.batch_get(["a", "b", "c"]) == {}
-    assert zipped.batch_delete([]) == 0
+    meta.m_batch_delete.reset_mock()
+    body.m_batch_delete.reset_mock()
+    meta.m_delete.reset_mock()
+    body.m_delete.reset_mock()
+    assert articles.batch_delete(["a", "b", "c", "missing", "a"]) == 3
+    assert meta.m_batch_delete.call_count == 1
+    assert body.m_batch_delete.call_count == 1
+    meta.m_batch_delete.assert_called_with(["a", "b", "c", "missing"])
+    body.m_batch_delete.assert_called_with(["a", "b", "c", "missing"])
+    assert meta.m_delete.call_count == 0
+    assert body.m_delete.call_count == 0
+    assert articles.batch_get(["a", "b", "c"]) == {}
+    assert articles.batch_delete([]) == 0
 
 
 def test_zip_tuple_batch_set_fans_out_once() -> None:
-    from unittest.mock import MagicMock
-
-    a_s = _str_store("za_bs")
-    b_s = _str_store("zb_bs")
-    a = MagicMock(wraps=a_s)
-    b = MagicMock(wraps=b_s)
+    a = _StoreProbe(_str_store("za_bs"))
+    b = _StoreProbe(_str_store("zb_bs"))
     zipped = KvStore.zip(a, b)
     zipped.batch_set({"k1": ("1", None), "k2": (None, "2")})
-    a.batch_set.assert_called_once_with({"k1": "1"}, ttl=None, created_at=None)
-    b.batch_set.assert_called_once_with({"k2": "2"}, ttl=None, created_at=None)
-    a.batch_delete.assert_called_once_with(["k2"])
-    b.batch_delete.assert_called_once_with(["k1"])
+    a.m_batch_set.assert_called_once_with({"k1": "1"}, ttl=None, created_at=None)
+    b.m_batch_set.assert_called_once_with({"k2": "2"}, ttl=None, created_at=None)
+    a.m_batch_delete.assert_called_once_with(["k2"])
+    b.m_batch_delete.assert_called_once_with(["k1"])
     assert zipped.batch_get(["k1", "k2"]) == {
         "k1": ("1", None),
         "k2": (None, "2"),
@@ -313,8 +366,10 @@ def test_zip_keymap_batch_set_fans_out_once() -> None:
             "b": Doc(meta="m2", body=None),
         }
     )
-    meta.batch_set.assert_called_once_with({"a": "m1", "b": "m2"})
-    body.batch_set.assert_called_once_with({"a": "b1"})
+    meta.batch_set.assert_called_once_with(
+        {"a": "m1", "b": "m2"}, ttl=None, created_at=None
+    )
+    body.batch_set.assert_called_once_with({"a": "b1"}, ttl=None, created_at=None)
     body.batch_delete.assert_called_once_with(["b"])
     assert meta.batch_delete.call_count == 0
 
@@ -341,24 +396,24 @@ def test_zip_with_batch_get_mixed_presence() -> None:
 
 
 def test_zip_tuple_batch_get_fans_out_once() -> None:
-    from unittest.mock import MagicMock
-
-    a_s = _str_store("za_bg")
-    b_s = _str_store("zb_bg")
-    a_s.set("k1", "1")
-    b_s.set("k2", "2")
-    a = MagicMock(wraps=a_s)
-    b = MagicMock(wraps=b_s)
+    a = _StoreProbe(_str_store("za_bg"))
+    b = _StoreProbe(_str_store("zb_bg"))
+    a.set("k1", "1")
+    b.set("k2", "2")
+    a.m_set.reset_mock()
+    b.m_set.reset_mock()
+    a.m_get.reset_mock()
+    b.m_get.reset_mock()
     zipped = KvStore.zip(a, b)
     keys = ["k1", "k2", "k3"]
     assert zipped.batch_get(keys) == {
         "k1": ("1", None),
         "k2": (None, "2"),
     }
-    a.batch_get.assert_called_once_with(keys)
-    b.batch_get.assert_called_once_with(keys)
-    assert a.get.call_count == 0
-    assert b.get.call_count == 0
+    a.m_batch_get.assert_called_once_with(keys)
+    b.m_batch_get.assert_called_once_with(keys)
+    assert a.m_get.call_count == 0
+    assert b.m_get.call_count == 0
 
 
 def test_zip_keymap_batch_get_fans_out_once() -> None:
@@ -417,8 +472,8 @@ def test_then_fk() -> None:
     joined = orders.then(users)
     assert joined.get("o1") == "alice"
     assert joined.get("missing") is None
-    with pytest.raises(KvStoreReadOnlyError):
-        joined.set("o1", "bob")
+    with pytest.raises(AttributeError):
+        joined.set("o1", "bob")  # type: ignore[attr-defined]
 
 
 def test_then_with() -> None:

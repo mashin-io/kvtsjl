@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -14,6 +16,7 @@ from kvtsjl.index.logical.abc import IndexHit
 from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.scope import Scope, ScopeSegment
 from kvtsjl.serde import SerDe
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 @dataclass
@@ -113,7 +116,7 @@ class MemoryKeyIndex[K, V](NullMetaIndexBackend[K, K, V]):
     def upsert(self, key: K, value: V, meta: None) -> None:
         self._keys().add(key)
 
-    def set(self, key: K, value: None) -> None:
+    def set(self, key: K, value: None, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         if key not in self._keys():
             raise KvStoreIndexError("key is not in the index")
 
@@ -204,7 +207,7 @@ class MemoryTermIndex[K, V](NullMetaIndexBackend[str, K, V]):
         else:
             postings.key_to_terms.pop(key, None)
 
-    def set(self, key: K, value: None) -> None:
+    def set(self, key: K, value: None, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         if key not in self._postings().key_to_terms:
             raise KvStoreIndexError("key is not in the index")
 

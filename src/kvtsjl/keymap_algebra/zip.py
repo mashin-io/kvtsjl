@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from typing import Any
 
 from kvtsjl.keymap import KeyMap
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
@@ -23,7 +26,7 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
             return None
         return values
 
-    def set(self, key: K, value: tuple[Any, ...]) -> None:
+    def set(self, key: K, value: tuple[Any, ...], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         if len(value) != len(self._parts):
             raise ValueError(
                 f"zip set expects {len(self._parts)}-tuple, got {len(value)}"
@@ -32,7 +35,7 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
             if item is None:
                 part.delete(key)
             else:
-                part.set(key, item)
+                part.set(key, item, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return any(part.delete(key) for part in self._parts)
@@ -55,7 +58,7 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
                 out[key] = values
         return out
 
-    def batch_set(self, items: Mapping[K, tuple[Any, ...]]) -> None:
+    def batch_set(self, items: Mapping[K, tuple[Any, ...]], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
 
         Per part: non-``None`` tuple slots are ``batch_set``; ``None`` slots are
@@ -77,7 +80,7 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
                 else:
                     to_set[key] = item
             if to_set:
-                part.batch_set(to_set)
+                part.batch_set(to_set, ttl=ttl, created_at=created_at)
             if to_delete:
                 part.batch_delete(to_delete)
 
@@ -137,14 +140,14 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
             return None
         return self._ctor(**kwargs)
 
-    def set(self, key: K, value: V) -> None:
+    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         for name in self.field_names:
             item = getattr(value, name)
             part = self._parts[name]
             if item is None:
                 part.delete(key)
             else:
-                part.set(key, item)
+                part.set(key, item, ttl=ttl, created_at=created_at)
 
     def delete(self, key: K) -> bool:
         return any(part.delete(key) for part in self._parts.values())
@@ -169,7 +172,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
                 out[key] = self._ctor(**kwargs)
         return out
 
-    def batch_set(self, items: Mapping[K, V]) -> None:
+    def batch_set(self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
 
         Per field: non-``None`` values are ``batch_set``; ``None`` values are
@@ -188,7 +191,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
                 else:
                     to_set[key] = item
             if to_set:
-                part.batch_set(to_set)
+                part.batch_set(to_set, ttl=ttl, created_at=created_at)
             if to_delete:
                 part.batch_delete(to_delete)
 

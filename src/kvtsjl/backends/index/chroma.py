@@ -7,6 +7,8 @@ Install with::
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast, override
@@ -17,6 +19,7 @@ from kvtsjl.index.logical.abc import IndexHit
 from kvtsjl.index.logical.vector import VectorRecord, query_has_content
 from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.index.vector_backend import VectorIndexBackend
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 if TYPE_CHECKING:
     from chromadb import Collection
@@ -275,7 +278,7 @@ class ChromaVectorIndex[K, V, D, META](
         self._collection.upsert(**kwargs)  # type: ignore[arg-type]
 
     @override
-    def set(self, key: K, value: VectorRecord[D]) -> None:
+    def set(self, key: K, value: VectorRecord[D], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         """Update wired metadata only (no re-embed)."""
         id_str = self._id_str(key)
         existing = self._collection.get(ids=[id_str], include=[])
