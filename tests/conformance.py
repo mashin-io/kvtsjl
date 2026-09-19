@@ -16,7 +16,7 @@ survived in whatever direction the template picked.
 
 | Row | S3 / GCS / Azure | Filesystem |
 |-----|------------------|------------|
-| Key-only scan body reads | only when ``include_values`` | today: unconditional ``_read_live`` (amplification); template target: skip bodies |
+| Key-only scan body reads | only when ``include_values`` | only when ``include_values`` (same template) |
 | ``batch_delete`` request size | native bulk caps 1000 / 1000 / 256 | ``max_bulk_delete=1`` (no bulk API) |
 | ``batch_delete`` parallelism | ``io_concurrency`` (default 32) over bulk chunks | ``io_concurrency`` (default 8) over single deletes — must stay concurrent, not serial size-1 chunks |
 | ``batch_delete`` return count | present keys only (probe then delete) | same — see ``assert_batch_return_counts`` |
@@ -39,8 +39,8 @@ StoreFactory = Callable[[], KvStore[str, str]]
 def assert_key_only_scan_skips_body_reads(store: KvStore[str, str]) -> None:
     """Key-only scan must not call the leaf body-read path.
 
-    Instruments ``_read_live`` when present. Object-store template target;
-    filesystem still fails this until its port lands (see xfail in leaf tests).
+    Instruments ``_read_live`` when present. Shared object-store / filesystem
+    template target (key-only scan skips bodies).
     """
     read_live = getattr(store, "_read_live", None)
     if read_live is None:

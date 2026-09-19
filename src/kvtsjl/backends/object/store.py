@@ -172,6 +172,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             ttl_seconds=self.resolve_ttl_seconds(ttl),
             clock_base=self._clock_base(created_at),
             explicit_ttl=ttl is not None,
+            created_at_set=created_at is not None,
         )
         self._driver.write(
             self._key_codec.encode_physical(key),

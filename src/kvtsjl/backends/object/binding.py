@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from kvtsjl.bind import NativeCollectionBinder
@@ -27,5 +28,19 @@ def object_collection_binder(
 
     def format_collection(ref: WireRef[Any]) -> str:
         return f"{base}{safe_collection_name(ref.name)}/{ref.version_label()}/"
+
+    return NativeCollectionBinder(collection_formatter=format_collection)
+
+
+def filesystem_collection_binder(
+    root: str | Path,
+) -> NativeCollectionBinder[Any, str]:
+    """Filesystem binder: ``{root}/{safe_name}/{version}/`` (posix, trailing slash)."""
+    root_path = Path(root)
+
+    def format_collection(ref: WireRef[Any]) -> str:
+        return (
+            root_path / safe_collection_name(ref.name) / ref.version_label()
+        ).as_posix() + "/"
 
     return NativeCollectionBinder(collection_formatter=format_collection)

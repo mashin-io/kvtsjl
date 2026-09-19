@@ -110,10 +110,6 @@ def test_filesystem_batch_return_counts(
     assert_batch_return_counts(FilesystemKvStore(str_bytes_kvset, root=tmp_path))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="FS key-only scan still reads bodies; flips when FS joins object-store template",
-)
 def test_filesystem_key_only_scan_skips_body_reads(
     store: FilesystemKvStore[str, str, str],
 ) -> None:
