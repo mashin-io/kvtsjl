@@ -169,7 +169,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             backend=type(self).__name__,
         )
         headers = self._ttl_source.write_headers(
-            ttl_seconds=self.resolve_ttl_seconds(ttl) if ttl is not None else None,
+            ttl_seconds=self.resolve_ttl_seconds(ttl),
             clock_base=self._clock_base(created_at),
             explicit_ttl=ttl is not None,
         )

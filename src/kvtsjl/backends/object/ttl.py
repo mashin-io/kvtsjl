@@ -167,3 +167,66 @@ class S3ExpiresTtl(TtlSource):
             else datetime.fromtimestamp(clock_base + ttl_seconds, tz=UTC)
         )
         return {"Expires": expires}
+
+
+class GcsCustomTimeTtl(TtlSource):
+    """Native ``customTime`` on every write; write-clock and per-write ``ttl=``."""
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return True
+
+    @property
+    def supports_per_write_ttl(self) -> bool:
+        return True
+
+    def is_expired(
+        self, stat: BlobStat, *, collection_ttl_seconds: int | None
+    ) -> bool:
+        if stat.native_expires_at is not None:
+            return time.time() >= stat.native_expires_at.timestamp()
+        if collection_ttl_seconds is None or stat.modified_at is None:
+            return False
+        return time.time() >= stat.modified_at.timestamp() + collection_ttl_seconds
+
+    def to_record_stat(
+        self, stat: BlobStat, *, collection_ttl_seconds: int | None
+    ) -> RecordStat:
+        modified = stat.modified_at
+        expires = stat.native_expires_at
+        persistent = False
+        expires_at = expires
+        if expires is None:
+            if collection_ttl_seconds is None or modified is None:
+                persistent = True
+            else:
+                expires_at = datetime.fromtimestamp(
+                    modified.timestamp() + collection_ttl_seconds, tz=UTC
+                )
+        elif expires == TTL_NONE_EXPIRES_AT or expires.year >= 2099:
+            persistent = True
+            expires_at = None
+        return RecordStat(
+            created_at=modified,
+            modified_at=modified,
+            expires_at=expires_at,
+            size=stat.size,
+            etag=stat.etag,
+            persistent=persistent,
+        )
+
+    def write_headers(
+        self,
+        *,
+        ttl_seconds: int | None,
+        clock_base: float,
+        explicit_ttl: bool,
+    ) -> dict[str, Any]:
+        # CUSTOM_TIME always stamps customTime (collection default included).
+        if ttl_seconds is None:
+            if explicit_ttl:
+                return {"custom_time": TTL_NONE_EXPIRES_AT}
+            return {"custom_time": None}
+        return {
+            "custom_time": datetime.fromtimestamp(clock_base + ttl_seconds, tz=UTC)
+        }

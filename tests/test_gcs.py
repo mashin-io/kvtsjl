@@ -44,6 +44,13 @@ def test_gcs_batch_return_counts(gcs_store: GcsKvStore[str, str, str]) -> None:
 
 
 @pytest.mark.gcs
+def test_gcs_key_only_scan_skips_body_reads(gcs_store: GcsKvStore[str, str, str]) -> None:
+    from tests.conformance import assert_key_only_scan_skips_body_reads
+
+    assert_key_only_scan_skips_body_reads(gcs_store)
+
+
+@pytest.mark.gcs
 def test_gcs_ttl_object_time_default(fake_gcs_bucket: FakeGcsBucket) -> None:
     kvset = KvSet.with_str_keys(
         "ttl",

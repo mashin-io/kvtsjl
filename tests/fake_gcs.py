@@ -24,6 +24,14 @@ class FakeGcsBlob:
     custom_time: datetime | None = None
     updated: datetime | None = None
     time_created: datetime | None = None
+    etag: str | None = None
+
+    @property
+    def size(self) -> int | None:
+        stored = self._store.get(self.name)
+        if stored is None:
+            return None
+        return len(stored.body)
 
     def download_as_bytes(self) -> bytes:
         return self._store[self.name].body

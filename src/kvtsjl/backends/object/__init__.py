@@ -9,11 +9,17 @@ from kvtsjl.backends.object.binding import (
 )
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
-from kvtsjl.backends.object.ttl import ObjectTimeTtl, S3ExpiresTtl, TtlSource
+from kvtsjl.backends.object.ttl import (
+    GcsCustomTimeTtl,
+    ObjectTimeTtl,
+    S3ExpiresTtl,
+    TtlSource,
+)
 
 __all__ = [
     "BlobDriver",
     "BlobStat",
+    "GcsCustomTimeTtl",
     "ObjectStoreKvBackend",
     "ObjectTimeTtl",
     "S3ExpiresTtl",
