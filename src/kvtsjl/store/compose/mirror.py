@@ -107,19 +107,19 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
         )
         return n
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        yield from self._primary._scan_entries(query)
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        yield from self._primary.scan_entries(query)
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-        deleted = self._primary._gc_expired_keys(max_entries=max_entries)
+        deleted = self._primary.gc_expired_keys(max_entries=max_entries)
         remaining = max_entries - len(deleted)
         if remaining < 1:
             return deleted
         # Always BEST_EFFORT — never fail a successful primary GC.
         try:
-            deleted.extend(self._secondary._gc_expired_keys(max_entries=remaining))
+            deleted.extend(self._secondary.gc_expired_keys(max_entries=remaining))
         except Exception:
             try:
                 logger.exception("mirror gc_expired on secondary failed")
@@ -155,10 +155,10 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
                 failures={_SECONDARY: exc},
             ) from exc
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return MirrorKvStore(
-            self._primary._clone_with_scope(scope),
-            self._secondary._clone_with_scope(scope),
+            self._primary.clone_with_scope(scope),
+            self._secondary.clone_with_scope(scope),
             sync_policy=self._sync_policy,
         )
 

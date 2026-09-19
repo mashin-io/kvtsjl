@@ -219,7 +219,7 @@ def test_index_bind_once_rejects_rebind() -> None:
     store = _memory_store().indexed(tags)
     other = _memory_store().indexed(MemoryKeyIndex())
     with pytest.raises(KvStoreIndexError, match="already bound"):
-        tags._bind(other)
+        tags.bind_store(other)
 
 
 def test_null_meta_index_exists_reports_membership() -> None:

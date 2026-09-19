@@ -138,7 +138,7 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
             batch_size=batch_size,
         )
 
-    def _clone_with_scope(self, scope: Scope) -> RedisKvStore[K, V, KBLOB, VBLOB, COLL]:
+    def clone_with_scope(self, scope: Scope) -> RedisKvStore[K, V, KBLOB, VBLOB, COLL]:
         return RedisKvStore(
             self.kvset,
             self._client,
@@ -331,7 +331,7 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
             return cast(KBLOB, field.decode("utf-8"))
         return cast(KBLOB, field)
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         if query.prefix is not None and not supports_prefix_scan(self.kvset.key_layout):
             raise KvStoreScanUnsupported(
                 f"prefix scan unsupported for layout {self.kvset.key_layout!r}"

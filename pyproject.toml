@@ -131,4 +131,3 @@ reportUnknownArgumentType = false
 reportUnknownLambdaType = false
 reportUnnecessaryIsInstance = false
 reportUnnecessaryComparison = false
-reportPrivateUsage = false

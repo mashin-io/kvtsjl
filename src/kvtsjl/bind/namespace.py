@@ -25,7 +25,7 @@ class CollectionBinding[KBLOB, COLL]:
     """Resolved binding for one wire schema under a NamespaceBinder policy."""
 
     collection: COLL | None
-    _name_version_prefix: tuple[KBLOB, ...] = ()
+    name_version_prefix: tuple[KBLOB, ...] = ()
 
     def scope_parts(
         self,
@@ -47,7 +47,7 @@ class CollectionBinding[KBLOB, COLL]:
         str_serde: SerDe[str, KBLOB],
         blob_ops: BlobOps[KBLOB],
     ) -> KBLOB:
-        parts = list(self._name_version_prefix)
+        parts = list(self.name_version_prefix)
         parts.extend(self.scope_parts(scope, str_serde=str_serde))
         parts.append(key_blob)
         return blob_ops.join(parts)
@@ -60,7 +60,7 @@ class CollectionBinding[KBLOB, COLL]:
         blob_ops: BlobOps[KBLOB],
         key_prefix_blob: KBLOB | None = None,
     ) -> KBLOB:
-        parts = list(self._name_version_prefix)
+        parts = list(self.name_version_prefix)
         parts.extend(self.scope_parts(scope, str_serde=str_serde))
         if key_prefix_blob is not None:
             parts.append(key_prefix_blob)
@@ -115,7 +115,7 @@ class NativeCollectionBinder[KBLOB, COLL](NamespaceBinder[KBLOB, COLL]):
     def bind_wire(self, wire: WireRef[KBLOB]) -> CollectionBinding[KBLOB, COLL]:
         return CollectionBinding(
             collection=self._collection_formatter(wire),
-            _name_version_prefix=(),
+            name_version_prefix=(),
         )
 
 
@@ -144,4 +144,4 @@ class KeyPrefixBinder[KBLOB](NamespaceBinder[KBLOB, None]):
             wire.str_serde.serialize(wire.name),
             wire.str_serde.serialize(wire.version_label()),
         )
-        return CollectionBinding(collection=None, _name_version_prefix=prefix)
+        return CollectionBinding(collection=None, name_version_prefix=prefix)

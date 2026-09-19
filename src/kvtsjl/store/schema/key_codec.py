@@ -116,7 +116,7 @@ class BindingLayoutKeyCodec[K, KBLOB: str | bytes](KeyCodec[K]):
     def _decode_in_key(self, physical_key: KBLOB) -> K | None:
         ops = self._kvset.blob_ops
         binding = self._binding
-        name_version = list(binding._name_version_prefix)
+        name_version = list(binding.name_version_prefix)
         rest: KBLOB = physical_key
         if name_version:
             nv = ops.join(name_version)

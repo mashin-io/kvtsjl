@@ -72,7 +72,7 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
         """Decode leaf K from a full in-key physical key under this scope."""
         ops = self.kvset.blob_ops
         binding = self._binding
-        name_version = list(binding._name_version_prefix)
+        name_version = list(binding.name_version_prefix)
         rest = physical_key
         if name_version:
             nv = ops.join(name_version)

@@ -61,8 +61,8 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
         raise_readonly("delete")
         return False  # pragma: no cover
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
-        for key, value in self._src._scan_entries(
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
+        for key, value in self._src.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=True,
@@ -74,11 +74,11 @@ class MappedKvStore[K, V, U](KvStore[K, U]):
             else:
                 yield key, self._forward(value)
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
-        return MappedKvStore(self._src._clone_with_scope(scope), self._forward)
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
+        return MappedKvStore(self._src.clone_with_scope(scope), self._forward)
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr
@@ -141,8 +141,8 @@ class IMappedKvStore[K, V, U](KvStore[K, U]):
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
-        for key, value in self._src._scan_entries(
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
+        for key, value in self._src.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=True,
@@ -154,13 +154,13 @@ class IMappedKvStore[K, V, U](KvStore[K, U]):
             else:
                 yield key, self._forward(value)
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
         return IMappedKvStore(
-            self._src._clone_with_scope(scope), self._forward, self._inverse
+            self._src.clone_with_scope(scope), self._forward, self._inverse
         )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr
@@ -234,7 +234,7 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
     def delete(self, key: K) -> bool:
         return self._view.delete(key)
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         from_store = self._view.require_from_store()
         if query.prefix is not None:
             raise KvStoreScanUnsupported(
@@ -245,19 +245,19 @@ class IMappedKeysKvStore[K, SK, V](KvStore[K, V]):
             include_values=query.include_values,
             page_size=query.page_size,
         )
-        for sk, value in self._src._scan_entries(src_query):
+        for sk, value in self._src.scan_entries(src_query):
             yield from_store(sk), value
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return IMappedKeysKvStore(
-            self._src._clone_with_scope(scope), self._to_store, self._from_store
+            self._src.clone_with_scope(scope), self._to_store, self._from_store
         )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         from_store = self._view.require_from_store()
         return [
             from_store(sk)
-            for sk in self._src._gc_expired_keys(max_entries=max_entries)
+            for sk in self._src.gc_expired_keys(max_entries=max_entries)
         ]
 
     def __repr__(self) -> str:

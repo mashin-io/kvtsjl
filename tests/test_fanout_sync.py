@@ -89,7 +89,7 @@ class _BoomSecondary(MemoryKvStore[str, str, str, bytes]):
     def batch_delete(self, keys):  # type: ignore[no-untyped-def]
         raise RuntimeError("secondary-batch-delete")
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[str]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[str]:
         raise RuntimeError("secondary-gc")
 
 

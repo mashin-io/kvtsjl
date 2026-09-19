@@ -65,8 +65,8 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
         raise_readonly("delete")
         return False  # pragma: no cover
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        for key, _ in self._left._scan_entries(
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        for key, _ in self._left.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=False,
@@ -78,10 +78,10 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return ThenKvStore(
-            self._left._clone_with_scope(scope),
-            self._right._clone_with_scope(scope),
+            self._left.clone_with_scope(scope),
+            self._right.clone_with_scope(scope),
         )
 
     def gc_expired(self, *, max_entries: int) -> int:
@@ -93,8 +93,8 @@ class ThenKvStore[K, J, V](KvStore[K, V]):
             n += self._right.gc_expired(max_entries=remaining)
         return n
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._left._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._left.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr
@@ -159,8 +159,8 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
         raise_readonly("delete")
         return False  # pragma: no cover
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        for key, _ in self._left._scan_entries(
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        for key, _ in self._left.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=False,
@@ -172,11 +172,11 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return ThenWithKvStore(
-            self._left._clone_with_scope(scope),
+            self._left.clone_with_scope(scope),
             self._key_of,
-            self._right._clone_with_scope(scope),
+            self._right.clone_with_scope(scope),
         )
 
     def gc_expired(self, *, max_entries: int) -> int:
@@ -188,8 +188,8 @@ class ThenWithKvStore[K, T, J, V](KvStore[K, V]):
             n += self._right.gc_expired(max_entries=remaining)
         return n
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._left._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._left.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr

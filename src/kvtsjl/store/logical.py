@@ -80,7 +80,7 @@ class KvStore[K, V](KeyMap[K, V], ABC):
             self.set(key, value, ttl=ttl, created_at=created_at)
 
     @abstractmethod
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         """Yield decoded keys (and values if requested) under scope + prefix."""
 
     def get_or_set(self, key: K, compute_value_fn: Callable[[], V]) -> V:
@@ -143,12 +143,12 @@ class KvStore[K, V](KeyMap[K, V], ABC):
             prefix=prefix, include_values=include_values, page_size=page_size
         )
         if include_values:
-            for key, value in self._scan_entries(query):
+            for key, value in self.scan_entries(query):
                 if value is None:
                     continue
                 yield key, value
         else:
-            for key, _value in self._scan_entries(query):
+            for key, _value in self.scan_entries(query):
                 yield key
 
     def list(self, prefix: K | None = None) -> list[K]:
@@ -216,7 +216,7 @@ class KvStore[K, V](KeyMap[K, V], ABC):
             scope = self.scope.child(**kinds_to_ids) if kinds_to_ids else self.scope
         else:
             scope = Scope(segments=self.scope.segments + scope.segments)
-        return self._clone_with_scope(scope)
+        return self.clone_with_scope(scope)
 
     def prefixed(
         self, scope: Scope | None = None, **kinds_to_ids: str
@@ -224,12 +224,12 @@ class KvStore[K, V](KeyMap[K, V], ABC):
         """Alias of ``scoped`` — scope is a logical key prefix."""
         return self.scoped(scope, **kinds_to_ids)
 
-    def _clone_with_scope(self, scope: Scope) -> Self:
+    def clone_with_scope(self, scope: Scope) -> Self:
         raise NotImplementedError(
-            f"{type(self).__name__} must implement _clone_with_scope"
+            f"{type(self).__name__} must implement clone_with_scope"
         )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         """Delete up to ``max_entries`` expired entries; return deleted keys.
 
         Default is a no-op. Leaf backends with TTL override this. Logical
@@ -247,7 +247,7 @@ class KvStore[K, V](KeyMap[K, V], ABC):
         Explicit GC always deletes expired entries it finds (even if
         ``ExpiryGc.HIDE`` is set for lazy get/scan).
         """
-        return len(self._gc_expired_keys(max_entries=max_entries))
+        return len(self.gc_expired_keys(max_entries=max_entries))
 
     def readonly(self) -> KvStore[K, V]:
         from kvtsjl.store.compose.readonly import ReadonlyKvStore

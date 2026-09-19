@@ -101,7 +101,7 @@ class GcsKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLOB]):
             io_concurrency=io_concurrency,
         )
 
-    def _clone_with_scope(self, scope: Scope) -> GcsKvStore[K, V, KBLOB]:
+    def clone_with_scope(self, scope: Scope) -> GcsKvStore[K, V, KBLOB]:
         return GcsKvStore(
             self.kvset,
             bucket=self._bucket,

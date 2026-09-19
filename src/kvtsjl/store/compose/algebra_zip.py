@@ -136,17 +136,17 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._view.batch_delete(keys)
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, tuple[Any, ...] | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, tuple[Any, ...] | None]]:
         for key in _union_keys(self._parts, query):
             if query.include_values:
                 yield key, self.get(key)
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, tuple[Any, ...]]:
-        return ZippedKvStore([p._clone_with_scope(scope) for p in self._parts])
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, tuple[Any, ...]]:
+        return ZippedKvStore([p.clone_with_scope(scope) for p in self._parts])
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         deleted: list[K] = []
@@ -154,7 +154,7 @@ class ZippedKvStore[K](KvStore[K, tuple[Any, ...]]):
         for part in self._parts:
             if remaining < 1:
                 break
-            part_keys = part._gc_expired_keys(max_entries=remaining)
+            part_keys = part.gc_expired_keys(max_entries=remaining)
             deleted.extend(part_keys)
             remaining = max_entries - len(deleted)
         # Dedupe while preserving order (same K may be GC'd in multiple parts).
@@ -236,7 +236,7 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
         ttl: TtlPolicy | None = None,
         created_at: datetime | None = None,
     ) -> None:
-        for name in self._view._field_names:
+        for name in self._view.field_names:
             item = getattr(value, name)
             part = self._parts[name]
             if item is None:
@@ -253,7 +253,7 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
     ) -> None:
         if not items:
             return
-        for name in self._view._field_names:
+        for name in self._view.field_names:
             part = self._parts[name]
             to_set: dict[K, Any] = {}
             to_delete: list[K] = []
@@ -274,7 +274,7 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._view.batch_delete(keys)
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         part_list = list(self._parts.values())
         for key in _union_keys(part_list, query):
             if query.include_values:
@@ -282,13 +282,13 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         return ZipWithKvStore(
             self._ctor,
-            {name: store._clone_with_scope(scope) for name, store in self._parts.items()},
+            {name: store.clone_with_scope(scope) for name, store in self._parts.items()},
         )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         deleted: list[K] = []
@@ -296,7 +296,7 @@ class ZipWithKvStore[K, V](KvStore[K, V]):
         for part in self._parts.values():
             if remaining < 1:
                 break
-            deleted.extend(part._gc_expired_keys(max_entries=remaining))
+            deleted.extend(part.gc_expired_keys(max_entries=remaining))
             remaining = max_entries - len(deleted)
         seen: set[K] = set()
         unique: list[K] = []

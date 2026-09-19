@@ -61,10 +61,10 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
         raise_readonly("delete")
         return False  # pragma: no cover
 
-    def _scan_entries(
+    def scan_entries(
         self, query: ScanQuery[K]
     ) -> Iterator[tuple[K, KeyMap[SK, SV] | None]]:
-        for key, _ in self._src._scan_entries(
+        for key, _ in self._src.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=False,
@@ -76,11 +76,11 @@ class ExpandKvStore[K, V, SK, SV](KvStore[K, KeyMap[SK, SV]]):
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, KeyMap[SK, SV]]:
-        return ExpandKvStore(self._src._clone_with_scope(scope), self._expander)
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, KeyMap[SK, SV]]:
+        return ExpandKvStore(self._src.clone_with_scope(scope), self._expander)
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr
@@ -140,8 +140,8 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
         raise_readonly("delete")
         return False  # pragma: no cover
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
-        for key, _ in self._src._scan_entries(
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
+        for key, _ in self._src.scan_entries(
             ScanQuery(
                 prefix=query.prefix,
                 include_values=False,
@@ -153,15 +153,15 @@ class ExpandMapKvStore[K, V, SK, SV, U](KvStore[K, U]):
             else:
                 yield key, None
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, U]:
         return ExpandMapKvStore(
-            self._src._clone_with_scope(scope),
+            self._src.clone_with_scope(scope),
             self._expander,
             self._aggregate,
         )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._src._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._src.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr

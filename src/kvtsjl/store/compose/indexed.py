@@ -47,7 +47,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         self._bundle = bundle
         self._sync_policy = sync_policy
         for index in self._indexes:
-            index._bind(self)
+            index.bind_store(self)
 
     @property
     def sync_policy(self) -> SyncPolicy:
@@ -58,7 +58,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         if self._bundle is None:
             return None
         for index in self._indexes:
-            index._bind(self)
+            index.bind_store(self)
         return self._bundle
 
     @property
@@ -107,22 +107,22 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         self._sync_batch_delete(keys)
         return deleted
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        yield from self._underlying._scan_entries(query)
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        yield from self._underlying.scan_entries(query)
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        keys = self._underlying._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        keys = self._underlying.gc_expired_keys(max_entries=max_entries)
         if keys:
             # Always BEST_EFFORT: raising would fail a successful cleanup;
             # leftover index entries are phantoms filtered by _hydrate.
             self._sync_batch_delete(keys, policy=SyncPolicy.BEST_EFFORT)
         return keys
 
-    def _clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
+    def clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
         clones = [idx.clone_with_scope(scope) for idx in self._indexes]
         remap = {id(o): c for o, c in zip(self._indexes, clones, strict=True)}
         return IndexedKvStore(
-            self._underlying._clone_with_scope(scope),
+            self._underlying.clone_with_scope(scope),
             clones,
             default_index=(
                 remap[id(self._default_index)]

@@ -37,11 +37,11 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         return self._underlying.batch_stat(keys)
 
-    def _clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return self._underlying._gc_expired_keys(max_entries=max_entries)
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._underlying.gc_expired_keys(max_entries=max_entries)
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr

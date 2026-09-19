@@ -35,7 +35,7 @@ class Index[Q, K, V, M](KeyMap[K, M], ABC):
 
     _store: IndexedKvStore[K, V, Any] | None = None
 
-    def _bind(self, store: IndexedKvStore[K, V, Any]) -> None:
+    def bind_store(self, store: IndexedKvStore[K, V, Any]) -> None:
         if self._store is not None and self._store is not store:
             raise KvStoreIndexError(
                 f"{type(self).__name__} is already bound to another store"

@@ -244,7 +244,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         headed = self._driver.head(stat.key)
         return headed
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         if self.kvset.key_layout is not KeyLayout.LITERAL:
             raise KvStoreScanUnsupported(
                 f"{type(self).__name__} scan requires KeyLayout.LITERAL "
@@ -271,7 +271,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             else:
                 yield decoded, None
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         deleted: list[K] = []

@@ -119,26 +119,26 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         self._ctor = ctor
         self._parts = dict(parts)
         if field_names is not None:
-            self._field_names = tuple(field_names)
+            self.field_names = tuple(field_names)
         elif is_dataclass(ctor):
-            self._field_names = tuple(f.name for f in fields(ctor))
+            self.field_names = tuple(f.name for f in fields(ctor))
         else:
-            self._field_names = tuple(parts.keys())
-        missing = [n for n in self._field_names if n not in self._parts]
+            self.field_names = tuple(parts.keys())
+        missing = [n for n in self.field_names if n not in self._parts]
         if missing:
             raise ValueError(f"zip_with missing part stores for fields: {missing}")
-        extra = [n for n in self._parts if n not in self._field_names]
+        extra = [n for n in self._parts if n not in self.field_names]
         if extra:
             raise ValueError(f"zip_with unknown part names: {extra}")
 
     def get(self, key: K) -> V | None:
-        kwargs = {name: self._parts[name].get(key) for name in self._field_names}
+        kwargs = {name: self._parts[name].get(key) for name in self.field_names}
         if all(v is None for v in kwargs.values()):
             return None
         return self._ctor(**kwargs)
 
     def set(self, key: K, value: V) -> None:
-        for name in self._field_names:
+        for name in self.field_names:
             item = getattr(value, name)
             part = self._parts[name]
             if item is None:
@@ -164,7 +164,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         }
         out: dict[K, V] = {}
         for key in unique:
-            kwargs = {name: part_found[name].get(key) for name in self._field_names}
+            kwargs = {name: part_found[name].get(key) for name in self.field_names}
             if not all(v is None for v in kwargs.values()):
                 out[key] = self._ctor(**kwargs)
         return out
@@ -177,7 +177,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         """
         if not items:
             return
-        for name in self._field_names:
+        for name in self.field_names:
             part = self._parts[name]
             to_set: dict[K, Any] = {}
             to_delete: list[K] = []

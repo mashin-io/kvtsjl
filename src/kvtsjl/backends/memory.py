@@ -78,7 +78,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     def supports_write_clock(self) -> bool:
         return True
 
-    def _clone_with_scope(self, scope: Scope) -> MemoryKvStore[K, V, KBLOB, VBLOB]:
+    def clone_with_scope(self, scope: Scope) -> MemoryKvStore[K, V, KBLOB, VBLOB]:
         return MemoryKvStore(
             self.kvset,
             scope=scope,
@@ -207,7 +207,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
                     deleted += 1
         return deleted
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         prefix = self._scan_prefix_blob(query.prefix)
         ops = self.kvset.blob_ops
         bucket = self._bucket()
@@ -229,7 +229,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             else:
                 yield decoded, None
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         prefix = self._scan_prefix_blob(None)

@@ -101,7 +101,7 @@ class S3KvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLOB]):
             io_concurrency=io_concurrency,
         )
 
-    def _clone_with_scope(self, scope: Scope) -> S3KvStore[K, V, KBLOB]:
+    def clone_with_scope(self, scope: Scope) -> S3KvStore[K, V, KBLOB]:
         return S3KvStore(
             self.kvset,
             client=self._client,

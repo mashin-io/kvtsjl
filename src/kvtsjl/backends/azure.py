@@ -99,7 +99,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLO
             io_concurrency=io_concurrency,
         )
 
-    def _clone_with_scope(self, scope: Scope) -> AzureBlobKvStore[K, V, KBLOB]:
+    def clone_with_scope(self, scope: Scope) -> AzureBlobKvStore[K, V, KBLOB]:
         return AzureBlobKvStore(
             self.kvset,
             container=self._container,

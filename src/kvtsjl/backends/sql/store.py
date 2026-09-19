@@ -103,7 +103,7 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def supports_write_clock(self) -> bool:
         return True
 
-    def _clone_with_scope(self, scope: Scope) -> SqlDbKvStore[K, V]:
+    def clone_with_scope(self, scope: Scope) -> SqlDbKvStore[K, V]:
         return SqlDbKvStore(
             self._sql_kvset,
             adapter=self._adapter,
@@ -435,7 +435,7 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             )
         return deleted
 
-    def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         if self.kvset.key_layout is not KeyLayout.LITERAL:
             raise KvStoreScanUnsupported(
                 "SqlDbKvStore scan requires KeyLayout.LITERAL "
@@ -471,7 +471,7 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 keys=expired_keys,
             )
 
-    def _gc_expired_keys(self, *, max_entries: int) -> list[K]:
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         sk = self._sql_kvset
