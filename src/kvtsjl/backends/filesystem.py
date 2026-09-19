@@ -17,7 +17,6 @@ from pathlib import Path
 from kvtsjl.backends.object.binding import filesystem_collection_binder
 from kvtsjl.backends.object.fs_driver import FilesystemBlobDriver
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
-from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.backends.object.ttl import (
     FilesystemMtimeTtl,
     FilesystemSidecarTtl,
@@ -28,6 +27,7 @@ from kvtsjl.bind import CollectionBinding, NamespaceBinder
 from kvtsjl.bind.namespace import resolve_collection_binding
 from kvtsjl.schema.ref import WireRef
 from kvtsjl.scope import Scope
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.ttl import ExpiryGc
 

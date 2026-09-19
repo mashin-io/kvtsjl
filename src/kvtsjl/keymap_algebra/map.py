@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections.abc import Callable
+from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap import KeyMap, ReadableKeyMap

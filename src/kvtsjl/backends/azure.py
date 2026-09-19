@@ -28,11 +28,11 @@ from typing import TYPE_CHECKING
 from kvtsjl.backends.object.azure_driver import AzureBlobDriver
 from kvtsjl.backends.object.binding import normalize_key_prefix, object_collection_binder
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
-from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.backends.object.ttl import AzureMetadataTtl, ObjectTimeTtl, TtlSource
 from kvtsjl.batching import DEFAULT_IO_CONCURRENCY
 from kvtsjl.bind import CollectionBinding, NamespaceBinder
 from kvtsjl.scope import Scope
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.ttl import ExpiryGc
 

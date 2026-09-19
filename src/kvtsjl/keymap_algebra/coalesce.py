@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 
 from kvtsjl.keymap import KeyMap
 from kvtsjl.store.schema.ttl import TtlPolicy

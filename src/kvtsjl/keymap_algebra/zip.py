@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
+from datetime import datetime
 from typing import Any
 
 from kvtsjl.keymap import KeyMap

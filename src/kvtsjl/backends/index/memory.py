@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import cast
 
 from kvtsjl.backends.index._null_meta import NullMetaIndexBackend, null_meta_index_set

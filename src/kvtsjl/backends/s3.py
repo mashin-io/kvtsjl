@@ -29,11 +29,11 @@ from typing import TYPE_CHECKING
 from kvtsjl.backends.object.binding import normalize_key_prefix, object_collection_binder
 from kvtsjl.backends.object.s3_driver import S3BlobDriver
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
-from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.backends.object.ttl import ObjectTimeTtl, S3ExpiresTtl, TtlSource
 from kvtsjl.batching import DEFAULT_IO_CONCURRENCY
 from kvtsjl.bind import CollectionBinding, NamespaceBinder
 from kvtsjl.scope import Scope
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.ttl import ExpiryGc
 

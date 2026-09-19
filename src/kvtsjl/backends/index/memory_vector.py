@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from collections.abc import Callable, Sequence
+from datetime import datetime
 import math
 from typing import cast, override
 
