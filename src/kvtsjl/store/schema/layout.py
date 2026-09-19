@@ -19,6 +19,16 @@ class KeyLayout(str, Enum):
     HASHED = "hashed"
     HIERARCHICAL = "hierarchical"
 
+    def encode_path(self, key_blob: str | bytes) -> str:
+        """Relative path / object-key suffix under a collection prefix."""
+        return encode_path(self, key_blob)
+
+    def decode_path(
+        self, rel: str, *, blob_type: type[str | bytes]
+    ) -> str | bytes:
+        """Invert ``encode_path`` for reversible layouts (``LITERAL`` only)."""
+        return decode_path(self, rel, blob_type=blob_type)
+
 
 @dataclass(frozen=True, slots=True)
 class ScanQuery[K]:
@@ -68,7 +78,7 @@ def supports_prefix_scan(layout: KeyLayout) -> bool:
     return layout in (KeyLayout.LITERAL, KeyLayout.HIERARCHICAL)
 
 
-def layout_encode_for_fs(layout: KeyLayout, key_blob: str | bytes) -> str:
+def encode_path(layout: KeyLayout, key_blob: str | bytes) -> str:
     """Relative path / object-key suffix under a collection prefix for a KBLOB."""
     if layout is KeyLayout.HASHED:
         return hash_blob(key_blob)
@@ -81,10 +91,10 @@ def layout_encode_for_fs(layout: KeyLayout, key_blob: str | bytes) -> str:
     return encode_literal_str(key_blob)
 
 
-def layout_decode_for_fs(
+def decode_path(
     layout: KeyLayout, rel: str, *, blob_type: type[str | bytes]
 ) -> str | bytes:
-    """Invert ``layout_encode_for_fs`` for reversible layouts (``LITERAL`` only)."""
+    """Invert ``encode_path`` for reversible layouts (``LITERAL`` only)."""
     if layout is not KeyLayout.LITERAL:
         raise ValueError(
             f"layout {layout!r} is not reversible from a relative path / object key"

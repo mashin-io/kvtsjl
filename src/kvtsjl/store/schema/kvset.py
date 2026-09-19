@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -129,24 +128,17 @@ class KvSet[K, V, KBLOB, VBLOB](PhysicalSchema[K, V, KBLOB, VBLOB]):
                 f"scope kinds {kinds!r} do not match schema prefix of {schema!r}"
             )
 
-    def encode_scope_parts(self, scope: Scope) -> list[KBLOB]:
+    def encode_in_key(self, scope: Scope, key: K | None = None) -> KBLOB:
+        """Compose scope (+ optional leaf) into an in-key KBLOB."""
         parts: list[KBLOB] = []
         for seg in scope.segments:
             parts.append(self.str_serde.serialize(seg.kind))
             parts.append(self.str_serde.serialize(seg.id))
-        return parts
-
-    def encode_in_key(self, scope: Scope, key: K | None = None) -> KBLOB:
-        """Compose scope (+ optional leaf) into an in-key KBLOB."""
-        parts = self.encode_scope_parts(scope)
         if key is not None:
             parts.append(self.key_serde.serialize(key))
         if not parts:
             return self.blob_ops.concat()
         return self.blob_ops.join(parts)
-
-    def encode_scan_prefix(self, scope: Scope, key_prefix: K | None = None) -> KBLOB:
-        return self.encode_in_key(scope, key_prefix)
 
     def decode_leaf_from_in_key(self, scope: Scope, in_key: KBLOB) -> K | None:
         """Strip scope prefix from ``in_key`` and deserialize the leaf."""
@@ -177,7 +169,3 @@ class KvSet[K, V, KBLOB, VBLOB](PhysicalSchema[K, V, KBLOB, VBLOB]):
             and self.str_serde is other.str_serde
             and self.blob_ops is other.blob_ops
         )
-
-
-def join_blobs[KBLOB](ops: BlobOps[KBLOB], parts: Sequence[KBLOB]) -> KBLOB:
-    return ops.join(list(parts))

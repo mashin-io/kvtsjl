@@ -48,8 +48,8 @@ from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import (
     KeyLayout,
     ScanQuery,
-    layout_decode_for_fs,
-    layout_encode_for_fs,
+    decode_path,
+    encode_path,
 )
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
@@ -167,7 +167,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         return created_at.timestamp()
 
     def _object_key(self, physical_key: KBLOB) -> str:
-        rel = layout_encode_for_fs(self.kvset.key_layout, physical_key)
+        rel = encode_path(self.kvset.key_layout, physical_key)
         return f"{self._collection_prefix}{rel}"
 
     def _expires_meta_value(
@@ -409,7 +409,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, s
         blob_type = cast(type[str] | type[bytes], self.kvset.str_serde.blob_type)
         return cast(
             KBLOB,
-            layout_decode_for_fs(self.kvset.key_layout, rel, blob_type=blob_type),
+            decode_path(self.kvset.key_layout, rel, blob_type=blob_type),
         )
 
     def _scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
