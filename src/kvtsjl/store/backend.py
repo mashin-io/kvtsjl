@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from typing import Self
 
 from kvtsjl.batching import DEFAULT_BATCH_SIZE
 from kvtsjl.bind.namespace import CollectionBinding, NamespaceBinder, resolve_collection_binding
@@ -11,20 +13,22 @@ from kvtsjl.schema.blob_ops import BlobOps
 from kvtsjl.schema.ref import WireRef
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
-from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.kvset import KvSet
-from kvtsjl.store.schema.layout import KeyLayout
+from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class KvBackend[K, V, KBLOB, VBLOB, COLL](
     PhysicalBackend[K, V, KBLOB, VBLOB, COLL],
-    KvStore[K, V],
     ABC,
 ):
-    """Leaf document backend: ``KvSet``, collection binding, and medium I/O."""
+    """Leaf document I/O: ``KvSet``, collection binding, and medium access.
+
+    Not a ``KvStore`` — public leaves wrap a backend in ``LeafKvStore``.
+    """
 
     kvset: KvSet[K, V, KBLOB, VBLOB]
+    batch_size: int
 
     def key_layout(self) -> KeyLayout:
         return self.kvset.key_layout
@@ -32,6 +36,10 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
     @property
     def physical(self) -> KvSet[K, V, KBLOB, VBLOB]:
         return self.kvset
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return False
 
     def _str_serde(self) -> SerDe[str, KBLOB]:
         return self.kvset.str_serde
@@ -96,6 +104,20 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
     def resolve_ttl_seconds(self, ttl: TtlPolicy | None = None) -> int | None:
         policy = self.kvset.ttl_policy if ttl is None else ttl
         return policy.ttl_seconds()
+
+    @abstractmethod
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        """Yield decoded keys (and values if requested) under scope + prefix."""
+
+    @abstractmethod
+    def clone_with_scope(self, scope: Scope) -> Self:
+        """Return a backend view narrowed to ``scope`` (same physical medium)."""
+
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        """Delete up to ``max_entries`` expired entries; return deleted keys."""
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+        return []
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import backend_repr

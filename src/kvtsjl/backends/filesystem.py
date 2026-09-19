@@ -17,6 +17,7 @@ from pathlib import Path
 from kvtsjl.backends.object.binding import filesystem_collection_binder
 from kvtsjl.backends.object.fs_driver import FilesystemBlobDriver
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.backends.object.ttl import (
     FilesystemMtimeTtl,
     FilesystemSidecarTtl,
@@ -47,7 +48,7 @@ def _ttl_source_for(mode: FilesystemTtlMode) -> TtlSource:
     return FilesystemMtimeTtl()
 
 
-class FilesystemKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLOB]):
+class FilesystemKvStore[K, V, KBLOB: str | bytes](LeafKvStore[K, V, KBLOB, bytes, str]):
     """Light FS store: ``{root}/{name}/v{version}/`` + one data file per key.
 
     - ``VBLOB`` is ``bytes`` from ``value_serde`` (encoding is the caller's SerDe).
@@ -86,9 +87,7 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBL
             raise TypeError("FilesystemKvStore requires a non-None collection binding")
         collection_prefix = coll if coll.endswith("/") else f"{coll}/"
         Path(collection_prefix).mkdir(parents=True, exist_ok=True)
-        self._root = root_path
-        self._ttl_mode = ttl_mode
-        super().__init__(
+        backend = ObjectStoreKvBackend(
             kvset,
             driver=FilesystemBlobDriver(collection_prefix),
             ttl_source=_ttl_source_for(ttl_mode),
@@ -100,6 +99,8 @@ class FilesystemKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBL
             io_concurrency=io_concurrency,
             collection_prefix=collection_prefix,
         )
+        backend.bind_leaf_state(_root=root_path, _ttl_mode=ttl_mode)
+        super().__init__(backend)
 
     def clone_with_scope(self, scope: Scope) -> FilesystemKvStore[K, V, KBLOB]:
         return FilesystemKvStore(

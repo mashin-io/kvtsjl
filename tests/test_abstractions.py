@@ -12,6 +12,7 @@ from kvtsjl import (
     IndexSet,
     KvBackend,
     KvSet,
+    KvStore,
     MemoryKeyIndex,
     MemoryKvStore,
     NativeStrCollectionBinder,
@@ -66,8 +67,10 @@ def test_memory_kvstore_is_kv_backend() -> None:
         value_serde=SerDe.identity(str),
     )
     store = MemoryKvStore(kvset)
-    assert isinstance(store, KvBackend)
-    assert isinstance(store, PhysicalBackend)
+    assert isinstance(store, KvStore)
+    assert not isinstance(store, KvBackend)
+    assert isinstance(store.backend, KvBackend)
+    assert isinstance(store.backend, PhysicalBackend)
     assert store.physical is store.kvset
     assert store.physical.same_physical_as(kvset)
     assert store.binding is store._binding

@@ -40,9 +40,9 @@ def _omit_field(key: str, value: Any) -> bool:
     return False
 
 
-def backend_repr(backend: Any) -> str:
-    """``repr`` for leaf ``KvBackend`` instances."""
-    cls = type(backend).__name__
+def backend_repr(backend: Any, *, class_name: str | None = None) -> str:
+    """``repr`` for leaf ``KvBackend`` / ``LeafKvStore`` instances."""
+    cls = class_name if class_name is not None else type(backend).__name__
     fields: dict[str, Any] = {"kvset": physical_label(backend.kvset)}
     if backend.scope.segments:
         fields["scope"] = backend.scope.path_display()

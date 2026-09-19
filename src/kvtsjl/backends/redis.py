@@ -26,6 +26,7 @@ from kvtsjl.bind import (
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery, supports_prefix_scan
 from kvtsjl.store.schema.stat import RecordStat
@@ -66,8 +67,8 @@ def _clock_base(created_at: datetime | None) -> float:
     return created_at.timestamp()
 
 
-class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]):
-    """Sync redis-py client store.
+class RedisKvBackend[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]):
+    """Sync redis-py client backend.
 
     Prefer the factories:
 
@@ -104,42 +105,8 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
     def supports_write_clock(self) -> bool:
         return not self._use_hash
 
-    @classmethod
-    def flat(
-        cls,
-        kvset: KvSet[K, V, KBLOB, VBLOB],
-        client: Redis,
-        *,
-        scope: Scope | None = None,
-        batch_size: int = 500,
-    ) -> RedisKvStore[K, V, KBLOB, VBLOB, None]:
-        return RedisKvStore(
-            kvset,
-            client,
-            scope=scope,
-            binder=KeyPrefixBinder(),
-            batch_size=batch_size,
-        )
-
-    @classmethod
-    def hash_collection(
-        cls,
-        kvset: KvSet[K, V, KBLOB, VBLOB],
-        client: Redis,
-        *,
-        scope: Scope | None = None,
-        batch_size: int = 500,
-    ) -> RedisKvStore[K, V, KBLOB, VBLOB, str]:
-        return RedisKvStore(
-            kvset,
-            client,
-            scope=scope,
-            binder=NativeStrCollectionBinder(),
-            batch_size=batch_size,
-        )
-
-    def clone_with_scope(self, scope: Scope) -> RedisKvStore[K, V, KBLOB, VBLOB, COLL]:
-        return RedisKvStore(
+    def clone_with_scope(self, scope: Scope) -> RedisKvBackend[K, V, KBLOB, VBLOB, COLL]:
+        return RedisKvBackend(
             self.kvset,
             self._client,
             scope=scope,
@@ -409,3 +376,69 @@ class RedisKvStore[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COLL]
                     yield decoded, None
             if cursor == 0:
                 break
+
+
+class RedisKvStore[K, V, KBLOB, VBLOB, COLL](LeafKvStore[K, V, KBLOB, VBLOB, COLL]):
+    """Sync redis-py client store.
+
+    Prefer the factories:
+
+    - ``RedisKvStore.flat(...)`` — ``KeyPrefixBinder`` (``COLL=None``)
+    - ``RedisKvStore.hash_collection(...)`` — one HASH per set (``COLL=str``)
+    """
+
+    def __init__(
+        self,
+        kvset: KvSet[K, V, KBLOB, VBLOB],
+        client: Redis,
+        *,
+        scope: Scope | None = None,
+        binder: NamespaceBinder[KBLOB, COLL] | None = None,
+        binding: CollectionBinding[KBLOB, COLL] | None = None,
+        batch_size: int = 500,
+    ) -> None:
+        super().__init__(
+            RedisKvBackend(
+                kvset,
+                client,
+                scope=scope,
+                binder=binder,
+                binding=binding,
+                batch_size=batch_size,
+            )
+        )
+
+    @classmethod
+    def flat(
+        cls,
+        kvset: KvSet[K, V, KBLOB, VBLOB],
+        client: Redis,
+        *,
+        scope: Scope | None = None,
+        batch_size: int = 500,
+    ) -> RedisKvStore[K, V, KBLOB, VBLOB, None]:
+        return RedisKvStore[K, V, KBLOB, VBLOB, None](
+            kvset,
+            client,
+            scope=scope,
+            binder=KeyPrefixBinder(),
+            batch_size=batch_size,
+        )
+
+    @classmethod
+    def hash_collection(
+        cls,
+        kvset: KvSet[K, V, KBLOB, VBLOB],
+        client: Redis,
+        *,
+        scope: Scope | None = None,
+        batch_size: int = 500,
+    ) -> RedisKvStore[K, V, KBLOB, VBLOB, str]:
+        return RedisKvStore[K, V, KBLOB, VBLOB, str](
+            kvset,
+            client,
+            scope=scope,
+            binder=NativeStrCollectionBinder(),
+            batch_size=batch_size,
+        )
+

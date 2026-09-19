@@ -18,6 +18,7 @@ from kvtsjl.bind import (
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
@@ -61,8 +62,8 @@ def _key_tuple(row: SqlDbRow, key_fields: Sequence[str]) -> tuple[Any, ...]:
     return tuple(row[f] for f in key_fields)
 
 
-class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
-    """Row-oriented KvStore over a SQL table via ``SqlDbClientAdapter``.
+class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
+    """Row-oriented KvBackend over a SQL table via ``SqlDbClientAdapter``.
 
     Physical PK = ``scope_fields`` (from ``scoped(...)``) + ``leaf_key_fields``
     (from leaf ``K``). Composite leaf keys are sequences/mappings aligned to
@@ -103,8 +104,8 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def supports_write_clock(self) -> bool:
         return True
 
-    def clone_with_scope(self, scope: Scope) -> SqlDbKvStore[K, V]:
-        return SqlDbKvStore(
+    def clone_with_scope(self, scope: Scope) -> SqlDbKvBackend[K, V]:
+        return SqlDbKvBackend(
             self._sql_kvset,
             adapter=self._adapter,
             expiry_gc=self._expiry_gc,
@@ -502,3 +503,36 @@ class SqlDbKvStore[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 keys=expired_rows,
             )
         return deleted
+
+
+class SqlDbKvStore[K, V](LeafKvStore[K, V, str, SqlDbRow, str]):
+    """Row-oriented KvStore over a SQL table via ``SqlDbClientAdapter``.
+
+    Physical PK = ``scope_fields`` (from ``scoped(...)``) + ``leaf_key_fields``
+    (from leaf ``K``). Composite leaf keys are sequences/mappings aligned to
+    ``leaf_key_fields``. Scan uses per-part string prefixes (empty / omitted =
+    unconstrained), matching other kvtsjl prefix-scan semantics.
+    """
+
+    def __init__(
+        self,
+        sql_kvset: SqlDbKvSet[K, V],
+        *,
+        adapter: SqlDbClientAdapter,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
+        scope: Scope | None = None,
+        binder: NamespaceBinder[str, str] | None = None,
+        binding: CollectionBinding[str, str] | None = None,
+        batch_size: int = 500,
+    ) -> None:
+        super().__init__(
+            SqlDbKvBackend(
+                sql_kvset,
+                adapter=adapter,
+                expiry_gc=expiry_gc,
+                scope=scope,
+                binder=binder,
+                binding=binding,
+                batch_size=batch_size,
+            )
+        )

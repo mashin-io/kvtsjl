@@ -1,0 +1,129 @@
+"""Adapt a physical ``KvBackend`` into a logical ``KvStore``."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime
+from typing import Any, Self
+
+from kvtsjl.bind.namespace import CollectionBinding
+from kvtsjl.scope import Scope
+from kvtsjl.store.backend import KvBackend
+from kvtsjl.store.logical import KvStore
+from kvtsjl.store.schema.kvset import KvSet
+from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
+from kvtsjl.store.schema.ttl import TtlPolicy
+
+
+class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
+    """Public leaf store: full ``KvStore`` algebra over a non-store ``KvBackend``.
+
+    Always forwards the enumerated backend surface used by tests, compose, and
+    ``backend_repr``. Leaf-specific attributes (``_client``, ``io_concurrency``,
+    …) are resolved via ``__getattr__`` when present on the concrete backend.
+    """
+
+    def __init__(self, backend: KvBackend[K, V, KBLOB, VBLOB, COLL]) -> None:
+        self._backend = backend
+        self.scope = backend.scope
+        self.batch_size = backend.batch_size
+
+    @classmethod
+    def from_backend(
+        cls, backend: KvBackend[K, V, KBLOB, VBLOB, COLL]
+    ) -> Self:
+        """Wrap an already-built backend (used by ``clone_with_scope``)."""
+        inst = object.__new__(cls)
+        LeafKvStore.__init__(inst, backend)
+        return inst
+
+    @property
+    def backend(self) -> KvBackend[K, V, KBLOB, VBLOB, COLL]:
+        return self._backend
+
+    # --- always forward / expose ---
+
+    @property
+    def kvset(self) -> KvSet[K, V, KBLOB, VBLOB]:
+        return self._backend.kvset
+
+    @property
+    def physical(self) -> KvSet[K, V, KBLOB, VBLOB]:
+        return self._backend.physical
+
+    @property
+    def binding(self) -> CollectionBinding[KBLOB, COLL]:
+        return self._backend.binding
+
+    @property
+    def _binding(self) -> CollectionBinding[KBLOB, COLL]:
+        return self._backend.binding
+
+    @property
+    def supports_write_clock(self) -> bool:
+        return self._backend.supports_write_clock
+
+    def key_layout(self) -> KeyLayout:
+        return self._backend.key_layout()
+
+    def get(self, key: K) -> V | None:
+        return self._backend.get(key)
+
+    def exists(self, key: K) -> bool:
+        return self._backend.exists(key)
+
+    def batch_exists(self, keys: Sequence[K]) -> set[K]:
+        return self._backend.batch_exists(keys)
+
+    def stat(self, key: K) -> RecordStat | None:
+        return self._backend.stat(key)
+
+    def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
+        return self._backend.batch_stat(keys)
+
+    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
+        return self._backend.batch_get(keys)
+
+    def set(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._backend.set(key, value, ttl=ttl, created_at=created_at)
+
+    def delete(self, key: K) -> bool:
+        return self._backend.delete(key)
+
+    def batch_set(
+        self,
+        items: Mapping[K, V],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._backend.batch_set(items, ttl=ttl, created_at=created_at)
+
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        return self._backend.batch_delete(keys)
+
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        return self._backend.scan_entries(query)
+
+    def clone_with_scope(self, scope: Scope) -> Self:
+        return type(self).from_backend(self._backend.clone_with_scope(scope))
+
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        return self._backend.gc_expired_keys(max_entries=max_entries)
+
+    def __repr__(self) -> str:
+        from kvtsjl.store.repr_util import backend_repr
+
+        return backend_repr(self._backend, class_name=type(self).__name__)
+
+    def __getattr__(self, name: str) -> Any:
+        # Leaf-specific backend attrs (``_client``, ``io_concurrency``, …).
+        return getattr(self._backend, name)

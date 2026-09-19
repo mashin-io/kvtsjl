@@ -28,6 +28,19 @@ from kvtsjl.store.schema.ttl import (
 class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, bytes, str]):
     """Shared CRUD / scan / GC over ``BlobDriver`` + ``TtlSource`` + ``KeyCodec``."""
 
+    # Optional leaf-facing attrs set by thin ``*KvStore`` wrappers (forwarded via LeafKvStore).
+    _client: object | None = None
+    _bucket: object | None = None
+    _container: object | None = None
+    _key_prefix: str = ""
+    _ttl_mode: object | None = None
+    _root: object | None = None
+
+    def bind_leaf_state(self, **attrs: object) -> None:
+        """Attach thin-leaf identity fields used by ``clone_with_scope`` / tests."""
+        for name, value in attrs.items():
+            object.__setattr__(self, name, value)
+
     def __init__(
         self,
         kvset: KvSet[K, V, KBLOB, bytes],
@@ -270,6 +283,31 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
                 yield decoded, self.kvset.value_serde.deserialize(raw)
             else:
                 yield decoded, None
+
+    def clone_with_scope(self, scope: Scope) -> ObjectStoreKvBackend[K, V, KBLOB]:
+        cloned = ObjectStoreKvBackend(
+            self.kvset,
+            driver=self._driver,
+            ttl_source=self._ttl_source,
+            expiry_gc=self._expiry_gc,
+            scope=scope,
+            binding=self._binding,
+            batch_size=self.batch_size,
+            io_concurrency=self.io_concurrency,
+            collection_prefix=self._collection_prefix,
+        )
+        for attr in (
+            "_client",
+            "_bucket",
+            "_container",
+            "_key_prefix",
+            "_ttl_mode",
+            "_root",
+            "_read_live",
+        ):
+            if hasattr(self, attr):
+                setattr(cloned, attr, getattr(self, attr))
+        return cloned
 
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:

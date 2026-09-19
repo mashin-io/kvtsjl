@@ -15,6 +15,7 @@ from kvtsjl.bind import (
 )
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.stat import RecordStat
@@ -50,8 +51,8 @@ def _utc_from_epoch(epoch: float | None) -> datetime | None:
     return datetime.fromtimestamp(epoch, tz=UTC)
 
 
-class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
-    """In-process store with string-named native collections."""
+class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
+    """In-process KvBackend with string-named native collections."""
 
     def __init__(
         self,
@@ -78,8 +79,8 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     def supports_write_clock(self) -> bool:
         return True
 
-    def clone_with_scope(self, scope: Scope) -> MemoryKvStore[K, V, KBLOB, VBLOB]:
-        return MemoryKvStore(
+    def clone_with_scope(self, scope: Scope) -> MemoryKvBackend[K, V, KBLOB, VBLOB]:
+        return MemoryKvBackend(
             self.kvset,
             scope=scope,
             binding=self._binding,
@@ -161,7 +162,7 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
         created_at: datetime | None = None,
     ) -> None:
         require_write_clock_supported(
-            created_at, allowed=True, backend="MemoryKvStore"
+            created_at, allowed=True, backend="MemoryKvBackend"
         )
         pk = self._physical_key_blob(key)
         blob = self.kvset.value_serde.serialize(value)
@@ -250,3 +251,30 @@ class MemoryKvStore[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             bucket.pop(pk, None)
             deleted.append(decoded)
         return deleted
+
+
+class MemoryKvStore[K, V, KBLOB, VBLOB](LeafKvStore[K, V, KBLOB, VBLOB, str]):
+    """In-process store with string-named native collections."""
+
+    def __init__(
+        self,
+        kvset: KvSet[K, V, KBLOB, VBLOB],
+        *,
+        scope: Scope | None = None,
+        binder: NamespaceBinder[KBLOB, str] | None = None,
+        binding: CollectionBinding[KBLOB, str] | None = None,
+        batch_size: int = 500,
+        root: _MemoryRoot[KBLOB, VBLOB] | None = None,
+        expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
+    ) -> None:
+        super().__init__(
+            MemoryKvBackend(
+                kvset,
+                scope=scope,
+                binder=binder,
+                binding=binding,
+                batch_size=batch_size,
+                root=root,
+                expiry_gc=expiry_gc,
+            )
+        )

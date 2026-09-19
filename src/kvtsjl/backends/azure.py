@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from kvtsjl.backends.object.azure_driver import AzureBlobDriver
 from kvtsjl.backends.object.binding import normalize_key_prefix, object_collection_binder
 from kvtsjl.backends.object.store import ObjectStoreKvBackend
+from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.backends.object.ttl import AzureMetadataTtl, ObjectTimeTtl, TtlSource
 from kvtsjl.batching import DEFAULT_IO_CONCURRENCY
 from kvtsjl.bind import CollectionBinding, NamespaceBinder
@@ -55,7 +56,7 @@ def _ttl_source_for(mode: AzureTtlMode) -> TtlSource:
     return ObjectTimeTtl()
 
 
-class AzureBlobKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLOB]):
+class AzureBlobKvStore[K, V, KBLOB: str | bytes](LeafKvStore[K, V, KBLOB, bytes, str]):
     """KvStore over an Azure Blob container.
 
     - ``VBLOB`` is ``bytes`` from ``value_serde``.
@@ -84,10 +85,7 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLO
         base = normalize_key_prefix(key_prefix)
         if binder is None and binding is None:
             binder = object_collection_binder(base)
-        self._container = container
-        self._key_prefix = base
-        self._ttl_mode = ttl_mode
-        super().__init__(
+        backend = ObjectStoreKvBackend(
             kvset,
             driver=AzureBlobDriver(container),
             ttl_source=_ttl_source_for(ttl_mode),
@@ -98,6 +96,12 @@ class AzureBlobKvStore[K, V, KBLOB: str | bytes](ObjectStoreKvBackend[K, V, KBLO
             batch_size=batch_size,
             io_concurrency=io_concurrency,
         )
+        backend.bind_leaf_state(
+            _container=container,
+            _key_prefix=base,
+            _ttl_mode=ttl_mode,
+        )
+        super().__init__(backend)
 
     def clone_with_scope(self, scope: Scope) -> AzureBlobKvStore[K, V, KBLOB]:
         return AzureBlobKvStore(
