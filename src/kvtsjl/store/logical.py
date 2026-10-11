@@ -14,6 +14,7 @@ from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.streaming import StreamingView, StreamSource
 
 if TYPE_CHECKING:
     from kvtsjl.index.logical.abc import Index
@@ -37,6 +38,53 @@ class KvStore[K, V](
     native bulk. Composed stores (``zip``, ``fallback``, ``mirror``, …) must
     fan out to part ``batch_get``, not ``N×get``.
     """
+
+    # --- streaming (byte-valued stores only) ---------------------------------
+    #
+    # ``self: KvStore[K, bytes]`` restricts these to stores whose value *is* the
+    # a chunkable surface type. Calling them on any other value type is a type
+    # error, not a method that exists and refuses — the distinction this
+    # codebase keeps coming back to. NotImplementedError is left for a real
+    # backend limit.
+    #
+    # ``Chunkable`` is bytes-or-str because those are the value types that can
+    # be split and rejoined at all; whether the *serde* can also be applied
+    # chunk by chunk is a separate question, answered at runtime by
+    # ``require_streaming_serde`` (a str store with a UTF-8 serde streams; one
+    # with a non-incremental codec does not). The type rules out the cases that
+    # can never work; the guard rules out the rest.
+
+    def streaming[C](self, chunk_type: type[C]) -> StreamingView[K, C]:
+        """A writable streaming view typed in ``chunk_type``.
+
+        Narrows ``ReadableKvStore.streaming`` — a store that can be written to
+        yields a view that can write.
+        """
+        self._check_chunk_type(chunk_type)
+        return StreamingView[K, C](self, chunk_type)
+
+    def set_stream[Chunkable: (bytes, str)](
+        self: KvStore[K, Chunkable],
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        """Write ``source`` to ``key`` without holding the whole value.
+
+        ``source`` is a path, an open stream whose ``read(n)`` returns chunks
+        of the value type, or an iterable of such chunks. ``size`` is a hint for
+        media that size multipart uploads from it. ``ttl`` and ``created_at``
+        behave exactly as on ``set``, so a stream-written value expires, scans
+        and garbage-collects identically to a ``set`` one.
+
+        Stores that cannot stream raise rather than buffering: buffering is
+        precisely what callers use this for. Small-value leaves (memory, Redis)
+        may buffer, but they override and say so.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support set_stream")
 
     @abstractmethod
     def set(

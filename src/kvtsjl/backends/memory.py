@@ -6,6 +6,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import time
+from typing import Any, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
@@ -14,6 +15,7 @@ from kvtsjl.bind import (
     NativeStrCollectionBinder,
 )
 from kvtsjl.scope import Scope
+from kvtsjl.serde import StreamingSerDe
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.kvset import KvSet
@@ -23,6 +25,11 @@ from kvtsjl.store.schema.ttl import (
     ExpiryGc,
     TtlPolicy,
     require_write_clock_supported,
+)
+from kvtsjl.store.streaming import (
+    StreamSource,
+    iter_source,
+    require_streaming_serde,
 )
 
 
@@ -174,6 +181,43 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             created_at=base,
             written_at=written,
         )
+
+    def set_stream(
+        self,
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        """Buffer, then ``set`` — this store holds values in memory anyway.
+
+        Buffering here is honest rather than a silent cost: the medium *is*
+        memory, so there is no streaming benefit to be had. Declared so callers
+        can see it, unlike a wrapper that would quietly defeat their intent.
+        """
+        # Streaming is defined over byte wires, so a streamable serde of this
+        # collection encodes to bytes however ``VBLOB`` is declared.
+        serde = cast(
+            "StreamingSerDe[V, Any, bytes]",
+            require_streaming_serde(
+                self.kvset.value_serde, op="set_stream", backend=type(self).__name__
+            ),
+        )
+        with iter_source(source) as chunks:
+            blob = b"".join(serde.encode_stream(chunks))
+        self.set(key, serde.deserialize(blob), ttl=ttl, created_at=created_at)
+
+    def read_stream(self, key: K) -> Iterator[V] | None:
+        """Buffer, then yield one chunk — see ``set_stream``."""
+        require_streaming_serde(
+            self.kvset.value_serde, op="read_stream", backend=type(self).__name__
+        )
+        value = self.get(key)
+        if value is None:
+            return None
+        return iter((value,))
 
     def delete(self, key: K) -> bool:
         pk = self._physical_key_blob(key)

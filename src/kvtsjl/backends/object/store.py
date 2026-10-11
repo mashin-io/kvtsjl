@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
+import io
 import time
+from typing import Any
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.backends.object.ttl import TtlSource
@@ -12,6 +14,8 @@ from kvtsjl.batching import chunk_sequence, map_concurrent
 from kvtsjl.bind import CollectionBinding, NamespaceBinder
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.scope import Scope
+from kvtsjl.serde import StreamingSerDe
+from kvtsjl.serde.compress import ChunkReader
 from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.key_codec import BindingLayoutKeyCodec, KeyCodec
 from kvtsjl.store.schema.kvset import KvSet
@@ -34,6 +38,11 @@ from kvtsjl.store.schema.ttl import (
     TtlPolicy,
     require_explicit_ttl_supported,
     require_write_clock_supported,
+)
+from kvtsjl.store.streaming import (
+    StreamSource,
+    iter_source,
+    require_streaming_serde,
 )
 
 
@@ -204,6 +213,59 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             self.kvset.value_serde.serialize(value),
             headers=headers or None,
         )
+
+    def _require_streaming_serde(self, op: str) -> StreamingSerDe[V, Any, bytes]:
+        return require_streaming_serde(self.kvset.value_serde, op=op, backend=type(self).__name__)
+
+    def set_stream(
+        self,
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        serde = self._require_streaming_serde("set_stream")
+        require_explicit_ttl_supported(
+            ttl,
+            allowed=self._ttl_source.supports_per_write_ttl,
+            backend=type(self).__name__,
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend=type(self).__name__,
+        )
+        headers = self._ttl_source.write_headers(
+            ttl_seconds=self.resolve_ttl_seconds(ttl),
+            clock_base=self._clock_base(created_at),
+            explicit_ttl=ttl is not None,
+            created_at_set=created_at is not None,
+        )
+        physical = self._key_codec.encode_physical(key)
+        with iter_source(source) as chunks:
+            # The serde turns value chunks into wire chunks; the driver only
+            # ever sees wire bytes, exactly as it does for ``set``.
+            # BufferedReader is the typed BinaryIO wrapper over a raw stream.
+            wrapped = io.BufferedReader(ChunkReader(serde.encode_stream(chunks)))
+            self._driver.write_stream(
+                physical,
+                wrapped,
+                size=serde.encoded_size(size),
+                headers=headers or None,
+            )
+
+    def read_stream(self, key: K) -> Iterator[Any] | None:
+        serde = self._require_streaming_serde("read_stream")
+        physical = self._key_codec.encode_physical(key)
+        if self._live_stat(physical) is None:
+            return None
+        found = self._driver.read_chunks(physical)
+        if found is None:
+            return None
+        wire_chunks, _ = found
+        return serde.decode_stream(wire_chunks)
 
     def delete(self, key: K) -> bool:
         return self._driver.delete(self._key_codec.encode_physical(key))

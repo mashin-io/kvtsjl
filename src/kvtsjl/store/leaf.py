@@ -25,6 +25,7 @@ from kvtsjl.store.schema.scan import (
 )
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.streaming import StreamSource, require_streaming_serde
 
 
 class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
@@ -122,6 +123,37 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._backend.batch_delete(keys)
+
+    def set_stream(
+        self,
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        stream_fn = getattr(self._backend, "set_stream", None)
+        if not callable(stream_fn):
+            raise NotImplementedError(f"{type(self._backend).__name__} does not support set_stream")
+        stream_fn(key, source, ttl=ttl, created_at=created_at, size=size)
+
+    def stream_chunk_type(self) -> type[Any]:
+        return require_streaming_serde(
+            self._backend.kvset.value_serde,
+            op="streaming",
+            backend=type(self._backend).__name__,
+        ).chunk_type
+
+    def read_stream[Chunkable: (bytes, str)](
+        self: LeafKvStore[K, Chunkable, KBLOB, VBLOB, COLL], key: K
+    ) -> Iterator[Chunkable] | None:
+        stream_fn = getattr(self._backend, "read_stream", None)
+        if not callable(stream_fn):
+            raise NotImplementedError(
+                f"{type(self._backend).__name__} does not support read_stream"
+            )
+        return cast("Iterator[Chunkable] | None", stream_fn(key))
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         return self._backend.scan_entries(query)
