@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import gzip
 import importlib
+import io
 from typing import TYPE_CHECKING, Literal, TypeVar
 import zlib
 
@@ -52,11 +53,32 @@ def _compress_zstd(data: bytes) -> bytes:
 
 
 def _decompress_zstd(data: bytes) -> bytes:
+    """Decompress any valid zstd input, not only one-shot single frames.
+
+    ``ZstdDecompressor().decompress(data)`` is wrong on two kinds of input that
+    other writers produce:
+
+    - a frame without a content size in its header (what every *streaming*
+      compressor emits unless told the size up front) raises
+      ``ZstdError: could not determine content size in frame header``;
+    - concatenated frames are **silently truncated** to the first frame, with
+      no error at all — the worse of the two, since the caller gets short data
+      that looks valid.
+
+    ``stream_reader`` handles both. ``read_across_frames`` is passed explicitly:
+    it already behaves this way in zstandard 0.25, but the library documents the
+    default as ``False``, so relying on it would tie correctness to the
+    installed version.
+    """
     try:
         zstandard = importlib.import_module("zstandard")
     except ImportError as exc:
         raise _missing_extra("zstd", "zstd") from exc
-    return zstandard.ZstdDecompressor().decompress(data)
+    reader = zstandard.ZstdDecompressor().stream_reader(
+        io.BytesIO(data), read_across_frames=True
+    )
+    with reader:
+        return reader.read()
 
 
 def _compress_lz4(data: bytes) -> bytes:
