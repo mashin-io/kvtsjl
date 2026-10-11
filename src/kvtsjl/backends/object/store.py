@@ -16,6 +16,18 @@ from kvtsjl.store import KvBackend
 from kvtsjl.store.schema.key_codec import BindingLayoutKeyCodec, KeyCodec
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.scan import (
+    CompiledScan,
+    KeyPrefix,
+    Projection,
+    ScanCapabilities,
+    ScanOrder,
+    ScanRow,
+    ScanSpec,
+    ScanStat,
+    enforce_strict,
+    peel_key_prefix,
+)
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     ExpiryGc,
@@ -257,13 +269,32 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         headed = self._driver.head(stat.key)
         return headed
 
-    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        if self.kvset.key_layout is not KeyLayout.LITERAL:
-            raise KvStoreScanUnsupported(
-                f"{type(self).__name__} scan requires KeyLayout.LITERAL "
-                f"(got {self.kvset.key_layout!r})"
-            )
-        for listed in self._driver.list(prefix=self._collection_prefix):
+    def _listing_prefix(self, key_prefix: K | None) -> str:
+        return self._key_codec.listing_prefix(key_prefix)
+
+    def _scan_stat(self, blob: BlobStat) -> ScanStat:
+        record = self._ttl_source.to_record_stat(
+            blob, collection_ttl_seconds=self.ttl_seconds()
+        )
+        return ScanStat(
+            size=blob.size,
+            modified_at=record.modified_at,
+            expires_at=record.expires_at,
+            etag=blob.etag,
+        )
+
+    def _iter_listed_rows(
+        self,
+        *,
+        listing_prefix: str,
+        user_prefix: K | None,
+        include_values: bool,
+        limit: int | None = None,
+    ) -> Iterator[ScanRow[K, V]]:
+        yielded = 0
+        for listed in self._driver.list(prefix=listing_prefix):
+            if limit is not None and yielded >= limit:
+                return
             stat = self._enrich_list_stat(listed)
             if stat is None:
                 continue
@@ -273,16 +304,71 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
                 if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                     self._driver.delete(stat.key)
                 continue
-            decoded = self._key_codec.decode_if_prefix(stat.key, query.prefix)
+            # Safety net: wrong listing prefix yields zero rows, not wrong rows.
+            decoded = self._key_codec.decode_if_prefix(stat.key, user_prefix)
             if decoded is None:
                 continue
-            if query.include_values:
+            scan_stat = self._scan_stat(stat)
+            if include_values:
                 raw = self._read_live(stat.key)
                 if raw is None:
                     continue
-                yield decoded, self.kvset.value_serde.deserialize(raw)
+                yield ScanRow(
+                    key=decoded,
+                    value=self.kvset.value_serde.deserialize(raw),
+                    stat=scan_stat,
+                )
             else:
-                yield decoded, None
+                yield ScanRow(key=decoded, value=None, stat=scan_stat)
+            yielded += 1
+
+    def scan_capabilities(self) -> ScanCapabilities:
+        return ScanCapabilities(
+            pushdown=frozenset({KeyPrefix}),
+            orders=frozenset({ScanOrder.UNORDERED, ScanOrder.KEY_ASC}),
+            resumable=True,
+            stats=True,
+        )
+
+    def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
+        if self.kvset.key_layout is not KeyLayout.LITERAL:
+            raise KvStoreScanUnsupported(
+                f"{type(self).__name__} scan requires KeyLayout.LITERAL "
+                f"(got {self.kvset.key_layout!r})"
+            )
+        user_prefix, residual = peel_key_prefix(spec.where)
+        pushed: set[str] = set()
+        if user_prefix is not None:
+            pushed.add("KeyPrefix")
+        listing = self._listing_prefix(user_prefix)
+        include_values = spec.project is Projection.ENTRIES
+        # Over-fetch a little when residual may filter; limit applied in cascade.
+        rows = self._iter_listed_rows(
+            listing_prefix=listing,
+            user_prefix=user_prefix,
+            include_values=include_values,
+            limit=None,
+        )
+        enforce_strict(spec, residual, backend=type(self).__name__)
+        return CompiledScan(
+            rows=rows,
+            residual=residual,
+            pushed=frozenset(pushed),
+        )
+
+    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        if self.kvset.key_layout is not KeyLayout.LITERAL:
+            raise KvStoreScanUnsupported(
+                f"{type(self).__name__} scan requires KeyLayout.LITERAL "
+                f"(got {self.kvset.key_layout!r})"
+            )
+        listing = self._listing_prefix(query.prefix)
+        for row in self._iter_listed_rows(
+            listing_prefix=listing,
+            user_prefix=query.prefix,
+            include_values=query.include_values,
+        ):
+            yield row.key, row.value
 
     def clone_with_scope(self, scope: Scope) -> ObjectStoreKvBackend[K, V, KBLOB]:
         cloned = ObjectStoreKvBackend(
@@ -313,7 +399,8 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
         deleted: list[K] = []
-        for listed in self._driver.list(prefix=self._collection_prefix):
+        listing = self._listing_prefix(None)
+        for listed in self._driver.list(prefix=listing):
             if len(deleted) >= max_entries:
                 break
             stat = self._enrich_list_stat(listed)

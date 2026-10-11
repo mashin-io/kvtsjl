@@ -15,6 +15,7 @@ from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
+from kvtsjl.store.schema.scan import Predicate
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,44 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._underlying.scan_entries(query)
+
+    def delete_where(
+        self,
+        where: Predicate[K],
+        *,
+        limit: int | None = None,
+        sync_policy: SyncPolicy | None = None,
+    ) -> int:
+        from kvtsjl.store.schema.scan import Projection, ScanSpec, is_gc_predicate
+
+        if is_gc_predicate(where):
+            max_entries = limit if limit is not None else 2_147_483_647
+            if max_entries < 1:
+                raise ValueError(f"limit must be >= 1 for GC, got {limit}")
+            keys = self._underlying.gc_expired_keys(max_entries=max_entries)
+            if keys:
+                # Always BEST_EFFORT unless overridden: raising would fail a
+                # successful cleanup; leftover index entries are phantoms
+                # filtered by _hydrate.
+                policy = (
+                    sync_policy
+                    if sync_policy is not None
+                    else SyncPolicy.BEST_EFFORT
+                )
+                self._sync_batch_delete(keys, policy=policy)
+            return len(keys)
+        keys = [
+            row.key
+            for row in self.scan_rows(
+                ScanSpec(where=where, project=Projection.KEYS, limit=limit)
+            )
+        ]
+        if not keys:
+            return 0
+        deleted = self._underlying.batch_delete(keys)
+        policy = sync_policy if sync_policy is not None else self._sync_policy
+        self._sync_batch_delete(keys, policy=policy)
+        return deleted
 
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         keys = self._underlying.gc_expired_keys(max_entries=max_entries)

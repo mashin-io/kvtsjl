@@ -12,6 +12,7 @@ from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
+from kvtsjl.store.schema.scan import Predicate
 from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,29 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._primary.scan_entries(query)
+
+    def delete_where(
+        self,
+        where: Predicate[K],
+        *,
+        limit: int | None = None,
+        sync_policy: SyncPolicy | None = None,
+    ) -> int:
+        from kvtsjl.store.schema.scan import is_gc_predicate
+
+        if is_gc_predicate(where):
+            max_entries = limit if limit is not None else 2_147_483_647
+            return len(self.gc_expired_keys(max_entries=max_entries))
+        n = self._primary.delete_where(where, limit=limit, sync_policy=sync_policy)
+        policy = sync_policy if sync_policy is not None else self._sync_policy
+        self._fanout_secondary(
+            lambda: self._secondary.delete_where(
+                where, limit=limit, sync_policy=sync_policy
+            ),
+            what="delete_where",
+            policy=policy,
+        )
+        return n
 
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         if max_entries < 1:

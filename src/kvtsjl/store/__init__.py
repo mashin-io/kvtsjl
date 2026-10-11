@@ -11,11 +11,30 @@ from kvtsjl.store.compose import (
 )
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.readable import ReadableKvStore
-from kvtsjl.store.schema import KeyLayout, KvSet, RecordStat, ScanQuery, SyncPolicy, TtlPolicy
+from kvtsjl.store.schema import (
+    KeyLayout,
+    KvSet,
+    RecordStat,
+    ScanQuery,
+    SyncPolicy,
+    TtlPolicy,
+)
+from kvtsjl.store.schema.scan import (
+    Expired,
+    Predicate,
+    Projection,
+    Pushdown,
+    ScanCursor,
+    ScanOrder,
+    ScanPlan,
+    ScanRow,
+    ScanSpec,
+)
 from kvtsjl.store.schema.ttl import ExpiryGc
 
 __all__ = [
     "ExpiryGc",
+    "Expired",
     "FallbackReadKvStore",
     "IndexedKvStore",
     "KeyLayout",
@@ -23,10 +42,18 @@ __all__ = [
     "KvSet",
     "KvStore",
     "MirrorKvStore",
+    "Predicate",
+    "Projection",
+    "Pushdown",
     "ReadableKvStore",
     "ReadonlyKvStore",
     "RecordStat",
+    "ScanCursor",
+    "ScanOrder",
+    "ScanPlan",
     "ScanQuery",
+    "ScanRow",
+    "ScanSpec",
     "SyncPolicy",
     "TtlPolicy",
 ]

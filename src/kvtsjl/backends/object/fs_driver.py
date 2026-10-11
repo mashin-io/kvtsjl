@@ -104,10 +104,29 @@ class FilesystemBlobDriver(BlobDriver):
         return existed
 
     def list(self, *, prefix: str) -> Iterator[BlobStat]:
+        """List objects under ``prefix`` (directory walk or string-prefix filter).
+
+        LITERAL layout encodes keys as percent-encoded filenames, so a user
+        ``KeyPrefix`` often ends mid-filename (e.g. ``…/inv%2F``) rather than
+        on a directory boundary. Walk the nearest existing *directory* ancestor
+        and filter by ``str.startswith(prefix)``.
+
+        Critical: ``Path(prefix).exists()`` is True when a *file* equals the
+        listing prefix (key ``al`` while scanning ``KeyPrefix("al")``). That
+        file must not become the walk root — otherwise the scan silently
+        returns zero rows.
+        """
         root = Path(prefix)
-        if not root.is_dir():
-            return
-        for dirpath, _dirnames, filenames in os.walk(root):
+        if root.is_dir():
+            walk_root = root
+        else:
+            walk_root = root.parent
+            while not walk_root.is_dir() and walk_root != walk_root.parent:
+                walk_root = walk_root.parent
+            if not walk_root.is_dir():
+                return
+
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
             for name in filenames:
                 if name.endswith(".tmp") or name.endswith(".expires"):
                     continue
@@ -118,6 +137,8 @@ class FilesystemBlobDriver(BlobDriver):
                     base = prefix.rstrip("/")
                     if key.startswith(base + "/") or key == base:
                         key = prefix + key[len(base) + 1 :]
+                if not key.startswith(prefix):
+                    continue
                 stat = _stat_for_path(path, key=key)
                 if stat is not None:
                     yield stat

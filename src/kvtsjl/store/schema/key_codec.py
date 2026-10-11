@@ -31,6 +31,15 @@ class KeyCodec[K](ABC):
     def matches_prefix(self, physical: str, key_prefix: K | None) -> bool:
         """Whether ``physical`` falls under ``key_prefix`` within this scope."""
 
+    def listing_prefix(self, key_prefix: K | None) -> str:
+        """Object-store list Prefix: collection + encoded scope/key prefix.
+
+        Subclasses that own the medium path must override. The default raises.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement listing_prefix"
+        )
+
     def decode_if_prefix(self, physical: str, key_prefix: K | None) -> K | None:
         """Decode when under ``key_prefix``; one round trip for the default codec."""
         if not self.matches_prefix(physical, key_prefix):
@@ -103,6 +112,12 @@ class BindingLayoutKeyCodec[K, KBLOB: str | bytes](KeyCodec[K]):
             return False
         prefix = self._scan_prefix_blob(key_prefix)
         return self._kvset.blob_ops.startswith(pk, prefix)
+
+    def listing_prefix(self, key_prefix: K | None) -> str:
+        """Three layers: collection binding, scope, encoded user key prefix."""
+        blob = self._scan_prefix_blob(key_prefix)
+        rel = self._kvset.key_layout.encode_path(blob)
+        return f"{self._collection_prefix}{rel}"
 
     def decode_if_prefix(self, physical: str, key_prefix: K | None) -> K | None:
         pk = self._blob_from_physical(physical)

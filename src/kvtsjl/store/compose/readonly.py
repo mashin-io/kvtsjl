@@ -79,6 +79,15 @@ class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
     def gc_expired(self, *, max_entries: int) -> int:
         raise KvStoreReadOnlyError("gc_expired on readonly store")
 
+    def delete_where(
+        self,
+        where: object,
+        *,
+        limit: int | None = None,
+        sync_policy: object = None,
+    ) -> int:
+        raise KvStoreReadOnlyError("delete_where on readonly store")
+
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         yield from self._underlying.scan_entries(query)
 

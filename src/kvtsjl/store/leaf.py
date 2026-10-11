@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from kvtsjl.bind.namespace import CollectionBinding
 from kvtsjl.scope import Scope
@@ -12,6 +12,18 @@ from kvtsjl.store.backend import KvBackend
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.scan import (
+    CompiledScan,
+    KeyPrefix,
+    Projection,
+    ScanCapabilities,
+    ScanOrder,
+    ScanRow,
+    ScanSpec,
+    apply_cascade,
+    enforce_strict,
+    peel_key_prefix,
+)
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -114,6 +126,61 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         return self._backend.scan_entries(query)
+
+    def scan_capabilities(self) -> ScanCapabilities:
+        caps_fn = getattr(self._backend, "scan_capabilities", None)
+        if callable(caps_fn):
+            return cast(ScanCapabilities, caps_fn())
+        return ScanCapabilities(
+            pushdown=frozenset({KeyPrefix}),
+            orders=frozenset({ScanOrder.UNORDERED}),
+            resumable=False,
+            stats=False,
+        )
+
+    def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
+        compile_fn = getattr(self._backend, "compile_scan", None)
+        if callable(compile_fn):
+            return cast(CompiledScan[K], compile_fn(spec))
+        prefix, residual = peel_key_prefix(spec.where)
+        query = ScanQuery(
+            prefix=prefix,
+            include_values=spec.project is Projection.ENTRIES,
+            page_size=spec.page_size,
+        )
+        rows_iter = (
+            ScanRow(key=key, value=value)
+            for key, value in self._backend.scan_entries(query)
+        )
+        if spec.cursor is not None:
+            token = spec.cursor.token
+
+            def after_cursor() -> Iterator[ScanRow[K, V]]:
+                started = False
+                for row in rows_iter:
+                    if not started:
+                        if str(row.key) == token:
+                            started = True
+                        continue
+                    yield row
+
+            rows: Iterator[ScanRow[K, V]] = after_cursor()
+        else:
+            rows = rows_iter
+        pushed = frozenset({"KeyPrefix"} if prefix is not None else ())
+        enforce_strict(spec, residual, backend=type(self).__name__)
+        return CompiledScan(rows=rows, residual=residual, pushed=pushed)
+
+    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        compiled = self.compile_scan(spec)
+        yield from apply_cascade(
+            compiled.rows,
+            residual=compiled.residual,
+            store=self,
+            refine=spec.refine,
+            limit=spec.limit,
+            project=spec.project,
+        )
 
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))

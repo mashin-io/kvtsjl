@@ -14,11 +14,21 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from typing import Any, Self
 
+from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap import ReadableKeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, ScannableMixin, ScopedMixin
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.scan import (
+    Needs,
+    Projection,
+    ScanOrder,
+    ScanRow,
+    ScanSpec,
+    apply_cascade,
+    split_key_predicates,
+)
 
 
 def iter_paged_batch_get[K, V](
@@ -55,9 +65,13 @@ def iter_union_keys[K](
 
     Holds every distinct key in ``seen`` for the lifetime of the scan — O(total
     unique keys) memory. Same as the pre-P6 per-operator ``_union_keys``; not a
-    regression, but **not streaming-safe at scale**. P7's ``ScanCursor`` /
-    keyspace merge is where a bounded union would land; until then zip/zip_with
-    scans accumulate the full key set.
+    regression, but **not streaming-safe at scale**.
+
+    P7 keeps this ``seen`` set for unordered zip: memory and FS scans are
+    unordered (insertion / readdir), so merge-dedupe cannot stream without
+    sorted ``KEY_ASC`` leaves. When every part's ``ScanCapabilities.orders``
+    contains ``KEY_ASC`` *and* the zip is explicitly allowed that order, a
+    heap-merge without full ``seen`` becomes viable — out of the default P7 path.
     """
     seen: set[K] = set()
     key_only = ScanQuery(
@@ -70,6 +84,19 @@ def iter_union_keys[K](
             if key not in seen:
                 seen.add(key)
                 yield key
+
+
+def iter_union_keys_spec[K](
+    parts: Sequence[ScannableMixin[K, Any]],
+    key_spec: ScanSpec[K],
+) -> Iterator[K]:
+    """Key-union via part ``scan_rows`` (forwards key predicates into each part)."""
+    seen: set[K] = set()
+    for part in parts:
+        for row in part.scan_rows(key_spec):
+            if row.key not in seen:
+                seen.add(row.key)
+                yield row.key
 
 
 def gc_across_parts[K](
@@ -94,6 +121,51 @@ def gc_across_parts[K](
             seen.add(key)
             unique.append(key)
     return unique[:max_entries]
+
+
+def _part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
+    return ScanSpec(
+        where=key_where,
+        project=Projection.KEYS,
+        order=spec.order,
+        page_size=spec.page_size,
+        cursor=spec.cursor,
+        on_unsupported=spec.on_unsupported,
+    )
+
+
+def _explain_parts[K](
+    parts: Sequence[ScannableMixin[K, Any]],
+    spec: ScanSpec[K],
+    *,
+    name: str,
+    residual_label: str,
+) -> Any:
+    from kvtsjl.store.schema.scan import ScanPlanNode
+
+    children = tuple(part.explain_node(spec) for part in parts)
+    return ScanPlanNode(
+        name=name,
+        pushed=frozenset({"key→parts"}),
+        residual=residual_label,
+        children=children,
+    )
+
+
+def _needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
+    if spec.project is Projection.ENTRIES:
+        return True
+    if residual.needs() & Needs.VALUE:
+        return True
+    return False
+
+
+def _require_unordered_zip[K](spec: ScanSpec[K], op: str) -> None:
+    if spec.order is not ScanOrder.UNORDERED:
+        raise KvStoreScanUnsupported(
+            f"{op} scan supports ScanOrder.UNORDERED only "
+            f"(got ScanOrder.{spec.order.name})"
+        )
 
 
 class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
@@ -123,6 +195,41 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
             include_values=query.include_values,
         )
 
+    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        keys = (row.key for row in self._scan_src.scan_rows(part_spec))
+        need_values = _needs_values(spec, residual)
+        raw = (
+            ScanRow(key=k, value=v)
+            for k, v in iter_paged_batch_get(
+                self,
+                keys,
+                page_size=spec.page_size,
+                include_values=need_values,
+            )
+        )
+        yield from apply_cascade(
+            raw,
+            residual=residual,
+            store=self,
+            refine=spec.refine,
+            limit=spec.limit,
+            project=spec.project,
+        )
+
+    def explain_node(self, spec: ScanSpec[K]) -> Any:
+        from kvtsjl.store.schema.scan import predicate_label
+
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        return _explain_parts(
+            [self._scan_src],
+            part_spec,
+            name=type(self).__name__,
+            residual_label=predicate_label(residual),
+        )
+
 
 class ScanUnionMixin[K, V](ReadableKeyMap[K, V], ABC):
     """Key-union scan across ``_scan_parts``; values via ``self.batch_get`` pages."""
@@ -135,6 +242,43 @@ class ScanUnionMixin[K, V](ReadableKeyMap[K, V], ABC):
             iter_union_keys(self._scan_parts, query),
             page_size=query.page_size,
             include_values=query.include_values,
+        )
+
+    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        _require_unordered_zip(spec, "zip")
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        keys = iter_union_keys_spec(self._scan_parts, part_spec)
+        need_values = _needs_values(spec, residual)
+        raw = (
+            ScanRow(key=k, value=v)
+            for k, v in iter_paged_batch_get(
+                self,
+                keys,
+                page_size=spec.page_size,
+                include_values=need_values,
+            )
+        )
+        yield from apply_cascade(
+            raw,
+            residual=residual,
+            store=self,
+            refine=spec.refine,
+            limit=spec.limit,
+            project=spec.project,
+        )
+
+    def explain_node(self, spec: ScanSpec[K]) -> Any:
+        from kvtsjl.store.schema.scan import predicate_label
+
+        _require_unordered_zip(spec, "zip")
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        return _explain_parts(
+            list(self._scan_parts),
+            part_spec,
+            name=type(self).__name__,
+            residual_label=predicate_label(residual),
         )
 
 
@@ -163,6 +307,41 @@ class ScanPrimaryMixin[K, V]:
             keys,
             page_size=query.page_size,
             include_values=query.include_values,
+        )
+
+    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        keys = (row.key for row in self._scan_primary.scan_rows(part_spec))
+        need_values = _needs_values(spec, residual)
+        raw = (
+            ScanRow(key=k, value=v)
+            for k, v in iter_paged_batch_get(
+                self._scan_primary,
+                keys,
+                page_size=spec.page_size,
+                include_values=need_values,
+            )
+        )
+        yield from apply_cascade(
+            raw,
+            residual=residual,
+            store=self._scan_primary,
+            refine=spec.refine,
+            limit=spec.limit,
+            project=spec.project,
+        )
+
+    def explain_node(self, spec: ScanSpec[K]) -> Any:
+        from kvtsjl.store.schema.scan import predicate_label
+
+        key_where, residual = split_key_predicates(spec.where)
+        part_spec = _part_key_spec(spec, key_where)
+        return _explain_parts(
+            [self._scan_primary],
+            part_spec,
+            name=type(self).__name__,
+            residual_label=predicate_label(residual),
         )
 
 

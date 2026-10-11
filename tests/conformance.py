@@ -107,6 +107,47 @@ def assert_scan_and_scope(store: KvStore[str, str]) -> None:
     assert store.get("alpha") == "1"
     assert sorted(scoped.list()) == ["alpha"]
 
+    assert_scan_prefix_matches_reference(store)
+
+
+def assert_scan_prefix_matches_reference(store: KvStore[str, str]) -> None:
+    """Prefix / KeyPrefix scan must match a brute-force ``startswith`` reference.
+
+    Catches the silent-empty failure mode (listing pushdown that lists nothing).
+    Covers mid-filename prefixes (``al``), slash keys (``inv`` / ``inv/``), sugar
+    ``scan(prefix=)`` vs ``where=KeyPrefix``, scoped views, and
+    ``And(KeyPrefix, Not(KeyPrefix))``.
+    """
+    from kvtsjl.store.schema.scan import KeyPrefix
+
+    fixture = ("al", "alp", "alpha", "inv", "inv/a", "inv/b", "other", "zzz")
+    for key in fixture:
+        store.set(key, key)
+
+    def reference(prefix: str) -> list[str]:
+        return sorted(k for k in fixture if k.startswith(prefix))
+
+    for prefix in ("al", "alp", "alpha", "inv", "inv/", "in", "z", "nope"):
+        expected = reference(prefix)
+        assert sorted(store.scan(prefix=prefix)) == expected, (
+            f"scan(prefix={prefix!r}) → {sorted(store.scan(prefix=prefix))!r}, "
+            f"expected {expected!r}"
+        )
+        assert sorted(store.scan(where=KeyPrefix(prefix))) == expected, (
+            f"scan(where=KeyPrefix({prefix!r})) mismatch"
+        )
+
+    # Not under And — peel pushes listing for outer prefix; residual Not filters.
+    and_not = KeyPrefix("inv") & ~KeyPrefix("inv/")
+    assert sorted(store.scan(where=and_not)) == ["inv"]
+
+    scoped = store.scoped(tenant="pfx")
+    for key in fixture:
+        scoped.set(key, key)
+    assert sorted(scoped.scan(prefix="al")) == reference("al")
+    assert sorted(scoped.scan(where=KeyPrefix("inv/"))) == reference("inv/")
+    assert sorted(scoped.scan(where=and_not)) == ["inv"]
+
 
 def assert_scope_isolation(store: KvStore[str, str]) -> None:
     acme = store.scoped(tenant="acme")
