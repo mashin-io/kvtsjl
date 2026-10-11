@@ -47,6 +47,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
 - **Store algebra** — `.map` / `.imap` / `.imap_keys`, `.zip` / `.zip_with` / `.zip_as`, `.then` / `.then_with`, `.expand` / `.expand_map`, `.coalesce`, plus `.mirror()`, `.indexed()`, `.readonly()`, `.scoped()`
+- **Streaming** — `set_stream` / `read_stream` move file-sized values without holding them in memory, through compression and composition
 - **Extensible adapters** — subclass `KvBackend` / `IndexBackend`; plug in custom serdes and binders
 - **Optional integrations** — Pydantic serdes, Redis, S3/MinIO, GCS, Azure Blob, SQL (SQLite shipped), ChromaDB
 
@@ -428,6 +429,55 @@ imap_keys → imap → coalesce → zip_with → then → expand → map → ind
 ```
 
 Light laws: zip row iff any part; `then` is `other.get(self.get(k))`; expand miss iff left miss; coalesce is left-or-right with writes on left.
+
+---
+
+## Streaming
+
+For values too large to hold in memory, `set_stream` and `read_stream` move them a chunk at a time. Everything `set` guarantees still holds: TTL, the write clock, `stat`, `exists` and scan all behave identically for a stream-written value.
+
+```python
+blobs = KvSet.with_str_keys(
+    "artifacts", key_serde=SerDe.identity(str), value_serde=SerDe.identity(bytes),
+)
+store = FilesystemKvStore(blobs.with_compressed_value("zstd"), root="/var/cache")
+
+with open("report.xlsx", "rb") as f:
+    store.set_stream("report", f, size=os.path.getsize("report.xlsx"))
+
+store.get_to("report", "/tmp/out.xlsx")          # write straight to a path
+for chunk in store.read_stream("report") or ():  # or consume chunk by chunk
+    ...
+```
+
+`read_stream` is the primitive and `get_to` is sugar over it, so one store's read can be handed to another's write with nothing buffered in between — which is how `mirror` and `fallback_read` stream end to end.
+
+**`size` is exact, not a hint.** GCS receives it as `size=` and Azure as `length=`, and both write exactly that many bytes: too small truncates the object, too large fails the upload. Pass `None` when you do not know. Compression withholds it automatically, because the compressed length is not the value's length.
+
+**A store streams when its serde can work chunk by chunk**, which is what `StreamingSerDe` declares — identity trivially, compression with a stateful compressor, UTF-8 with an incremental codec, so a `str`-valued store streams text. JSON cannot: splitting a dict and encoding the pieces gives `{"a": 1}{"b": 2}`, not `{"a": 1, "b": 2}`. A serde that must see the whole value raises rather than buffering behind your back, since buffering is what you called `set_stream` to avoid.
+
+**Chunks need not be whole values.** A serde for `list[Row]` may chunk into `Row`, one JSON line each. `store.streaming(Row)` returns a view typed in the chunk type, checked once against the serde:
+
+```python
+rows = catalog.streaming(Row)        # StreamingView[str, Row]
+rows.set_stream("today", iter(records))
+for row in rows.read_stream("today") or ():
+    ...                              # row: Row
+```
+
+`readonly()` hands back a read-only view, so it cannot advertise writes.
+
+The same rule governs composition. `mirror`, `fallback_read`, `scoped` and `readonly` reads pass chunks through untouched and stream; `map`, `imap` and `zip` have to see the whole value, so they refuse.
+
+| | streams |
+|---|---|
+| filesystem, S3, GCS, Azure | yes, natively |
+| memory, Redis | buffers, and says so |
+| `mirror`, `fallback_read`, `scoped` | yes |
+| `readonly()` | reads only |
+| `map` / `imap` / `zip` | refuses |
+
+A failed write leaves the previous value intact — multipart abort, resumable session, uncommitted blocks, or a temp file plus `os.replace` — so a partial value is never visible.
 
 ---
 
