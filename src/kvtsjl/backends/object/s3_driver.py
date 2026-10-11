@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 from botocore.exceptions import ClientError
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.batching import S3_DELETE_OBJECTS_MAX
+from kvtsjl.serde.compress import STREAM_CHUNK
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
@@ -61,6 +62,30 @@ class S3BlobDriver(BlobDriver):
         if headers:
             kwargs.update(headers)
         self._client.put_object(**cast(Any, kwargs))
+
+    def write_stream(
+        self,
+        key: str,
+        src: BinaryIO,
+        *,
+        size: int | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        extra: dict[str, Any] = dict(headers) if headers else {}
+        # upload_fileobj manages multipart itself; it reads src in parts.
+        self._client.upload_fileobj(src, self._bucket, key, ExtraArgs=extra or None)
+
+    def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
+        try:
+            resp = self._client.get_object(Bucket=self._bucket, Key=key)
+        except ClientError as exc:
+            if _not_found(exc):
+                return None
+            raise
+        body = resp.get("Body")
+        if body is None or not hasattr(body, "read"):
+            return None
+        return body.iter_chunks(chunk_size=STREAM_CHUNK), self._stat_from_response(key, resp)
 
     def delete(self, key: str) -> bool:
         try:

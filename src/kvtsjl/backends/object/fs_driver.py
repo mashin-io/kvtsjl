@@ -6,9 +6,11 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 import os
 from pathlib import Path
-from typing import Any
+import shutil
+from typing import Any, BinaryIO
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
+from kvtsjl.serde.compress import STREAM_CHUNK
 from kvtsjl.store.schema.ttl import TTL_NONE_EXPIRES_AT
 
 
@@ -85,6 +87,51 @@ class FilesystemBlobDriver(BlobDriver):
     def write(self, key: str, data: bytes, *, headers: dict[str, Any] | None = None) -> None:
         path = Path(key)
         _write_atomic(path, data)
+        self._apply_write_headers(path, headers)
+
+    def write_stream(
+        self,
+        key: str,
+        src: BinaryIO,
+        *,
+        size: int | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        """Copy ``src`` into a temp file beside the target, then ``os.replace``.
+
+        Same atomicity as ``write``: a reader sees either the previous value or
+        the complete new one, never a partial file.
+        """
+        path = Path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            with tmp.open("wb") as handle:
+                shutil.copyfileobj(src, handle, STREAM_CHUNK)
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        self._apply_write_headers(path, headers)
+
+    def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
+        path = Path(key)
+        stat = _stat_for_path(path, key=key)
+        if stat is None:
+            return None
+        try:
+            handle = path.open("rb")
+        except OSError:
+            return None
+
+        def stream() -> Iterator[bytes]:
+            with handle:
+                while chunk := handle.read(STREAM_CHUNK):
+                    yield chunk
+
+        return stream(), stat
+
+    def _apply_write_headers(self, path: Path, headers: dict[str, Any] | None) -> None:
         headers = headers or {}
         mtime = headers.get("mtime")
         if isinstance(mtime, (int, float)):

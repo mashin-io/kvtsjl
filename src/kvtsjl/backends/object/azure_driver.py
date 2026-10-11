@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 from azure.core.exceptions import ResourceNotFoundError
 
@@ -88,6 +88,32 @@ class AzureBlobDriver(BlobDriver):
             if isinstance(raw_meta, Mapping):
                 metadata = {str(k): str(v) for k, v in raw_meta.items()}
         blob.upload_blob(data, overwrite=True, metadata=metadata)
+
+    def write_stream(
+        self,
+        key: str,
+        src: BinaryIO,
+        *,
+        size: int | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        blob = self._container.get_blob_client(key)
+        metadata: Mapping[str, str] | None = None
+        if headers is not None:
+            raw_meta = headers.get("metadata")
+            if isinstance(raw_meta, Mapping):
+                metadata = {str(k): str(v) for k, v in raw_meta.items()}
+        blob.upload_blob(src, overwrite=True, metadata=metadata, length=size)
+
+    def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
+        blob = self._container.get_blob_client(key)
+        try:
+            props = blob.get_blob_properties()
+            downloader = blob.download_blob()
+        except ResourceNotFoundError:
+            return None
+        chunks = cast(Iterator[bytes], downloader.chunks())
+        return chunks, _stat_from_props(props, key=key)
 
     def delete(self, key: str) -> bool:
         blob = self._container.get_blob_client(key)

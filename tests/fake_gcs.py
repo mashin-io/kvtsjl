@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import io
 from types import TracebackType
 
 
@@ -35,6 +36,24 @@ class FakeGcsBlob:
 
     def download_as_bytes(self) -> bytes:
         return self._store[self.name].body
+
+    def upload_from_file(self, file_obj: BinaryIO, *, size: int | None = None) -> None:
+        """Mirror ``Blob.upload_from_file``; reads in chunks, never all at once."""
+        chunks: list[bytes] = []
+        while chunk := file_obj.read(1 << 16):
+            chunks.append(chunk)
+        self.upload_from_string(b"".join(chunks))
+
+    def download_to_file(self, file_obj: BinaryIO) -> None:
+        """Mirror ``Blob.download_to_file``; writes in chunks."""
+        body = self._store[self.name].body
+        for start in range(0, len(body), 1 << 16):
+            file_obj.write(body[start : start + (1 << 16)])
+
+    def open(self, mode: str = "rb") -> BinaryIO:
+        """Mirror ``Blob.open``; the pull-side read."""
+        assert mode == "rb", f"fake only supports 'rb', got {mode!r}"
+        return io.BytesIO(self._store[self.name].body)
 
     def upload_from_string(self, data: bytes | str) -> None:
         body = data if isinstance(data, bytes) else data.encode("utf-8")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import BinaryIO
 
 from azure.core.exceptions import ResourceNotFoundError
 
@@ -22,6 +23,17 @@ class _FakeDownload:
 
     def readall(self) -> bytes:
         return self._body
+
+    def readinto(self, stream: BinaryIO) -> int:
+        """Mirror ``StorageStreamDownloader.readinto``; writes in chunks."""
+        for start in range(0, len(self._body), 1 << 16):
+            stream.write(self._body[start : start + (1 << 16)])
+        return len(self._body)
+
+    def chunks(self) -> Iterator[bytes]:
+        """Mirror ``StorageStreamDownloader.chunks``; the pull-side read."""
+        for start in range(0, len(self._body), 1 << 16):
+            yield self._body[start : start + (1 << 16)]
 
 
 @dataclass
@@ -49,11 +61,17 @@ class FakeAzureBlobClient:
 
     def upload_blob(
         self,
-        data: bytes,
+        data: bytes | BinaryIO,
         *,
         overwrite: bool = False,
         metadata: Mapping[str, str] | None = None,
+        length: int | None = None,
     ) -> None:
+        if not isinstance(data, bytes):
+            chunks: list[bytes] = []
+            while chunk := data.read(1 << 16):
+                chunks.append(chunk)
+            data = b"".join(chunks)
         if not overwrite and self.name in self._store:
             raise ValueError(f"blob already exists: {self.name}")
         body = data if isinstance(data, bytes) else bytes(data)

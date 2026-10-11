@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, BinaryIO
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +39,44 @@ class BlobDriver(ABC):
     @abstractmethod
     def write(self, key: str, data: bytes, *, headers: dict[str, Any] | None = None) -> None:
         """Put object; ``headers`` carries medium-specific write options."""
+
+    def write_stream(
+        self,
+        key: str,
+        src: BinaryIO,
+        *,
+        size: int | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        """Write ``src`` to ``key`` without holding the whole body in memory.
+
+        The default buffers and calls ``write``, so third-party drivers keep
+        working — they just do not get the memory benefit. Drivers that have a
+        native streaming upload override this.
+
+        ``size`` is a hint for multipart sizing where the medium wants one.
+        """
+        self.write(key, src.read(), headers=headers)
+
+    def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
+        """Body as a chunk stream plus its stat, or ``None`` if absent.
+
+        Pull-shaped on purpose: the value serde decodes a chunk *iterator*, so
+        a pull-side read lets the driver's chunks flow straight through it with
+        no buffer and no push/pull bridge in between.
+
+        The default yields one chunk via ``read``, so third-party drivers keep
+        working — they just do not get the memory benefit. Drivers with a
+        native streaming download override this.
+
+        The returned iterator may hold the underlying response open; callers
+        drain or close it.
+        """
+        found = self.read(key)
+        if found is None:
+            return None
+        data, stat = found
+        return iter((data,)), stat
 
     @abstractmethod
     def delete(self, key: str) -> bool:

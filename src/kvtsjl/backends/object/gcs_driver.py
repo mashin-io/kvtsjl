@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.batching import GCS_BATCH_OPS_MAX
+from kvtsjl.serde.compress import STREAM_CHUNK
 
 if TYPE_CHECKING:
     from google.cloud.storage import Blob, Bucket  # google-cloud-storage is not py.typed
@@ -66,6 +67,31 @@ class GcsBlobDriver(BlobDriver):
         if headers is not None and "custom_time" in headers:
             blob.custom_time = headers["custom_time"]
         blob.upload_from_string(data)
+
+    def write_stream(
+        self,
+        key: str,
+        src: BinaryIO,
+        *,
+        size: int | None = None,
+        headers: dict[str, Any] | None = None,
+    ) -> None:
+        blob = self._bucket.blob(key)
+        if headers is not None and "custom_time" in headers:
+            blob.custom_time = headers["custom_time"]
+        blob.upload_from_file(src, size=size)
+
+    def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
+        blob = self._bucket.get_blob(key)
+        if blob is None:
+            return None
+
+        def stream() -> Iterator[bytes]:
+            with blob.open("rb") as handle:
+                while chunk := handle.read(STREAM_CHUNK):
+                    yield cast(bytes, chunk)
+
+        return stream(), _stat_from_blob(blob)
 
     def delete(self, key: str) -> bool:
         blob = self._bucket.get_blob(key)
