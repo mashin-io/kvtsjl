@@ -21,22 +21,51 @@ from kvtsjl.store.schema.stat import RecordStat
 
 
 def merge_part_stats(
-    stats: Sequence[RecordStat],
+    slot_stats: Sequence[RecordStat | None],
     *,
+    mandatory: Sequence[bool],
     created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
     | None = None,
 ) -> RecordStat:
-    created_vals = [s.created_at for s in stats]
+    """Merge per-slot part stats into the row's stat.
+
+    ``slot_stats`` is aligned with the parts (``None`` where a part has no
+    entry), because ``expires_at`` depends on which slots are ``mandatory``.
+
+    ``expires_at`` must agree with ``row_present``, which decides how long the
+    row actually lives:
+
+    - any mandatory slot — the row dies with the first mandatory part, so take
+      the earliest expiry among mandatory slots;
+    - otherwise (default OR) — the row survives while any part survives, so
+      take the latest expiry among present slots, and ``None`` (never expires)
+      if any present part never expires.
+
+    Taking ``min`` unconditionally made ``stat`` claim a row had expired while
+    ``get`` and ``exists`` still returned it.
+    """
+    present = [s for s in slot_stats if s is not None]
+    created_vals = [s.created_at for s in present]
     if created_at_merge is not None:
         created_at = created_at_merge(created_vals)
     else:
         present_created = [c for c in created_vals if c is not None]
         created_at = max(present_created) if present_created else None
-    expires = [s.expires_at for s in stats if s.expires_at is not None]
-    return RecordStat(
-        created_at=created_at,
-        expires_at=min(expires) if expires else None,
-    )
+
+    if any(mandatory):
+        required = [
+            s.expires_at
+            for s, is_required in zip(slot_stats, mandatory, strict=True)
+            if is_required and s is not None and s.expires_at is not None
+        ]
+        expires_at = min(required) if required else None
+    elif any(s.expires_at is None for s in present):
+        expires_at = None
+    else:
+        latest = [s.expires_at for s in present if s.expires_at is not None]
+        expires_at = max(latest) if latest else None
+
+    return RecordStat(created_at=created_at, expires_at=expires_at)
 
 
 class ZippedKvStore[K](
@@ -83,25 +112,34 @@ class ZippedKvStore[K](
     def stat(self, key: K) -> RecordStat | None:
         if self.get(key) is None:
             return None
-        present = [
-            meta for part in self._store_parts() if (meta := part.stat(key)) is not None
-        ]
-        if not present:
+        slot_stats = [part.stat(key) for part in self._store_parts()]
+        if all(meta is None for meta in slot_stats):
             return None
-        return merge_part_stats(present, created_at_merge=self._created_at_merge)
+        return merge_part_stats(
+            slot_stats,
+            mandatory=self._mandatory,
+            created_at_merge=self._created_at_merge,
+        )
 
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         present_keys = self.batch_get(keys)
         if not present_keys:
             return {}
         key_list = list(present_keys.keys())
-        per_key: dict[K, list[RecordStat]] = {}
-        for part in self._store_parts():
+        parts = self._store_parts()
+        per_key: dict[K, list[RecordStat | None]] = {
+            key: [None] * len(parts) for key in key_list
+        }
+        for index, part in enumerate(parts):
             for key, meta in part.batch_stat(key_list).items():
-                per_key.setdefault(key, []).append(meta)
+                per_key[key][index] = meta
         return {
-            key: merge_part_stats(stats, created_at_merge=self._created_at_merge)
-            for key, stats in per_key.items()
+            key: merge_part_stats(
+                slot_stats,
+                mandatory=self._mandatory,
+                created_at_merge=self._created_at_merge,
+            )
+            for key, slot_stats in per_key.items()
         }
 
     def _clone_fanout(self, scope: Scope) -> ZippedKvStore[K]:
@@ -163,27 +201,36 @@ class ZipWithKvStore[K, V](
     def stat(self, key: K) -> RecordStat | None:
         if self.get(key) is None:
             return None
-        present = [
-            meta
-            for part in self._store_parts().values()
-            if (meta := part.stat(key)) is not None
+        slot_stats = [
+            self._store_parts()[name].stat(key) for name in self.field_names
         ]
-        if not present:
+        if all(meta is None for meta in slot_stats):
             return None
-        return merge_part_stats(present, created_at_merge=self._created_at_merge)
+        return merge_part_stats(
+            slot_stats,
+            mandatory=self._mandatory,
+            created_at_merge=self._created_at_merge,
+        )
 
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         present_keys = self.batch_get(keys)
         if not present_keys:
             return {}
         key_list = list(present_keys.keys())
-        per_key: dict[K, list[RecordStat]] = {}
-        for part in self._store_parts().values():
-            for key, meta in part.batch_stat(key_list).items():
-                per_key.setdefault(key, []).append(meta)
+        parts = self._store_parts()
+        per_key: dict[K, list[RecordStat | None]] = {
+            key: [None] * len(self.field_names) for key in key_list
+        }
+        for index, name in enumerate(self.field_names):
+            for key, meta in parts[name].batch_stat(key_list).items():
+                per_key[key][index] = meta
         return {
-            key: merge_part_stats(stats, created_at_merge=self._created_at_merge)
-            for key, stats in per_key.items()
+            key: merge_part_stats(
+                slot_stats,
+                mandatory=self._mandatory,
+                created_at_merge=self._created_at_merge,
+            )
+            for key, slot_stats in per_key.items()
         }
 
     def _clone_fanout(self, scope: Scope) -> ZipWithKvStore[K, V]:

@@ -104,23 +104,32 @@ def gc_across_parts[K](
     *,
     max_entries: int,
 ) -> list[K]:
-    """Budget-capped GC across parts; dedupe keys (order-preserving)."""
+    """GC each part independently; return the de-duplicated union of keys.
+
+    ``max_entries`` is the budget **per part**, not a shared allowance.
+
+    Parts own their own ``TtlPolicy`` and expire independently, so a key may be
+    expired in one part and live in another — there is no composition-level
+    expiry. Sharing one budget across parts coupled them for no reason and
+    starved later ones: with two parts and ``max_entries`` equal to the number
+    of expired rows, part 0 consumed the whole allowance and part 1 was never
+    visited, while the call still reported success. Entries in the unvisited
+    part were then unreachable if the visited part held the only index.
+
+    Consequence of the per-part budget: the returned union may exceed
+    ``max_entries`` when parts expire disjointly. That is deliberate — the
+    alternative is silently skipping parts.
+    """
     if max_entries < 1:
         raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-    deleted: list[K] = []
-    remaining = max_entries
-    for part in parts:
-        if remaining < 1:
-            break
-        deleted.extend(part.gc_expired_keys(max_entries=remaining))
-        remaining = max_entries - len(deleted)
     seen: set[K] = set()
     unique: list[K] = []
-    for key in deleted:
-        if key not in seen:
-            seen.add(key)
-            unique.append(key)
-    return unique[:max_entries]
+    for part in parts:
+        for key in part.gc_expired_keys(max_entries=max_entries):
+            if key not in seen:
+                seen.add(key)
+                unique.append(key)
+    return unique
 
 
 def _part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
