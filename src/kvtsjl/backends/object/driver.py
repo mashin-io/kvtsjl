@@ -54,7 +54,10 @@ class BlobDriver(ABC):
         working — they just do not get the memory benefit. Drivers that have a
         native streaming upload override this.
 
-        ``size`` is a hint for multipart sizing where the medium wants one.
+        ``size`` is the **exact** encoded length, or ``None`` if unknown. Media
+        that take it (GCS ``size=``, Azure ``length=``) write exactly that many
+        bytes, so a wrong value truncates or fails the upload. Drivers must not
+        guess one.
         """
         self.write(key, src.read(), headers=headers)
 

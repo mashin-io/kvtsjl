@@ -112,8 +112,18 @@ class AzureBlobDriver(BlobDriver):
             downloader = blob.download_blob()
         except ResourceNotFoundError:
             return None
-        chunks = cast(Iterator[bytes], downloader.chunks())
-        return chunks, _stat_from_props(props, key=key)
+        def stream() -> Iterator[bytes]:
+            # As in the S3 driver: release the response if the caller stops
+            # early. ``StorageStreamDownloader`` has not always exposed
+            # ``close``, so it is called only when present.
+            try:
+                yield from cast(Iterator[bytes], downloader.chunks())
+            finally:
+                closer = getattr(downloader, "close", None)
+                if callable(closer):
+                    closer()
+
+        return stream(), _stat_from_props(props, key=key)
 
     def delete(self, key: str) -> bool:
         blob = self._container.get_blob_client(key)

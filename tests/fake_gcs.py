@@ -38,11 +38,18 @@ class FakeGcsBlob:
         return self._store[self.name].body
 
     def upload_from_file(self, file_obj: BinaryIO, *, size: int | None = None) -> None:
-        """Mirror ``Blob.upload_from_file``; reads in chunks, never all at once."""
+        """Mirror ``Blob.upload_from_file``; reads in chunks."""
         chunks: list[bytes] = []
         while chunk := file_obj.read(1 << 16):
             chunks.append(chunk)
-        self.upload_from_string(b"".join(chunks))
+        body = b"".join(chunks)
+        if size is not None and size != len(body):
+            # ``size`` is exact for the real client, not a hint — see the
+            # matching check in the Azure fake.
+            raise ValueError(
+                f"upload_from_file size={size} but stream had {len(body)} bytes"
+            )
+        self.upload_from_string(body)
 
     def download_to_file(self, file_obj: BinaryIO) -> None:
         """Mirror ``Blob.download_to_file``; writes in chunks."""

@@ -88,6 +88,16 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
         no knowledge of what either side is. ``read_stream`` hands the
         primary's chunks straight to the secondary, so nothing here assumes a
         chunk is ``bytes`` and no temporary file is involved.
+
+        **Race:** the re-read is a second operation. If another writer replaces
+        the key in between, the secondary receives *that* writer's bytes under
+        this call's ``ttl`` and ``created_at``. The two stores still converge
+        on the same bytes; only the expiry attached to them can come from the
+        losing call. There is no cross-store transaction to prevent it, and
+        buffering the value to avoid the re-read is exactly what callers use
+        this method to escape. Concurrent writers to one key need their own
+        ordering — content-addressed keys, where the bytes cannot differ, make
+        it moot.
         """
         require_write_clock_supported(
             created_at,

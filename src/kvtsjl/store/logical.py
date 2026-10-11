@@ -75,10 +75,16 @@ class KvStore[K, V](
         """Write ``source`` to ``key`` without holding the whole value.
 
         ``source`` is a path, an open stream whose ``read(n)`` returns chunks
-        of the value type, or an iterable of such chunks. ``size`` is a hint for
-        media that size multipart uploads from it. ``ttl`` and ``created_at``
+        of the value type, or an iterable of such chunks. ``ttl`` and ``created_at``
         behave exactly as on ``set``, so a stream-written value expires, scans
         and garbage-collects identically to a ``set`` one.
+
+        ``size`` is the **exact** encoded byte count, or ``None`` when it is
+        not known. It is not a hint: GCS receives it as ``size=`` and Azure as
+        ``length=``, and both upload exactly that many bytes — too small
+        truncates the object, too large fails the upload. ``None`` is always
+        safe, and a serde that changes the length reports ``None`` from
+        ``encoded_size`` for exactly this reason.
 
         Stores that cannot stream raise rather than buffering: buffering is
         precisely what callers use this for. Small-value leaves (memory, Redis)

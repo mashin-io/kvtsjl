@@ -14,7 +14,7 @@ from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
-from kvtsjl.store.streaming import StreamSource
+from kvtsjl.store.streaming import StreamSource, close_stream
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,9 @@ class CoalescedKvStore[K, V](
         if source is None:
             return None
         if not self._promote_stream(key, source, clock):
+            # ``source`` is spent part-way through; close it so the medium's
+            # response is released before the secondary is read again.
+            close_stream(source)
             return self._secondary.read_stream(key)
         return self._primary.read_stream(key) or self._secondary.read_stream(key)
 

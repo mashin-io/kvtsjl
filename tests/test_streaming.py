@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import random
 import tempfile
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,7 +23,7 @@ from kvtsjl import KvSet, MemoryKvStore, SerDe
 from kvtsjl.backends.filesystem import FilesystemKvStore
 from kvtsjl.serde import ChainedStreamingSerDe, CompressedSerDe, StreamingSerDe
 from kvtsjl.serde.compress import STREAM_CHUNK, CompressionCodec
-from kvtsjl.store.streaming import StreamingReadView, StreamingView
+from kvtsjl.store.streaming import StreamingReadView, StreamingView, close_stream
 
 CODECS: list[CompressionCodec | None] = [None, "gzip", "zlib", "zstd", "lz4"]
 CHUNK = 1 << 16
@@ -810,3 +810,154 @@ def test_truncated_text_raises_rather_than_silently_dropping_bytes() -> None:
     # and the same across a chunk boundary, where the carry-over lives
     with pytest.raises(UnicodeDecodeError):
         list(serde.decode_stream(iter([truncated[:3], truncated[3:]])))
+
+
+# --- a source that fails halfway --------------------------------------------
+
+
+class FailsMidStream(io.RawIOBase):
+    """A source that raises after a few chunks, mid-value."""
+
+    def __init__(self, total: int, fail_after: int = 2, chunk: int = CHUNK) -> None:
+        self._remaining = total
+        self._chunk = chunk
+        self._reads = 0
+        self._fail_after = fail_after
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1) -> bytes:
+        self._reads += 1
+        if self._reads > self._fail_after:
+            raise OSError("source failed midway")
+        want = self._chunk if size is None or size < 0 else min(size, self._chunk)
+        take = min(want, self._remaining)
+        self._remaining -= take
+        return b"x" * take
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs", "azure", "fs"])
+def test_a_failed_stream_leaves_no_partial_value(backend: str) -> None:
+    """``set_stream`` is all-or-nothing, like ``set``.
+
+    Mirror, promote and the best-effort fan-out all assume a failed write
+    leaves the previous value intact rather than a truncated one. The drivers
+    are built for it — multipart abort, resumable session, uncommitted blocks,
+    temp file plus ``os.replace`` — but nothing pinned the contract.
+    """
+    stores = _byte_stores(None)
+    try:
+        store = cast(Any, stores[backend])
+        store.set("existing", b"previous value")
+
+        with pytest.raises(OSError, match="source failed midway"):
+            store.set_stream("existing", FailsMidStream(CHUNK * 20))
+        assert store.get("existing") == b"previous value", "left a partial value"
+
+        with pytest.raises(OSError, match="source failed midway"):
+            store.set_stream("fresh", FailsMidStream(CHUNK * 20))
+        assert store.get("fresh") is None, "created a key from a failed write"
+    finally:
+        cast(Any, stores["_moto"]).stop()
+
+
+@pytest.mark.parametrize("backend", ["s3", "gcs", "azure", "fs"])
+def test_a_failed_mirror_write_does_not_touch_the_secondary(backend: str) -> None:
+    """A primary that fails must not leave the secondary holding a value."""
+    stores = _byte_stores(None)
+    try:
+        primary = cast(Any, stores[backend])
+        secondary = fs_store(None)
+        with pytest.raises(OSError, match="source failed midway"):
+            primary.mirror(secondary).set_stream("k", FailsMidStream(CHUNK * 20))
+        assert primary.get("k") is None
+        assert secondary.get("k") is None, "secondary got a value the primary rejected"
+    finally:
+        cast(Any, stores["_moto"]).stop()
+
+
+# --- the exact-length contract ----------------------------------------------
+#
+# GCS takes ``size=`` and Azure ``length=`` as exact byte counts, not hints:
+# too small truncates the object, too large fails the upload. The fakes
+# enforce that, so these tests fail rather than silently losing data.
+
+
+@pytest.mark.parametrize("backend", ["gcs", "azure"])
+def test_an_exact_size_reaches_media_that_require_one(backend: str) -> None:
+    stores = _byte_stores(None)
+    try:
+        store = cast(Any, stores[backend])
+        payload = os.urandom(CHUNK * 3)
+        store.set_stream("ok", io.BytesIO(payload), size=len(payload))
+        assert store.get("ok") == payload
+
+        with pytest.raises(ValueError, match="but stream had"):
+            store.set_stream("bad", io.BytesIO(payload), size=len(payload) + 1)
+    finally:
+        cast(Any, stores["_moto"]).stop()
+
+
+@pytest.mark.parametrize("backend", ["gcs", "azure"])
+@pytest.mark.parametrize("codec", ["zstd", "gzip"])
+def test_compression_withholds_the_size_instead_of_truncating(
+    backend: str, codec: CompressionCodec
+) -> None:
+    """The caller's ``size`` describes the value, not the compressed wire.
+
+    Forwarding it would hand the medium a length the body does not have. This
+    is what ``encoded_size`` returning ``None`` buys, measured end to end.
+    """
+    stores = _byte_stores(codec)
+    try:
+        store = cast(Any, stores[backend])
+        payload = os.urandom(CHUNK * 3)
+        store.set_stream("k", io.BytesIO(payload), size=len(payload))
+        assert store.get("k") == payload
+    finally:
+        cast(Any, stores["_moto"]).stop()
+
+
+def test_abandoning_a_read_stream_releases_the_body() -> None:
+    """A caller that stops early must not pin the medium's response open.
+
+    ``read_stream`` returns an ``Iterator``, so the driver's generator is what
+    carries the ``finally``; closing it is what releases the HTTP body rather
+    than waiting for a collection that may never come.
+    """
+    closed: list[str] = []
+
+    class TrackingBody:
+        def read(self, *_a: object) -> bytes:
+            return b""
+
+        def iter_chunks(self, chunk_size: int = 0) -> Iterator[bytes]:
+            yield b"first"
+            yield b"second"
+
+        def close(self) -> None:
+            closed.append("body")
+
+    from kvtsjl.backends.object.s3_driver import S3BlobDriver
+
+    driver = object.__new__(S3BlobDriver)
+    driver._client = cast(Any, _StubS3Client(TrackingBody()))  # pyright: ignore[reportPrivateUsage]
+    driver._bucket = "b"  # pyright: ignore[reportPrivateUsage]
+
+    found = driver.read_chunks("k")
+    assert found is not None
+    chunks, _ = found
+    assert next(chunks) == b"first"      # stop early, mid-body
+    assert closed == [], "closed before the caller let go"
+
+    close_stream(chunks)
+    assert closed == ["body"], "abandoned stream left the body open"
+
+
+class _StubS3Client:
+    def __init__(self, body: object) -> None:
+        self._body = body
+
+    def get_object(self, **_kw: object) -> dict[str, object]:
+        return {"Body": self._body, "ContentLength": 11}

@@ -160,10 +160,10 @@ class StreamingSerDe[T, CHUNK, BLOB](SerDe[T, BLOB], ABC):
     def encoded_size(self, size: int | None) -> int | None:
         """Wire length for a value of ``size``, if it is known up front.
 
-        Transports use this to size a multipart upload. Only a serde that does
-        not change the length can answer; the default is ``None`` ("unknown"),
-        which is always safe. Guessing here would mis-size real uploads, so a
-        transform that cannot know says so.
+        Transports pass this to the medium as an exact length, not a hint, so
+        only a serde that does not change the length can answer. The default is
+        ``None`` ("unknown"), which is always safe. Guessing would truncate a
+        real upload, so a transform that cannot know says so.
         """
         return None
 

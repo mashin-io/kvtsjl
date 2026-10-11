@@ -85,7 +85,16 @@ class S3BlobDriver(BlobDriver):
         body = resp.get("Body")
         if body is None or not hasattr(body, "read"):
             return None
-        return body.iter_chunks(chunk_size=STREAM_CHUNK), self._stat_from_response(key, resp)
+        def stream() -> Iterator[bytes]:
+            # Closed in ``finally`` so abandoning the iterator releases the
+            # HTTP body back to the connection pool rather than leaving it
+            # pinned until a collection that may never come.
+            try:
+                yield from body.iter_chunks(chunk_size=STREAM_CHUNK)
+            finally:
+                body.close()
+
+        return stream(), self._stat_from_response(key, resp)
 
     def delete(self, key: str) -> bool:
         try:

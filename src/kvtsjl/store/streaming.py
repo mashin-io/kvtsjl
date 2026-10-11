@@ -69,6 +69,19 @@ def open_dest(dest: StreamDest) -> Generator[IO[Any]]:
         yield dest
 
 
+def close_stream(chunks: Iterator[Any]) -> None:
+    """Release a chunk stream that will not be drained.
+
+    ``read_stream`` returns an ``Iterator``, not a ``Generator``: a driver may
+    hand back a plain iterator with nothing to release. Generators — which is
+    what the streaming drivers return — close their underlying response here
+    instead of at the next collection.
+    """
+    closer = getattr(chunks, "close", None)
+    if callable(closer):
+        closer()
+
+
 def require_streaming_serde[T, BLOB](
     value_serde: SerDe[T, BLOB], *, op: str, backend: str
 ) -> StreamingSerDe[T, Any, BLOB]:
@@ -164,7 +177,10 @@ class StreamingView[K, C](StreamingReadView[K, C]):
         created_at: datetime | None = None,
         size: int | None = None,
     ) -> None:
-        """As ``KvStore.set_stream``, with the source typed in ``C``."""
+        """As ``KvStore.set_stream``, with the source typed in ``C``.
+
+        ``size`` carries the same contract: the exact encoded length or ``None``.
+        """
         self._writable.set_stream(
             key, source, ttl=ttl, created_at=created_at, size=size
         )

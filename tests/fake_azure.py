@@ -72,6 +72,13 @@ class FakeAzureBlobClient:
             while chunk := data.read(1 << 16):
                 chunks.append(chunk)
             data = b"".join(chunks)
+        if length is not None and length != len(data):
+            # The real service writes exactly ``length`` bytes: too small
+            # truncates the blob, too large fails the request. Refusing here
+            # makes a wrong length a test failure instead of silent data loss.
+            raise ValueError(
+                f"upload_blob length={length} but stream had {len(data)} bytes"
+            )
         if not overwrite and self.name in self._store:
             raise ValueError(f"blob already exists: {self.name}")
         body = data if isinstance(data, bytes) else bytes(data)
