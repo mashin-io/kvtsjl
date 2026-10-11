@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import time
 from typing import Any, cast
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter
+from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
 from kvtsjl.backends.sql.schema import SqlDbKvSet, SqlDbRow
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
@@ -20,6 +20,21 @@ from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
+from kvtsjl.store.schema.scan import (
+    AlwaysTrue,
+    CompiledScan,
+    KeyPrefix,
+    OrderBy,
+    Projection,
+    ScanCapabilities,
+    ScanOrder,
+    ScanRow,
+    ScanSpec,
+    ScanStat,
+    compile_from_scan_entries,
+    enforce_strict,
+    peel_key_prefix,
+)
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
     TTL_NONE_EXPIRES_AT,
@@ -435,6 +450,135 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 keys=key_rows,
             )
         return deleted
+
+    def scan_capabilities(self) -> ScanCapabilities:
+        """Report what SQL actually provides.
+
+        ``KEY_ASC`` rests on the adapter contract: ``scan_by_key_parts`` must
+        yield rows in ascending ``key_fields`` order (the shipped SQLite adapter
+        emits ``ORDER BY`` on them). ``orderable_columns`` is the declared
+        column set, so an unknown column is rejected by name.
+        """
+        orderable: frozenset[str] | None = None
+        if self._adapter.supports_scan_ordering():
+            orderable = frozenset(self._sql_kvset.select_columns())
+        return ScanCapabilities(
+            pushdown=frozenset({KeyPrefix}),
+            orders=frozenset({ScanOrder.UNORDERED, ScanOrder.KEY_ASC}),
+            resumable=False,
+            # Only the ordered path fills ScanRow.stat; the default path goes
+            # through compile_from_scan_entries, which has no stat to give.
+            # Claiming True here would be the same wrong capability report this
+            # change set out to fix.
+            stats=False,
+            orderable_columns=orderable,
+        )
+
+    def _resolve_order_by(self, order_by: Sequence[OrderBy]) -> list[OrderBy]:
+        """Validate columns and append key fields ascending for a total order.
+
+        Without the tiebreak, SQL may return tied rows in any order, so repeated
+        scans disagree on which row is "newest" whenever timestamps collide
+        (fast tests, bulk imports). Appended fields are always ascending: the
+        direction is irrelevant for determinism, and fixing it means two
+        implementations cannot disagree.
+        """
+        if not self._adapter.supports_scan_ordering():
+            raise KvStoreScanUnsupported(
+                f"{type(self._adapter).__name__} does not support order_by; "
+                "implement supports_scan_ordering() and scan_ordered()"
+            )
+        allowed = frozenset(self._sql_kvset.select_columns())
+        for item in order_by:
+            if item.column not in allowed:
+                raise KvStoreScanUnsupported(
+                    f"order_by column {item.column!r} is not a declared column "
+                    f"(have {sorted(allowed)!r})"
+                )
+        resolved = list(order_by)
+        named = {item.column for item in resolved}
+        for field_name in self._sql_kvset.key_fields:
+            if field_name not in named:
+                resolved.append(OrderBy(field_name))
+        return resolved
+
+    def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
+        if not spec.order_by:
+            return compile_from_scan_entries(
+                self.scan_entries, spec, backend=type(self).__name__
+            )
+        if self.kvset.key_layout is not KeyLayout.LITERAL:
+            raise KvStoreScanUnsupported(
+                "SqlDbKvStore scan requires KeyLayout.LITERAL "
+                f"(got {self.kvset.key_layout!r})"
+            )
+        order_by = self._resolve_order_by(spec.order_by)
+        user_prefix, residual = peel_key_prefix(spec.where)
+        pushed = {"order_by"}
+        if user_prefix is not None:
+            pushed.add("KeyPrefix")
+        # Push LIMIT only when nothing is left to filter client-side; otherwise
+        # a pushed LIMIT 20 plus residual filtering returns fewer than 20 rows.
+        limit: int | None = None
+        if (
+            spec.limit is not None
+            and isinstance(residual, AlwaysTrue)
+            and spec.refine is None
+        ):
+            limit = spec.limit
+            pushed.add("limit")
+        rows = self._iter_ordered_rows(
+            user_prefix=user_prefix,
+            order_by=order_by,
+            limit=limit,
+            include_values=spec.project is Projection.ENTRIES,
+        )
+        enforce_strict(spec, residual, backend=type(self).__name__)
+        return CompiledScan(rows=rows, residual=residual, pushed=frozenset(pushed))
+
+    def _iter_ordered_rows(
+        self,
+        *,
+        user_prefix: K | None,
+        order_by: Sequence[OrderBy],
+        limit: int | None,
+        include_values: bool,
+    ) -> Iterator[ScanRow[K, V]]:
+        sk = self._sql_kvset
+        # Liveness must be pushed with LIMIT: expired rows live in the table
+        # until GC runs, so filtering them in Python after a pushed LIMIT n
+        # under-fills (and returns nothing when the newest n have expired).
+        live = SqlLiveness(
+            now=time.time(),
+            ttl_seconds=self.ttl_seconds(),
+            updated_at_field=sk.updated_at_field,
+            expires_at_field=sk.expires_at_field,
+        )
+        for row in self._adapter.scan_ordered(
+            table=self._table,
+            columns=sk.select_columns(),
+            key_fields=sk.key_fields,
+            exact=self._scope_key_row(require_all=False),
+            prefixes=self._leaf_prefix_map(user_prefix),
+            order_by=order_by,
+            limit=limit,
+            live=live,
+        ):
+            # Defence in depth: SQL already excluded these.
+            if self._row_expired(row):
+                continue
+            decoded = self._decode_leaf_key(row)
+            if decoded is None:
+                continue
+            value = self.kvset.value_serde.deserialize(row) if include_values else None
+            record = self._stat_from_row(row)
+            yield ScanRow(
+                key=decoded,
+                value=value,
+                stat=ScanStat(
+                    modified_at=record.modified_at, expires_at=record.expires_at
+                ),
+            )
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         if self.kvset.key_layout is not KeyLayout.LITERAL:

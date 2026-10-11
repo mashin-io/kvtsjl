@@ -7,8 +7,9 @@ import re
 import sqlite3
 from typing import Any
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter
+from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
 from kvtsjl.backends.sql.schema import SqlDbRow
+from kvtsjl.store.schema.scan import OrderBy
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -179,6 +180,57 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         order = ", ".join(_quote_ident(f) for f in key_fields)
         sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order}"
+        cur = self._conn.execute(sql, params)
+        for row in cur:
+            yield _row_from_sqlite(row)
+
+    def supports_scan_ordering(self) -> bool:
+        return True
+
+    def scan_ordered(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+        order_by: Sequence[OrderBy],
+        limit: int | None,
+        live: SqlLiveness | None = None,
+    ) -> Iterator[SqlDbRow]:
+        cols = ", ".join(_quote_ident(c) for c in columns)
+        t = _quote_ident(table)
+        clauses: list[str] = []
+        params: list[Any] = []
+        for field in key_fields:
+            if field in exact:
+                clauses.append(f"{_quote_ident(field)}=?")
+                params.append(exact[field])
+            elif field in prefixes:
+                clauses.append(f"{_quote_ident(field)} LIKE ? ESCAPE '\\'")
+                params.append(f"{_escape_like(prefixes[field])}%")
+        if live is not None:
+            expires = _quote_ident(live.expires_at_field)
+            updated = _quote_ident(live.updated_at_field)
+            if live.ttl_seconds is None:
+                clauses.append(f"({expires} IS NULL OR {expires} > ?)")
+                params.append(live.now)
+            else:
+                clauses.append(
+                    f"(CASE WHEN {expires} IS NOT NULL THEN {expires} > ? "
+                    f"ELSE ({updated} IS NULL OR {updated} + ? > ?) END)"
+                )
+                params.extend([live.now, float(live.ttl_seconds), live.now])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = ", ".join(
+            f"{_quote_ident(item.column)}{' DESC' if item.descending else ''}"
+            for item in order_by
+        )
+        sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order}"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
         cur = self._conn.execute(sql, params)
         for row in cur:
             yield _row_from_sqlite(row)

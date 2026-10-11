@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, Self, cast, overload
 
@@ -14,6 +14,7 @@ from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import (
     CompiledScan,
     Expired,
+    OrderBy,
     Predicate,
     Projection,
     Pushdown,
@@ -79,8 +80,15 @@ class ScannableMixin[K, V](ABC):
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """Yield ``ScanRow``s for ``spec`` (default: legacy ``scan_entries``)."""
-        from kvtsjl.store.schema.scan import apply_cascade, spec_to_scan_query
+        from kvtsjl.store.schema.scan import (
+            apply_cascade,
+            enforce_order_by_supported,
+            spec_to_scan_query,
+        )
 
+        # Composed stores drop order_by through spec_to_scan_query; fail loudly
+        # rather than returning an arbitrary order.
+        enforce_order_by_supported(spec, None, backend=type(self).__name__)
         query = spec_to_scan_query(spec)
         raw = (
             ScanRow(key=key, value=value)
@@ -105,6 +113,7 @@ class ScannableMixin[K, V](ABC):
         page_size: int = 100,
         where: Predicate[K] | None = None,
         limit: int | None = None,
+        order_by: Sequence[OrderBy] = (),
     ) -> Iterator[K]: ...
 
     @overload
@@ -116,6 +125,7 @@ class ScannableMixin[K, V](ABC):
         page_size: int = 100,
         where: Predicate[K] | None = None,
         limit: int | None = None,
+        order_by: Sequence[OrderBy] = (),
     ) -> Iterator[tuple[K, V]]: ...
 
     def scan(
@@ -132,6 +142,7 @@ class ScannableMixin[K, V](ABC):
         cursor: ScanCursor | None = None,
         on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
         spec: ScanSpec[K] | None = None,
+        order_by: Sequence[OrderBy] = (),
     ) -> Iterator[K] | Iterator[tuple[K, V]]:
         if prefix is not None and not supports_prefix_scan(self.key_layout()):
             raise KvStoreScanUnsupported(
@@ -149,6 +160,7 @@ class ScannableMixin[K, V](ABC):
                 order=order,
                 cursor=cursor,
                 on_unsupported=on_unsupported,
+                order_by=order_by,
             )
         if include_values or spec.project is Projection.ENTRIES:
             for row in self.scan_rows(spec):

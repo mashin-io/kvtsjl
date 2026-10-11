@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntFlag, auto
 from fnmatch import fnmatch
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.store.schema.layout import ScanQuery
 
-
-class _BatchGetStore[K, V](Protocol):
-    def batch_get(self, keys: Sequence[K]) -> Mapping[K, V]: ...
+if TYPE_CHECKING:  # annotation only — kvtsjl.keymap imports this package
+    from kvtsjl.keymap import ReadableKeyMap
 
 
 class Needs(IntFlag):
@@ -36,6 +35,14 @@ class ScanOrder(str, Enum):
     UNORDERED = "unordered"
     KEY_ASC = "key_asc"
     KEY_DESC = "key_desc"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderBy:
+    """Order by one declared column (see ``ScanSpec.order_by``)."""
+
+    column: str
+    descending: bool = False
 
 
 class Pushdown(str, Enum):
@@ -72,6 +79,8 @@ class ScanCapabilities:
     orders: frozenset[ScanOrder]
     resumable: bool
     stats: bool
+    orderable_columns: frozenset[str] | None = None
+    """Columns usable in ``ScanSpec.order_by``; ``None`` means unsupported."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +332,25 @@ class ScanSpec[K]:
     page_size: int = 100
     cursor: ScanCursor | None = None
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE
+    order_by: Sequence[OrderBy] = ()
+
+    def __post_init__(self) -> None:
+        if not self.order_by:
+            return
+        # Keep the frozen spec hashable when built directly with a list.
+        if not isinstance(self.order_by, tuple):
+            object.__setattr__(self, "order_by", tuple(self.order_by))
+        # ``order`` always has a value (defaults to UNORDERED), so a literal
+        # "both set" check would reject every order_by call.
+        if self.order is not ScanOrder.UNORDERED:
+            raise ValueError(
+                "pass order= (key order) or order_by= (column order), not both"
+            )
+        if self.cursor is not None:
+            raise KvStoreScanUnsupported(
+                "order_by with cursor is unsupported: the cursor is key-shaped "
+                "and would reorder pages. Scan without a cursor, or drop order_by."
+            )
 
 
 def sugar_to_spec[K](
@@ -337,6 +365,7 @@ def sugar_to_spec[K](
     order: ScanOrder = ScanOrder.UNORDERED,
     refine: Callable[[ScanRow[K, Any]], bool] | None = None,
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
+    order_by: Sequence[OrderBy] = (),
 ) -> ScanSpec[K]:
     """Build a ``ScanSpec`` from sugar kwargs and/or an explicit ``where``."""
     pred: Predicate[K] = AlwaysTrue()
@@ -356,6 +385,78 @@ def sugar_to_spec[K](
         page_size=page_size,
         cursor=cursor,
         on_unsupported=on_unsupported,
+        order_by=tuple(order_by),
+    )
+
+
+def enforce_order_by_supported[K](
+    spec: ScanSpec[K],
+    capabilities: ScanCapabilities | None,
+    *,
+    backend: str,
+) -> None:
+    """Reject ``order_by`` where it cannot be pushed down.
+
+    Unlike predicates, ``order_by`` does **not** fall back to the client
+    cascade, and it raises even under ``Pushdown.CLIENT_SIDE``. Filtering a
+    stream costs nothing extra; sorting has to materialise the whole result
+    first, which would quietly turn a streaming scan into an unbounded buffer.
+    Do not add a client-side sort fallback.
+    """
+    if not spec.order_by:
+        return
+    orderable = capabilities.orderable_columns if capabilities is not None else None
+    if orderable is None:
+        raise KvStoreScanUnsupported(
+            f"{backend} does not support order_by (no orderable columns); "
+            "order_by is never applied client-side"
+        )
+    unknown = [item.column for item in spec.order_by if item.column not in orderable]
+    if unknown:
+        raise KvStoreScanUnsupported(
+            f"{backend} order_by column(s) {unknown!r} are not declared "
+            f"(have {sorted(orderable)!r})"
+        )
+
+
+def compile_from_scan_entries[K, V](
+    scan_entries: Callable[[ScanQuery[K]], Iterator[tuple[K, V | None]]],
+    spec: ScanSpec[K],
+    *,
+    backend: str,
+) -> CompiledScan[K]:
+    """Default ``compile_scan``: peel a KeyPrefix, stream legacy ``scan_entries``.
+
+    Shared by ``LeafKvStore`` and by leaves that only specialise part of the
+    spec (e.g. SQL handles ``order_by`` natively and defers the rest here).
+    """
+    prefix, residual = peel_key_prefix(spec.where)
+    query = ScanQuery(
+        prefix=prefix,
+        include_values=spec.project is Projection.ENTRIES,
+        page_size=spec.page_size,
+    )
+    rows_iter = (ScanRow(key=key, value=value) for key, value in scan_entries(query))
+    if spec.cursor is not None:
+        token = spec.cursor.token
+
+        def after_cursor() -> Iterator[ScanRow[K, V]]:
+            started = False
+            for row in rows_iter:
+                if not started:
+                    if str(row.key) == token:
+                        started = True
+                    continue
+                yield row
+
+        rows: Iterator[ScanRow[K, V]] = after_cursor()
+    else:
+        rows = rows_iter
+    enforce_strict(spec, residual, backend=backend)
+    return CompiledScan(
+        rows=rows,
+        residual=residual,
+        pushed=frozenset({"KeyPrefix"} if prefix is not None else ()),
     )
 
 
@@ -525,7 +626,7 @@ def apply_cascade[K, V](
     rows: Iterator[ScanRow[K, V]],
     *,
     residual: Predicate[K],
-    store: _BatchGetStore[K, V] | None = None,
+    store: ReadableKeyMap[K, V] | None = None,
     refine: Callable[[ScanRow[K, Any]], bool] | None = None,
     limit: int | None = None,
     project: Projection = Projection.KEYS,
