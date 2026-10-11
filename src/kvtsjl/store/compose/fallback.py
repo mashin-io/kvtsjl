@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
 import logging
-from typing import cast
+from typing import Any, cast
 
 from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
 from kvtsjl.scope import Scope
@@ -14,6 +14,7 @@ from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.streaming import StreamSource
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,72 @@ class CoalescedKvStore[K, V](
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self._primary.batch_delete(keys)
+
+    def set_stream[Chunkable: (bytes, str)](
+        self: CoalescedKvStore[K, Chunkable],
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        """Writes go to the primary only, exactly as ``set`` does."""
+        self._primary.set_stream(key, source, ttl=ttl, created_at=created_at, size=size)
+
+    def stream_chunk_type(self) -> type[Any]:
+        return self._primary.stream_chunk_type()
+
+    def read_stream[Chunkable: (bytes, str)](
+        self: CoalescedKvStore[K, Chunkable], key: K
+    ) -> Iterator[Chunkable] | None:
+        """Serve from the primary, else stream the secondary through.
+
+        When promoting, the secondary's chunks are consumed by the write into
+        the primary and the caller is then served from the primary — one read
+        of each side, no temporary file and no buffer. The write clock is
+        carried across so a promoted value keeps its remaining life rather than
+        restarting it.
+
+        A failed promote is BEST_EFFORT, as the non-streaming promote is: the
+        secondary is re-read so the caller still gets the value.
+        """
+        chunks = self._primary.read_stream(key)
+        if chunks is not None:
+            return chunks
+        if not self._promote:
+            return self._secondary.read_stream(key)
+
+        clock = None
+        if self._primary.supports_write_clock:
+            meta = self._secondary.stat(key)
+            if meta is not None:
+                clock = meta.created_at or meta.modified_at
+        source = self._secondary.read_stream(key)
+        if source is None:
+            return None
+        if not self._promote_stream(key, source, clock):
+            return self._secondary.read_stream(key)
+        return self._primary.read_stream(key) or self._secondary.read_stream(key)
+
+    def _promote_stream[Chunkable: (bytes, str)](
+        self: CoalescedKvStore[K, Chunkable],
+        key: K,
+        chunks: Iterator[Chunkable],
+        created_at: datetime | None,
+    ) -> bool:
+        try:
+            self._primary.set_stream(key, chunks, created_at=created_at)
+        except Exception:
+            # BEST_EFFORT, same as the non-streaming promote: the read already
+            # succeeded, so a failed promote must not fail the call.
+            try:
+                logger.exception("fallback promote set_stream failed for key")
+            except Exception:
+                # Logging must not replace the successful read result.
+                pass
+            return False
+        return True
 
     def _promote_one(self, key: K, value: V) -> None:
         if self._primary.supports_write_clock:

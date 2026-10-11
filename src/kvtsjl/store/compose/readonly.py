@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
+from typing import Any
 
 from kvtsjl.exceptions import KvStoreReadOnlyError
 from kvtsjl.scope import Scope
@@ -12,6 +13,7 @@ from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.streaming import StreamSource
 
 
 class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
@@ -60,6 +62,30 @@ class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
 
     def delete(self, key: K) -> bool:
         raise KvStoreReadOnlyError("delete on readonly store")
+
+    def stream_chunk_type(self) -> type[Any]:
+        return self._underlying.stream_chunk_type()
+
+    def read_stream[Chunkable: (bytes, str)](
+        self: ReadonlyKvStore[K, Chunkable], key: K
+    ) -> Iterator[Chunkable] | None:
+        """Streaming reads survive ``readonly()`` — reading is what it allows.
+
+        Dropping this would make ``readonly()`` remove a *read* capability,
+        which is the one thing it is not meant to touch.
+        """
+        return self._underlying.read_stream(key)
+
+    def set_stream(
+        self,
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        raise KvStoreReadOnlyError("set_stream on readonly store")
 
     def batch_set(
         self,

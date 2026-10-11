@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 import logging
+from typing import Any
 
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.scope import Scope
@@ -14,6 +15,7 @@ from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import Predicate
 from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
+from kvtsjl.store.streaming import StreamSource
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,50 @@ class MirrorKvStore[K, V](DelegatingKvStore[K, V]):
             lambda: self._secondary.set(key, value, ttl=ttl, created_at=sec_created),
             what="set",
         )
+
+    def set_stream[Chunkable: (bytes, str)](
+        self: MirrorKvStore[K, Chunkable],
+        key: K,
+        source: StreamSource,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        size: int | None = None,
+    ) -> None:
+        """Stream into the primary, then re-read it to feed the secondary.
+
+        The source is consumed by the primary write, so the secondary is fed
+        from the primary rather than from a tee — no buffering of the value and
+        no knowledge of what either side is. ``read_stream`` hands the
+        primary's chunks straight to the secondary, so nothing here assumes a
+        chunk is ``bytes`` and no temporary file is involved.
+        """
+        require_write_clock_supported(
+            created_at,
+            allowed=self._primary.supports_write_clock,
+            backend=type(self).__name__,
+        )
+        self._primary.set_stream(key, source, ttl=ttl, created_at=created_at, size=size)
+        sec_created = created_at if self._secondary.supports_write_clock else None
+
+        def mirror_secondary() -> None:
+            chunks = self._primary.read_stream(key)
+            if chunks is None:
+                return
+            self._secondary.set_stream(
+                key, chunks, ttl=ttl, created_at=sec_created
+            )
+
+        self._fanout_secondary(mirror_secondary, what="set_stream")
+
+    def stream_chunk_type(self) -> type[Any]:
+        return self._primary.stream_chunk_type()
+
+    def read_stream[Chunkable: (bytes, str)](
+        self: MirrorKvStore[K, Chunkable], key: K
+    ) -> Iterator[Chunkable] | None:
+        """Reads stay on the primary, exactly as ``get`` does."""
+        return self._primary.read_stream(key)
 
     def delete(self, key: K) -> bool:
         deleted = self._primary.delete(key)
