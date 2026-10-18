@@ -796,3 +796,125 @@ def test_a_shared_table_needs_nullable_or_defaulted_sibling_columns() -> None:
     ok = SqlDbKvStore(_column_view("a"), adapter=SqliteSqlDbClientAdapter(conn2))
     ok.set("k", "from-A")
     assert ok.get("k") == "from-A"
+
+
+@pytest.mark.sql
+def test_sql_autocommit_false_rollback_drops_writes(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("txn_rollback")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    store = SqlDbKvStore(
+        sql_kvset,
+        adapter=SqliteSqlDbClientAdapter(sqlite_conn, autocommit=False),
+    )
+    sqlite_conn.execute("BEGIN")
+    store.set("a", "1")
+    store.set("b", "2")
+    sqlite_conn.rollback()
+    assert (
+        sqlite_conn.execute(
+            f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+        ).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.sql
+def test_sql_autocommit_true_commits_each_write(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("txn_autocommit")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    store = SqlDbKvStore(
+        sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn)
+    )
+    store.set("a", "1")
+    assert not sqlite_conn.in_transaction
+    assert store.get("a") == "1"
+
+
+@pytest.mark.sql
+def test_sql_autocommit_false_raises_without_open_transaction(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("txn_no_begin")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    store = SqlDbKvStore(
+        sql_kvset,
+        adapter=SqliteSqlDbClientAdapter(sqlite_conn, autocommit=False),
+    )
+    with pytest.raises(KvStoreError, match="no open transaction"):
+        store.set("a", "1")
+    assert (
+        sqlite_conn.execute(
+            f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+        ).fetchone()[0]
+        == 0
+    )
+
+
+@pytest.mark.sql
+def test_sql_rebind_keeps_store_identity_and_routes_reads(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """``rebind`` is the same ``_clone`` path as ``scoped``; adapter covers reads."""
+
+    class _FetchCountingAdapter(SqliteSqlDbClientAdapter):
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            super().__init__(connection)
+            self.fetch_calls = 0
+
+        def fetch_by_keys(
+            self,
+            *,
+            table: str,
+            columns: Sequence[str],
+            key_fields: Sequence[str],
+            keys: Sequence[SqlDbRow],
+        ) -> Sequence[SqlDbRow]:
+            self.fetch_calls += 1
+            return super().fetch_by_keys(
+                table=table,
+                columns=columns,
+                key_fields=key_fields,
+                keys=keys,
+            )
+
+    sql_kvset = make_sql_kvset(
+        "rebind_docs",
+        leaf_key_fields=("id",),
+        scope_fields=("region",),
+        scope_schema=("region",),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    first = _FetchCountingAdapter(sqlite_conn)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        root = SqlDbKvStore(
+            sql_kvset,
+            adapter=first,
+            expiry_gc=ExpiryGc.HIDE,
+            batch_size=17,
+        )
+        scoped = root.scoped(region="us")
+        scoped.set("k", "v")
+
+        second = _FetchCountingAdapter(sqlite_conn)
+        rebound = scoped.rebind(second)
+        assert rebound.scope == scoped.scope
+        assert rebound.kvset == scoped.kvset
+        assert rebound.batch_size == 17
+        assert rebound.get("k") == "v"
+        assert second.fetch_calls == 1
+        assert first.fetch_calls == 0
+
+        # ExpiryGc.HIDE survived _clone: expired get hides, does not delete.
+        frozen.move_to("2024-01-01 12:01:00")
+        assert rebound.get("k") is None
+        assert (
+            sqlite_conn.execute(
+                f'SELECT COUNT(*) FROM "{sql_kvset.table_name}"'
+            ).fetchone()[0]
+            == 1
+        )

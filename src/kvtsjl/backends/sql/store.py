@@ -120,15 +120,29 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def supports_write_clock(self) -> bool:
         return True
 
-    def clone_with_scope(self, scope: Scope) -> SqlDbKvBackend[K, V]:
+    def _clone(
+        self,
+        *,
+        scope: Scope | None = None,
+        adapter: SqlDbClientAdapter | None = None,
+    ) -> SqlDbKvBackend[K, V]:
+        """Single clone path for scope and adapter rebinding."""
         return SqlDbKvBackend(
             self._sql_kvset,
-            adapter=self._adapter,
+            adapter=self._adapter if adapter is None else adapter,
             expiry_gc=self._expiry_gc,
-            scope=scope,
+            scope=self.scope if scope is None else scope,
             binding=self._binding,
             batch_size=self.batch_size,
         )
+
+    def clone_with_scope(self, scope: Scope) -> SqlDbKvBackend[K, V]:
+        return self._clone(scope=scope)
+
+    def clone_with_adapter(
+        self, adapter: SqlDbClientAdapter
+    ) -> SqlDbKvBackend[K, V]:
+        return self._clone(adapter=adapter)
 
     def _presence_columns(self) -> tuple[str, ...]:
         sk = self._sql_kvset
@@ -768,3 +782,14 @@ class SqlDbKvStore[K, V](LeafKvStore[K, V, str, SqlDbRow, str]):
         return cast(SqlDbKvBackend[K, V], self._backend).expired_keys(
             now=now, limit=limit
         )
+
+    def rebind(self, adapter: SqlDbClientAdapter) -> SqlDbKvStore[K, V]:
+        """Same store (scope, kvset, expiry, batch size) on a different adapter.
+
+        Reads and writes both use ``adapter``, so a client-owned transaction
+        on that connection covers ``get`` then ``set`` (and peers) atomically.
+        """
+        backend = cast(SqlDbKvBackend[K, V], self._backend).clone_with_adapter(
+            adapter
+        )
+        return type(self).from_backend(backend)

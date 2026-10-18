@@ -9,6 +9,7 @@ from typing import Any
 
 from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
 from kvtsjl.backends.sql.schema import SqlDbRow
+from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.scan import OrderBy
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -29,13 +30,35 @@ def _row_from_sqlite(row: sqlite3.Row) -> SqlDbRow:
 
 
 class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
-    """First-party SQLite backend using a caller-owned ``sqlite3.Connection``."""
+    """First-party SQLite backend using a caller-owned ``sqlite3.Connection``.
 
-    def __init__(self, connection: sqlite3.Connection, *, db_name: str = "sqlite") -> None:
+    With ``autocommit=True`` (default), each write ends with ``commit()`` —
+    today's behaviour. With ``autocommit=False``, this adapter never commits;
+    the client must open a transaction before any write, or the write raises
+    instead of vanishing on a connection with nothing to commit later.
+    """
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        db_name: str = "sqlite",
+        autocommit: bool = True,
+    ) -> None:
         self._conn = connection
         self._db_name = db_name
+        self._autocommit = autocommit
         self._conn.row_factory = sqlite3.Row
 
+    def _ensure_write_txn(self) -> None:
+        if not self._autocommit and not self._conn.in_transaction:
+            raise KvStoreError(
+                "no open transaction; write would never commit"
+            )
+
+    def _after_write(self) -> None:
+        if self._autocommit:
+            self._conn.commit()
     @property
     def db_name(self) -> str:
         return self._db_name
@@ -110,6 +133,7 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     ) -> None:
         if not rows:
             return
+        self._ensure_write_txn()
         missing = [f for f in key_fields if f not in write_columns]
         if missing:
             raise ValueError(f"key_fields missing from write_columns: {missing}")
@@ -136,7 +160,7 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             )
         params = [tuple(row.get(c) for c in write_columns) for row in rows]
         self._conn.executemany(sql, params)
-        self._conn.commit()
+        self._after_write()
 
     def delete_by_keys(
         self,
@@ -147,6 +171,7 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     ) -> int:
         if not keys:
             return 0
+        self._ensure_write_txn()
         t = _quote_ident(table)
         deleted = 0
         for key in keys:
@@ -154,9 +179,8 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             params = [key[f] for f in key_fields]
             cur = self._conn.execute(f"DELETE FROM {t} WHERE {preds}", params)
             deleted += int(cur.rowcount)
-        self._conn.commit()
+        self._after_write()
         return deleted
-
     def scan_by_key_parts(
         self,
         *,

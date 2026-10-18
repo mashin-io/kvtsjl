@@ -39,7 +39,14 @@ class SqlLiveness:
 
 
 class SqlDbClientAdapter(ABC):
-    """Caller-owned DB access. The store never passes SQL text."""
+    """Caller-owned DB access. The store never passes SQL text.
+
+    Writes run on the caller's connection and transaction. kvtsjl does not
+    begin, commit, or roll back — the client owns that. The reference SQLite
+    adapter defaults to ``autocommit=True`` (commit after each write) for
+    backward compatibility; pass ``autocommit=False`` when the client opens
+    the transaction.
+    """
 
     @property
     @abstractmethod
