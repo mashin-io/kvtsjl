@@ -720,3 +720,79 @@ def test_readonly_keeps_expired_keys_but_refuses_gc(
         assert view.expired_keys(limit=10) == ["a"]
         with pytest.raises(KvStoreReadOnlyError):
             view.gc_expired_keys(max_entries=10)
+
+
+def _column_view(field: str) -> Any:
+    """A SqlDbKvSet owning exactly one value column of a shared table."""
+    from kvtsjl import SerDe
+    from kvtsjl.backends.sql.schema import SqlDbField, SqlDbKvSet
+    from kvtsjl.store.schema.kvset import KvSet
+
+    kvset = KvSet.with_str_keys(
+        "shared",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe[str, SqlDbRow](
+            serializer=lambda v: {field: v},
+            deserializer=lambda row: row[field],
+            blob_type=dict,
+        ),
+    )
+    return SqlDbKvSet(kvset=kvset, leaf_key_fields=("id",), fields=(SqlDbField(field),))
+
+
+def test_set_is_already_insert_or_update_on_a_shared_table() -> None:
+    """Two views of one row both write with ``set``; neither clobbers the other.
+
+    This is why there is no ``patch``. ``upsert_rows`` lists only the view's own
+    columns in both the INSERT and the ON CONFLICT DO UPDATE, so a sibling
+    view's columns are never touched, and a view that writes second updates
+    rather than replacing the row.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE "shared_1" (id TEXT PRIMARY KEY, a TEXT, b TEXT, '
+        "updated_at REAL NOT NULL, expires_at REAL)"
+    )
+    view_a = SqlDbKvStore(_column_view("a"), adapter=SqliteSqlDbClientAdapter(conn))
+    view_b = SqlDbKvStore(_column_view("b"), adapter=SqliteSqlDbClientAdapter(conn))
+
+    view_a.set("k", "from-A")   # first writer inserts the row
+    view_b.set("k", "from-B")   # second writer updates only its own column
+
+    assert view_a.get("k") == "from-A", "sibling view clobbered column a"
+    assert view_b.get("k") == "from-B"
+    assert len(conn.execute('SELECT id FROM "shared_1"').fetchall()) == 1
+
+    view_a.set("k", "A-again")  # and back the other way
+    assert (view_a.get("k"), view_b.get("k")) == ("A-again", "from-B")
+
+
+def test_a_shared_table_needs_nullable_or_defaulted_sibling_columns() -> None:
+    """The one real constraint on sharing a table, and it lives in the DDL.
+
+    A view can only fill its own columns, so whichever view inserts the row
+    first leaves the siblings to the schema. ``NOT NULL`` with no default makes
+    that insert impossible — which is a DDL decision, and DDL is caller-owned.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE "shared_1" (id TEXT PRIMARY KEY, a TEXT, b TEXT NOT NULL, '
+        "updated_at REAL NOT NULL, expires_at REAL)"
+    )
+    view_a = SqlDbKvStore(_column_view("a"), adapter=SqliteSqlDbClientAdapter(conn))
+
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+        view_a.set("k", "from-A")
+
+    # the same schema with a default inserts cleanly
+    conn2 = sqlite3.connect(":memory:")
+    conn2.row_factory = sqlite3.Row
+    conn2.execute(
+        'CREATE TABLE "shared_1" (id TEXT PRIMARY KEY, a TEXT, '
+        "b TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL, expires_at REAL)"
+    )
+    ok = SqlDbKvStore(_column_view("a"), adapter=SqliteSqlDbClientAdapter(conn2))
+    ok.set("k", "from-A")
+    assert ok.get("k") == "from-A"

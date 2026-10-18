@@ -69,6 +69,28 @@ class SqlDbKvSet[K, V]:
     or a sequence/mapping aligned to multiple columns).
 
     DDL is caller-owned.
+
+    **Sharing a table.** Several ``SqlDbKvSet`` views may map onto one table,
+    each owning a different set of value columns. ``set`` handles this already:
+    both the INSERT and the ON CONFLICT DO UPDATE list only this view's
+    columns, so a view never clobbers a sibling's data and a view writing
+    second updates rather than replacing the row.
+
+    The one requirement falls on the DDL: whichever view inserts a row first
+    can only fill its own columns, so **every other value column must be
+    nullable or carry a DEFAULT**. A ``NOT NULL`` column with no default makes
+    that first insert impossible from any view that does not own it.
+
+    That constraint is also a tool. Leaving the *creating* view's columns
+    ``NOT NULL`` without a default enforces which view may create the row: a
+    non-owning view that writes first fails loudly instead of leaving a hollow
+    row behind for the owner to find.
+
+    ``updated_at`` and ``expires_at`` are row-level, not per-view: the view
+    that writes last sets the row's clock for everyone sharing it. Pass
+    ``created_at`` to pin the base a relative TTL counts from, so several
+    writes within one unit of work share a death time instead of each one
+    pushing it out.
     """
 
     kvset: KvSet[K, V, str, SqlDbRow]
