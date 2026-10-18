@@ -99,8 +99,9 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
     def _bucket(self) -> dict[KBLOB, _Entry[VBLOB]]:
         return self._root.bucket(self._binding.collection)
 
-    def _expired(self, entry: _Entry[VBLOB]) -> bool:
-        return entry.expires_at is not None and time.time() >= entry.expires_at
+    def _expired(self, entry: _Entry[VBLOB], *, now: datetime | None = None) -> bool:
+        at = time.time() if now is None else self._clock_base(now)
+        return entry.expires_at is not None and at >= entry.expires_at
 
     def _clock_base(self, created_at: datetime | None) -> float:
         if created_at is None:
@@ -274,27 +275,26 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             else:
                 yield decoded, None
 
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        if max_entries < 1:
-            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
         prefix = self._scan_prefix_blob(None)
         ops = self.kvset.blob_ops
         bucket = self._bucket()
-        deleted: list[K] = []
+        found: list[K] = []
         for pk in list(bucket.keys()):
-            if len(deleted) >= max_entries:
+            if len(found) >= limit:
                 break
             entry = bucket.get(pk)
-            if entry is None or not self._expired(entry):
+            if entry is None or not self._expired(entry, now=now):
                 continue
             if not ops.startswith(pk, prefix):
                 continue
             decoded = self._decode_key_from_physical(pk)
             if decoded is None:
                 continue
-            bucket.pop(pk, None)
-            deleted.append(decoded)
-        return deleted
+            found.append(decoded)
+        return found
 
 
 class MemoryKvStore[K, V, KBLOB, VBLOB](LeafKvStore[K, V, KBLOB, VBLOB, str]):

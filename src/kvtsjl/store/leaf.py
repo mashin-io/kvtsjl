@@ -194,6 +194,9 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
 
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        return self._backend.expired_keys(now=now, limit=limit)
+
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         return self._backend.gc_expired_keys(max_entries=max_entries)
 

@@ -21,11 +21,18 @@ Physical PK = ``scope_fields`` (from ``scoped(...)``) + ``leaf_key_fields``
 from __future__ import annotations
 
 from kvtsjl.backends.sql.adapter import SqlDbClientAdapter
-from kvtsjl.backends.sql.schema import SqlDbField, SqlDbKvSet, SqlDbRow, sql_table_name
+from kvtsjl.backends.sql.schema import (
+    ExpiryBinding,
+    SqlDbField,
+    SqlDbKvSet,
+    SqlDbRow,
+    sql_table_name,
+)
 from kvtsjl.backends.sql.sqlite import SqliteSqlDbClientAdapter
 from kvtsjl.backends.sql.store import SqlDbKvStore
 
 __all__ = [
+    "ExpiryBinding",
     "SqlDbClientAdapter",
     "SqlDbField",
     "SqlDbKvSet",

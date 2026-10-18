@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
@@ -39,6 +40,9 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
 
     def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
+
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        return self._underlying.expired_keys(now=now, limit=limit)
 
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         return self._underlying.gc_expired_keys(max_entries=max_entries)

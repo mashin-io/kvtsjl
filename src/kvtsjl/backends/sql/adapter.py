@@ -146,3 +146,56 @@ class SqlDbClientAdapter(ABC):
         reports ``ScanOrder.KEY_ASC`` on the strength of this; an adapter that
         cannot guarantee it must say so rather than relying on a query plan.
         """
+
+    def supports_expiry_scan(self) -> bool:
+        """Whether this adapter implements ``scan_expired`` / ``has_null_expires_at``.
+
+        Default ``False``: the store falls back to a full ``scan_by_key_parts``
+        and Python ``_row_expired``.
+        """
+        return False
+
+    def scan_expired(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        expires_at_field: str,
+        updated_at_field: str,
+        relative_ttl_seconds: int | None,
+        now: float,
+        limit: int,
+    ) -> Sequence[SqlDbRow]:
+        """Return up to ``limit`` expired rows, oldest death time first.
+
+        Predicate must match ``SqlDbKvStore._row_expired``:
+
+        - ``expires_at IS NOT NULL AND expires_at <= now``, or
+        - when ``relative_ttl_seconds`` is set: ``expires_at IS NULL AND
+          updated_at + relative_ttl_seconds <= now``.
+
+        Pass ``relative_ttl_seconds=None`` for early-bound tables (and for
+        kvsets with no collection TTL): only the concrete ``expires_at``
+        branch runs.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement scan_expired"
+        )
+
+    def has_null_expires_at(
+        self,
+        *,
+        table: str,
+        exact: Mapping[str, Any],
+        expires_at_field: str,
+    ) -> bool:
+        """True if any row under ``exact`` has NULL ``expires_at``.
+
+        Used once when ``expiry_binding`` is early and the kvset has a relative
+        TTL, to refuse a premature single-branch scan that would skip those rows.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement has_null_expires_at"
+        )

@@ -232,6 +232,12 @@ class IMappedKeysKvStore[K, SK, V](
             self._src().clone_with_scope(scope), self._to_store, self._from_store
         )
 
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        from_store = self.require_from_store()
+        return [
+            from_store(sk) for sk in self._src().expired_keys(now=now, limit=limit)
+        ]
+
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         from_store = self.require_from_store()
         return [

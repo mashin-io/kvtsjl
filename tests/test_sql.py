@@ -2,18 +2,87 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 import sqlite3
+from typing import Any
 
 from freezegun import freeze_time
 import pytest
 
 from kvtsjl import ExpiryGc, KeyLayout, TtlPolicy
-from kvtsjl.backends.sql import SqlDbKvStore, SqliteSqlDbClientAdapter
-from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.backends.sql import ExpiryBinding, SqlDbKvStore, SqliteSqlDbClientAdapter
+from kvtsjl.backends.sql.schema import SqlDbRow
+from kvtsjl.exceptions import KvStoreError, KvStoreReadOnlyError, KvStoreScanUnsupported
 from kvtsjl.store.schema.ttl import TTL_NONE_EXPIRES_AT
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
 from tests.sql_helpers import ensure_sql_table, make_composite_sql_kvset, make_sql_kvset
+
+
+class _CountingExpiryAdapter(SqliteSqlDbClientAdapter):
+    """Records ``scan_expired`` / ``scan_by_key_parts`` calls for pushdown gates."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        super().__init__(connection)
+        self.scan_expired_calls: list[dict[str, Any]] = []
+        self.scan_parts_calls = 0
+        self._expiry_enabled = True
+
+    def supports_expiry_scan(self) -> bool:
+        return self._expiry_enabled
+
+    def disable_expiry_scan(self) -> None:
+        self._expiry_enabled = False
+
+    def scan_expired(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        expires_at_field: str,
+        updated_at_field: str,
+        relative_ttl_seconds: int | None,
+        now: float,
+        limit: int,
+    ) -> Sequence[SqlDbRow]:
+        self.scan_expired_calls.append(
+            {
+                "table": table,
+                "relative_ttl_seconds": relative_ttl_seconds,
+                "limit": limit,
+            }
+        )
+        return super().scan_expired(
+            table=table,
+            columns=columns,
+            key_fields=key_fields,
+            exact=exact,
+            expires_at_field=expires_at_field,
+            updated_at_field=updated_at_field,
+            relative_ttl_seconds=relative_ttl_seconds,
+            now=now,
+            limit=limit,
+        )
+
+    def scan_by_key_parts(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+    ) -> Iterator[SqlDbRow]:
+        self.scan_parts_calls += 1
+        return super().scan_by_key_parts(
+            table=table,
+            columns=columns,
+            key_fields=key_fields,
+            exact=exact,
+            prefixes=prefixes,
+        )
 
 
 @pytest.mark.sql
@@ -324,3 +393,330 @@ def test_sql_gc_expired(sqlite_conn: sqlite3.Connection) -> None:
             ).fetchone()[0]
             == 1
         )
+
+
+@pytest.mark.sql
+def test_sql_expired_keys_pushdown_both_branches(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """Pushdown finds concrete expires_at rows and legacy NULL relative-TTL rows."""
+    sql_kvset = make_sql_kvset(
+        "expiry_scan",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _CountingExpiryAdapter(sqlite_conn)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(sql_kvset, adapter=adapter)
+        store.set("bound", "1")  # expires_at = now + 30
+        store.set("live", "2", ttl=TtlPolicy.none())
+        # Legacy NULL relative-TTL row (written before death times were bound).
+        write_epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp()
+        sqlite_conn.execute(
+            f'INSERT INTO "{sql_kvset.table_name}" '
+            f"(id, value, updated_at, expires_at) VALUES (?, ?, ?, NULL)",
+            ("legacy", "3", write_epoch),
+        )
+        sqlite_conn.commit()
+        frozen.move_to("2024-01-01 12:01:00")
+        now = datetime(2024, 1, 1, 12, 1, 0, tzinfo=UTC)
+        keys = store.expired_keys(now=now, limit=10)
+        assert sorted(keys) == ["bound", "legacy"]
+        assert len(adapter.scan_expired_calls) == 1
+        assert adapter.scan_expired_calls[0]["relative_ttl_seconds"] == 30
+        assert adapter.scan_parts_calls == 0
+
+
+@pytest.mark.sql
+def test_sql_expired_keys_oldest_first_and_limit(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset(
+        "expiry_order",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=60)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(
+            sql_kvset,
+            adapter=SqliteSqlDbClientAdapter(sqlite_conn),
+        )
+        store.set(
+            "older",
+            "2",
+            created_at=datetime(2024, 1, 1, 11, 58, 0, tzinfo=UTC),
+        )
+        store.set("newer", "1")
+        frozen.move_to("2024-01-01 12:02:00")
+        now = datetime(2024, 1, 1, 12, 2, 0, tzinfo=UTC)
+        assert store.expired_keys(now=now, limit=1) == ["older"]
+        assert store.expired_keys(now=now, limit=10) == ["older", "newer"]
+
+
+@pytest.mark.sql
+def test_sql_expired_keys_respects_scope(sqlite_conn: sqlite3.Connection) -> None:
+    sql_kvset = make_sql_kvset(
+        "expiry_scope",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+        scope_fields=("tenant",),
+        scope_schema=("tenant",),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        root = SqlDbKvStore(
+            sql_kvset,
+            adapter=SqliteSqlDbClientAdapter(sqlite_conn),
+        )
+        acme = root.scoped(tenant="acme")
+        zeta = root.scoped(tenant="zeta")
+        acme.set("a", "1")
+        zeta.set("a", "2")
+        frozen.move_to("2024-01-01 12:01:00")
+        now = datetime(2024, 1, 1, 12, 1, 0, tzinfo=UTC)
+        assert acme.expired_keys(now=now, limit=10) == ["a"]
+        assert zeta.expired_keys(now=now, limit=10) == ["a"]
+        # Unscoped root sees both (same leaf key in two scopes — two rows).
+        assert sorted(root.expired_keys(now=now, limit=10)) == ["a", "a"]
+
+
+@pytest.mark.sql
+def test_sql_expired_keys_matches_python_row_expired(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """Pushdown result equals the Python fallback scan on the same rows."""
+    sql_kvset = make_sql_kvset(
+        "expiry_parity",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    pushed_adapter = _CountingExpiryAdapter(sqlite_conn)
+    fallback_adapter = _CountingExpiryAdapter(sqlite_conn)
+    fallback_adapter.disable_expiry_scan()
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(sql_kvset, adapter=pushed_adapter)
+        store.set("a", "1")
+        store.set("b", "2", ttl=TtlPolicy(ttl_duration=timedelta(seconds=120)))
+        store.set("c", "3", ttl=TtlPolicy.none())
+        write_epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp()
+        sqlite_conn.execute(
+            f'INSERT INTO "{sql_kvset.table_name}" '
+            f"(id, value, updated_at, expires_at) VALUES (?, ?, ?, NULL)",
+            ("legacy", "4", write_epoch),
+        )
+        sqlite_conn.commit()
+        frozen.move_to("2024-01-01 12:01:00")
+        now = datetime(2024, 1, 1, 12, 1, 0, tzinfo=UTC)
+        pushed = store.expired_keys(now=now, limit=100)
+        fallback = SqlDbKvStore(sql_kvset, adapter=fallback_adapter).expired_keys(
+            now=now, limit=100
+        )
+        assert sorted(pushed) == sorted(fallback)
+        assert pushed_adapter.scan_expired_calls
+        assert fallback_adapter.scan_expired_calls == []
+
+
+@pytest.mark.sql
+def test_sql_expired_keys_fallback_without_capability(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset(
+        "expiry_fallback",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _CountingExpiryAdapter(sqlite_conn)
+    adapter.disable_expiry_scan()
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(sql_kvset, adapter=adapter)
+        store.set("a", "1")
+        store.set("b", "2")
+        frozen.move_to("2024-01-01 12:01:00")
+        now = datetime(2024, 1, 1, 12, 1, 0, tzinfo=UTC)
+        assert sorted(store.expired_keys(now=now, limit=10)) == ["a", "b"]
+        assert adapter.scan_expired_calls == []
+        assert store.gc_expired(max_entries=10) == 2
+
+
+@pytest.mark.sql
+def test_sql_early_binding_raises_when_null_rows_remain(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset(
+        "expiry_early",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+        expiry_binding=ExpiryBinding.EARLY,
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    write_epoch = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp()
+    sqlite_conn.execute(
+        f'INSERT INTO "{sql_kvset.table_name}" '
+        f"(id, value, updated_at, expires_at) VALUES (?, ?, ?, NULL)",
+        ("legacy", "v", write_epoch),
+    )
+    sqlite_conn.commit()
+    store = SqlDbKvStore(
+        sql_kvset,
+        adapter=SqliteSqlDbClientAdapter(sqlite_conn),
+    )
+    with pytest.raises(KvStoreError, match="un-backfilled"):
+        store.expired_keys(limit=10)
+
+
+@pytest.mark.sql
+def test_sql_early_binding_single_branch_after_backfill(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset(
+        "expiry_early_ok",
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30)),
+        expiry_binding=ExpiryBinding.EARLY,
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _CountingExpiryAdapter(sqlite_conn)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(sql_kvset, adapter=adapter)
+        store.set("a", "1")
+        frozen.move_to("2024-01-01 12:01:00")
+        now = datetime(2024, 1, 1, 12, 1, 0, tzinfo=UTC)
+        assert store.expired_keys(now=now, limit=10) == ["a"]
+        assert adapter.scan_expired_calls[0]["relative_ttl_seconds"] is None
+
+
+def _insert_raw(
+    conn: sqlite3.Connection, table: str, key: str, updated_at: float, expires_at: float | None
+) -> None:
+    conn.execute(
+        f'INSERT INTO "{table}" (id, value, updated_at, expires_at) VALUES (?, ?, ?, ?)',
+        (key, "v", updated_at, expires_at),
+    )
+    conn.commit()
+
+
+def test_sql_expired_keys_orders_by_death_time_across_both_branches(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """Oldest *death* first, mixing absolute and relative rows.
+
+    The parity test compares sorted sets, so it cannot see order. Order is what
+    ``limit`` spends: ordering by ``expires_at`` alone puts every relative row
+    first (SQL sorts NULL first), so absolute rows that died long ago can be
+    starved by newer relative ones for as long as the backlog lasts.
+    """
+    sql_kvset = make_sql_kvset(
+        "expiry_order", ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30))
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00"):
+        now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = now.timestamp()
+        table = sql_kvset.table_name
+        # deaths: abs_oldest t-100, rel_mid t-30 (t-60 + 30s ttl), abs_newest t-10
+        _insert_raw(sqlite_conn, table, "abs_oldest", t, t - 100)
+        _insert_raw(sqlite_conn, table, "rel_mid", t - 60, None)
+        _insert_raw(sqlite_conn, table, "abs_newest", t, t - 10)
+        store = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn))
+
+        assert store.expired_keys(now=now, limit=10) == [
+            "abs_oldest",
+            "rel_mid",
+            "abs_newest",
+        ]
+        # the strongest form: a budget of one must spend it on the oldest death
+        assert store.expired_keys(now=now, limit=1) == ["abs_oldest"]
+
+
+def test_sql_expired_keys_includes_a_row_dying_exactly_now(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """The boundary is ``<=``, matching ``_row_expired``'s ``>=``.
+
+    Randomised parity data never lands on exact equality, so the boundary needs
+    its own case on both branches.
+    """
+    sql_kvset = make_sql_kvset(
+        "expiry_boundary", ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30))
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00"):
+        now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = now.timestamp()
+        table = sql_kvset.table_name
+        _insert_raw(sqlite_conn, table, "abs_exactly_now", t, t)
+        _insert_raw(sqlite_conn, table, "rel_exactly_now", t - 30, None)
+        store = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn))
+
+        assert sorted(store.expired_keys(now=now, limit=10)) == [
+            "abs_exactly_now",
+            "rel_exactly_now",
+        ]
+        assert store.get("abs_exactly_now") is None
+        assert store.get("rel_exactly_now") is None
+
+
+def test_expired_keys_is_generic_and_gc_is_sugar_over_it(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """``expired_keys`` is the primitive; every backend inherits the delete.
+
+    Pins the hoist: a backend that implements only ``expired_keys`` still
+    garbage-collects, and the two agree on which keys they mean.
+    """
+    from kvtsjl import KvSet, MemoryKvStore, SerDe
+
+    ttl = TtlPolicy(ttl_duration=timedelta(seconds=30))
+    sql_kvset = make_sql_kvset("generic_expiry", ttl_policy=ttl)
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    # A dict walk and a SQL pushdown: two different implementations of the one
+    # primitive, both inheriting the deletion from the base class.
+    stores: list[Any] = [
+        MemoryKvStore(
+            KvSet.with_str_keys(
+                "mem",
+                key_serde=SerDe.identity(str),
+                value_serde=SerDe.identity(bytes),
+                ttl_policy=ttl,
+            )
+        ),
+        SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn)),
+    ]
+    for store in stores:
+        label = type(store).__name__
+        with freeze_time("2024-01-01 12:00:00") as frozen:
+            one, two, three = (b"1", b"2", b"3") if "Memory" in label else ("1", "2", "3")
+            store.set("live", one)
+            store.set("dead", two)
+            frozen.move_to("2024-01-01 12:00:10")
+            store.set("fresh", three)
+            # 'live'/'dead' die at 12:00:30; 'fresh' not until 12:00:40
+            frozen.move_to("2024-01-01 12:00:35")
+
+            found = set(store.expired_keys(limit=10))
+            assert found == {"live", "dead"}, f"{label}: {found}"
+            assert len(store.expired_keys(limit=1)) == 1, label
+            # read-only: calling it twice must not have deleted anything
+            assert set(store.expired_keys(limit=10)) == {"live", "dead"}, label
+
+            collected = set(store.gc_expired_keys(max_entries=10))
+            assert collected == {"live", "dead"}, f"{label}: {collected}"
+            assert store.expired_keys(limit=10) == [], label
+            assert store.get("fresh") == three, label
+            assert store.get("dead") is None, label
+
+
+def test_readonly_keeps_expired_keys_but_refuses_gc(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """Listing what expired is a read; collecting it is a write."""
+    sql_kvset = make_sql_kvset(
+        "ro_expiry", ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=30))
+    )
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn))
+        store.set("a", "1")
+        frozen.move_to("2024-01-01 12:01:00")
+        view = store.readonly()
+
+        assert view.expired_keys(limit=10) == ["a"]
+        with pytest.raises(KvStoreReadOnlyError):
+            view.gc_expired_keys(max_entries=10)

@@ -457,13 +457,18 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
                 setattr(cloned, attr, getattr(self, attr))
         return cloned
 
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        if max_entries < 1:
-            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-        deleted: list[K] = []
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        """Listing scan: the medium has no query for "which objects expired".
+
+        Honest about its cost — the same work ``gc_expired_keys`` always did,
+        with the delete lifted into the base class.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        found: list[K] = []
         listing = self._listing_prefix(None)
         for listed in self._driver.list(prefix=listing):
-            if len(deleted) >= max_entries:
+            if len(found) >= limit:
                 break
             stat = self._enrich_list_stat(listed)
             if stat is None:
@@ -475,6 +480,5 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             decoded = self._key_codec.decode_if_prefix(stat.key, None)
             if decoded is None:
                 continue
-            self._driver.delete(stat.key)
-            deleted.append(decoded)
-        return deleted
+            found.append(decoded)
+        return found

@@ -4,11 +4,28 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from kvtsjl.store.schema.kvset import KvSet
 
 SqlDbRow = dict[str, Any]
+
+
+class ExpiryBinding(str, Enum):
+    """How ``expires_at`` is interpreted for SQL expiry scans.
+
+    ``LATE`` (default): two-branch predicate — concrete ``expires_at``, or
+    ``updated_at +`` collection TTL when ``expires_at`` is NULL. Needed while
+    legacy NULL rows remain after binding writes.
+
+    ``EARLY``: single branch ``expires_at <= now``. Only safe after the client
+    has backfilled NULL death times on relative-TTL tables; the store checks
+    once and raises if un-backfilled rows remain.
+    """
+
+    LATE = "late"
+    EARLY = "early"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +77,7 @@ class SqlDbKvSet[K, V]:
     scope_fields: Sequence[str] = ()
     updated_at_field: str = "updated_at"
     expires_at_field: str = "expires_at"
+    expiry_binding: ExpiryBinding = ExpiryBinding.LATE
 
     def __post_init__(self) -> None:
         if not self.leaf_key_fields:
@@ -81,6 +99,7 @@ class SqlDbKvSet[K, V]:
         scope_fields: Sequence[str] = (),
         updated_at_field: str = "updated_at",
         expires_at_field: str = "expires_at",
+        expiry_binding: ExpiryBinding = ExpiryBinding.LATE,
     ) -> SqlDbKvSet[K, V]:
         """Build a descriptor; pass ``key_field`` for a single leaf PK column."""
         if leaf_key_fields is not None and key_field is not None:
@@ -96,6 +115,7 @@ class SqlDbKvSet[K, V]:
             scope_fields=tuple(scope_fields),
             updated_at_field=updated_at_field,
             expires_at_field=expires_at_field,
+            expiry_binding=expiry_binding,
         )
 
     @property

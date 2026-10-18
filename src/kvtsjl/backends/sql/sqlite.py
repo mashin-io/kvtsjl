@@ -187,6 +187,76 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     def supports_scan_ordering(self) -> bool:
         return True
 
+    def supports_expiry_scan(self) -> bool:
+        return True
+
+    def scan_expired(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        expires_at_field: str,
+        updated_at_field: str,
+        relative_ttl_seconds: int | None,
+        now: float,
+        limit: int,
+    ) -> Sequence[SqlDbRow]:
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        cols = ", ".join(_quote_ident(c) for c in columns)
+        t = _quote_ident(table)
+        expires = _quote_ident(expires_at_field)
+        updated = _quote_ident(updated_at_field)
+        clauses: list[str] = []
+        params: list[Any] = []
+        for field, value in exact.items():
+            clauses.append(f"{_quote_ident(field)}=?")
+            params.append(value)
+        if relative_ttl_seconds is None:
+            clauses.append(f"({expires} IS NOT NULL AND {expires} <= ?)")
+            params.append(now)
+            order_expr = expires
+        else:
+            ttl = float(relative_ttl_seconds)
+            clauses.append(
+                f"(({expires} IS NOT NULL AND {expires} <= ?) OR "
+                f"({expires} IS NULL AND {updated} IS NOT NULL "
+                f"AND {updated} + ? <= ?))"
+            )
+            params.extend([now, ttl, now])
+            order_expr = f"COALESCE({expires}, {updated} + ?)"
+            # COALESCE bind comes after WHERE params, before LIMIT.
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order_expr} ASC LIMIT ?"
+        if relative_ttl_seconds is not None:
+            params.append(float(relative_ttl_seconds))
+        params.append(limit)
+        cur = self._conn.execute(sql, params)
+        return [_row_from_sqlite(row) for row in cur]
+
+    def has_null_expires_at(
+        self,
+        *,
+        table: str,
+        exact: Mapping[str, Any],
+        expires_at_field: str,
+    ) -> bool:
+        t = _quote_ident(table)
+        expires = _quote_ident(expires_at_field)
+        clauses = [f"{expires} IS NULL"]
+        params: list[Any] = []
+        for field, value in exact.items():
+            clauses.append(f"{_quote_ident(field)}=?")
+            params.append(value)
+        where = " AND ".join(clauses)
+        cur = self._conn.execute(
+            f"SELECT 1 FROM {t} WHERE {where} LIMIT 1",
+            params,
+        )
+        return cur.fetchone() is not None
+
     def scan_ordered(
         self,
         *,

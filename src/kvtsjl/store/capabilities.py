@@ -271,6 +271,21 @@ class ScannableMixin[K, V](ABC):
 class ExpiringMixin[K](ABC):
     """Explicit GC of expired entries via ``delete_where(Expired())``."""
 
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        """Up to ``limit`` expired keys, oldest expiry first; read-only.
+
+        The primitive behind ``gc_expired_keys``, exposed so a caller can fold
+        or clean up related rows before deleting. Empty by default, which is
+        correct for a medium that expires entries itself.
+
+        Cost follows the medium: SQL pushes the predicate down, memory walks
+        its dict, and an object store lists — there is no query for "which
+        objects expired", so it is the same scan the deletion always did.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        return []
+
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         """Backend/fanout hook: delete up to ``max_entries`` expired keys.
 

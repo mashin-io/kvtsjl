@@ -8,14 +8,14 @@ import time
 from typing import Any, cast
 
 from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
-from kvtsjl.backends.sql.schema import SqlDbKvSet, SqlDbRow
+from kvtsjl.backends.sql.schema import ExpiryBinding, SqlDbKvSet, SqlDbRow
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
     CollectionBinding,
     NamespaceBinder,
     NativeCollectionBinder,
 )
-from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
+from kvtsjl.exceptions import KvStoreError, KvStoreScanUnsupported, KvStoreScopeError
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
@@ -114,6 +114,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         self._expiry_gc = expiry_gc
         assert self._binding.collection is not None
         self._table = self._binding.collection
+        self._early_binding_checked = False
 
     @property
     def supports_write_clock(self) -> bool:
@@ -235,17 +236,120 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             out[f] = str(val)
         return out
 
-    def _row_expired(self, row: SqlDbRow) -> bool:
+    def _row_expired_at(self, row: SqlDbRow, *, now: float) -> bool:
         expires = _as_timestamp(row.get(self._sql_kvset.expires_at_field))
         if expires is not None:
-            return time.time() >= expires
+            return now >= expires
         ttl = self.ttl_seconds()
         if ttl is None:
             return False
         updated = _as_timestamp(row.get(self._sql_kvset.updated_at_field))
         if updated is None:
             return False
-        return time.time() >= updated + ttl
+        return now >= updated + ttl
+
+    def _row_expired(self, row: SqlDbRow) -> bool:
+        return self._row_expired_at(row, now=time.time())
+
+    def _death_time(self, row: SqlDbRow) -> float | None:
+        """Epoch when the row dies, or ``None`` if it never expires."""
+        expires = _as_timestamp(row.get(self._sql_kvset.expires_at_field))
+        if expires is not None:
+            return expires
+        ttl = self.ttl_seconds()
+        if ttl is None:
+            return None
+        updated = _as_timestamp(row.get(self._sql_kvset.updated_at_field))
+        if updated is None:
+            return None
+        return updated + ttl
+
+    def _ensure_early_binding_safe(self) -> None:
+        """Refuse early binding while relative-TTL NULL rows remain."""
+        if self._early_binding_checked:
+            return
+        self._early_binding_checked = True
+        if self._sql_kvset.expiry_binding is not ExpiryBinding.EARLY:
+            return
+        if self.ttl_seconds() is None:
+            # NULL legitimately means never expires.
+            return
+        exact = self._scope_key_row(require_all=False)
+        if self._adapter.supports_expiry_scan():
+            has_null = self._adapter.has_null_expires_at(
+                table=self._table,
+                exact=exact,
+                expires_at_field=self._sql_kvset.expires_at_field,
+            )
+        else:
+            has_null = False
+            sk = self._sql_kvset
+            for row in self._adapter.scan_by_key_parts(
+                table=self._table,
+                columns=(sk.expires_at_field, *sk.key_fields),
+                key_fields=sk.key_fields,
+                exact=exact,
+                prefixes={},
+            ):
+                if row.get(sk.expires_at_field) is None:
+                    has_null = True
+                    break
+        if has_null:
+            raise KvStoreError(
+                "expiry_binding='early' but un-backfilled rows remain"
+            )
+
+    def _relative_ttl_for_expiry_scan(self) -> int | None:
+        """TTL seconds for the relative NULL branch, or ``None`` when unused."""
+        if self._sql_kvset.expiry_binding is ExpiryBinding.EARLY:
+            return None
+        return self.ttl_seconds()
+
+    def expired_keys(
+        self, *, now: datetime | None = None, limit: int
+    ) -> list[K]:
+        """Oldest-expired keys first, bounded, under the bound scope. Read-only."""
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        self._ensure_early_binding_safe()
+        now_epoch = _clock_base(now)
+        sk = self._sql_kvset
+        exact = self._scope_key_row(require_all=False)
+        if self._adapter.supports_expiry_scan():
+            rows = self._adapter.scan_expired(
+                table=self._table,
+                columns=sk.select_columns(),
+                key_fields=sk.key_fields,
+                exact=exact,
+                expires_at_field=sk.expires_at_field,
+                updated_at_field=sk.updated_at_field,
+                relative_ttl_seconds=self._relative_ttl_for_expiry_scan(),
+                now=now_epoch,
+                limit=limit,
+            )
+        else:
+            scored: list[tuple[float, SqlDbRow]] = []
+            for row in self._adapter.scan_by_key_parts(
+                table=self._table,
+                columns=sk.select_columns(),
+                key_fields=sk.key_fields,
+                exact=exact,
+                prefixes=self._leaf_prefix_map(None),
+            ):
+                if not self._row_expired_at(row, now=now_epoch):
+                    continue
+                death = self._death_time(row)
+                if death is None:
+                    continue
+                scored.append((death, row))
+            scored.sort(key=lambda item: item[0])
+            rows = [row for _, row in scored[:limit]]
+        out: list[K] = []
+        for row in rows:
+            decoded = self._decode_leaf_key(row)
+            if decoded is not None:
+                out.append(decoded)
+        return out
 
     def _live_row(self, row: SqlDbRow | None) -> SqlDbRow | None:
         if row is None:
@@ -624,38 +728,6 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 keys=expired_keys,
             )
 
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        if max_entries < 1:
-            raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-        sk = self._sql_kvset
-        exact = self._scope_key_row(require_all=False)
-        prefixes = self._leaf_prefix_map(None)
-        deleted: list[K] = []
-        expired_rows: list[SqlDbRow] = []
-        for row in self._adapter.scan_by_key_parts(
-            table=self._table,
-            columns=sk.select_columns(),
-            key_fields=sk.key_fields,
-            exact=exact,
-            prefixes=prefixes,
-        ):
-            if len(deleted) >= max_entries:
-                break
-            if not self._row_expired(row):
-                continue
-            decoded = self._decode_leaf_key(row)
-            if decoded is None:
-                continue
-            expired_rows.append({f: row[f] for f in sk.key_fields})
-            deleted.append(decoded)
-        if expired_rows:
-            self._adapter.delete_by_keys(
-                table=self._table,
-                key_fields=sk.key_fields,
-                keys=expired_rows,
-            )
-        return deleted
-
 
 class SqlDbKvStore[K, V](LeafKvStore[K, V, str, SqlDbRow, str]):
     """Row-oriented KvStore over a SQL table via ``SqlDbClientAdapter``.
@@ -687,4 +759,12 @@ class SqlDbKvStore[K, V](LeafKvStore[K, V, str, SqlDbRow, str]):
                 binding=binding,
                 batch_size=batch_size,
             )
+        )
+
+    def expired_keys(
+        self, *, now: datetime | None = None, limit: int
+    ) -> list[K]:
+        """Oldest-expired keys first, bounded, under the bound scope. Read-only."""
+        return cast(SqlDbKvBackend[K, V], self._backend).expired_keys(
+            now=now, limit=limit
         )

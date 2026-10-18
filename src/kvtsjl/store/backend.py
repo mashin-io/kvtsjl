@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Self
 
 from kvtsjl.batching import DEFAULT_BATCH_SIZE
@@ -113,11 +114,27 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
     def clone_with_scope(self, scope: Scope) -> Self:
         """Return a backend view narrowed to ``scope`` (same physical medium)."""
 
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        """Up to ``limit`` expired keys under the bound scope; read-only.
+
+        The primitive: ``gc_expired_keys`` is "find these, then delete them".
+        Backends implement this one and inherit the deletion.
+
+        The default is empty, which is right for a medium that expires entries
+        itself (Redis) — there is nothing left to collect.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        return []
+
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         """Delete up to ``max_entries`` expired entries; return deleted keys."""
         if max_entries < 1:
             raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-        return []
+        keys = self.expired_keys(limit=max_entries)
+        if keys:
+            self.batch_delete(keys)
+        return keys
 
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import backend_repr

@@ -99,6 +99,10 @@ class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
     def batch_delete(self, keys: Sequence[K]) -> int:
         raise KvStoreReadOnlyError("batch_delete on readonly store")
 
+    def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
+        """Reading which keys expired is a read — ``readonly()`` keeps it."""
+        return self._underlying.expired_keys(now=now, limit=limit)
+
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         raise KvStoreReadOnlyError("gc_expired on readonly store")
 

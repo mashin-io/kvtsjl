@@ -6,7 +6,7 @@ import sqlite3
 from typing import Any
 
 from kvtsjl import KeyLayout, KvSet, SerDe, TtlPolicy
-from kvtsjl.backends.sql import SqlDbField, SqlDbKvSet, SqlDbRow
+from kvtsjl.backends.sql import ExpiryBinding, SqlDbField, SqlDbKvSet, SqlDbRow
 
 
 def str_sql_row_serde() -> SerDe[str, SqlDbRow]:
@@ -26,6 +26,7 @@ def make_sql_kvset(
     leaf_key_fields: tuple[str, ...] = ("id",),
     scope_fields: tuple[str, ...] = (),
     scope_schema: tuple[str, ...] | None = None,
+    expiry_binding: ExpiryBinding = ExpiryBinding.LATE,
 ) -> SqlDbKvSet[str, str]:
     kvset = KvSet.with_str_keys(
         name,
@@ -41,6 +42,7 @@ def make_sql_kvset(
         leaf_key_fields=leaf_key_fields,
         scope_fields=scope_fields,
         fields=(SqlDbField("value"),),
+        expiry_binding=expiry_binding,
     )
 
 
