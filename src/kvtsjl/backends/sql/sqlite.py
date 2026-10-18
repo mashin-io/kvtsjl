@@ -181,6 +181,34 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             deleted += int(cur.rowcount)
         self._after_write()
         return deleted
+
+    def _key_parts_filters(
+        self,
+        *,
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+        after_key: SqlDbRow | None,
+    ) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for field in key_fields:
+            if field in exact:
+                clauses.append(f"{_quote_ident(field)}=?")
+                params.append(exact[field])
+            elif field in prefixes:
+                clauses.append(f"{_quote_ident(field)} LIKE ? ESCAPE '\\'")
+                params.append(f"{_escape_like(prefixes[field])}%")
+        if after_key is not None:
+            missing = [f for f in key_fields if f not in after_key]
+            if missing:
+                raise ValueError(f"after_key missing key fields: {missing}")
+            tuple_cols = ", ".join(_quote_ident(f) for f in key_fields)
+            placeholders = ", ".join("?" for _ in key_fields)
+            clauses.append(f"({tuple_cols}) > ({placeholders})")
+            params.extend(after_key[f] for f in key_fields)
+        return clauses, params
+
     def scan_by_key_parts(
         self,
         *,
@@ -192,21 +220,51 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     ) -> Iterator[SqlDbRow]:
         cols = ", ".join(_quote_ident(c) for c in columns)
         t = _quote_ident(table)
-        clauses: list[str] = []
-        params: list[Any] = []
-        for field in key_fields:
-            if field in exact:
-                clauses.append(f"{_quote_ident(field)}=?")
-                params.append(exact[field])
-            elif field in prefixes:
-                clauses.append(f"{_quote_ident(field)} LIKE ? ESCAPE '\\'")
-                params.append(f"{_escape_like(prefixes[field])}%")
+        clauses, params = self._key_parts_filters(
+            key_fields=key_fields,
+            exact=exact,
+            prefixes=prefixes,
+            after_key=None,
+        )
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         order = ", ".join(_quote_ident(f) for f in key_fields)
         sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order}"
         cur = self._conn.execute(sql, params)
         for row in cur:
             yield _row_from_sqlite(row)
+
+    def supports_paged_scan(self) -> bool:
+        return True
+
+    def scan_page_by_key_parts(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+        after_key: SqlDbRow | None,
+        page_size: int,
+    ) -> Sequence[SqlDbRow]:
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        if not key_fields:
+            raise ValueError("key_fields must be non-empty")
+        cols = ", ".join(_quote_ident(c) for c in columns)
+        t = _quote_ident(table)
+        clauses, params = self._key_parts_filters(
+            key_fields=key_fields,
+            exact=exact,
+            prefixes=prefixes,
+            after_key=after_key,
+        )
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        order = ", ".join(_quote_ident(f) for f in key_fields)
+        sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order} LIMIT ?"
+        params.append(page_size)
+        cur = self._conn.execute(sql, params)
+        return [_row_from_sqlite(row) for row in cur]
 
     def supports_scan_ordering(self) -> bool:
         return True

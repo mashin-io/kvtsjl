@@ -111,6 +111,39 @@ class SqlDbClientAdapter(ABC):
         """
         return False
 
+    def supports_paged_scan(self) -> bool:
+        """Whether this adapter implements ``scan_page_by_key_parts``.
+
+        Default ``False``: the store streams ``scan_by_key_parts`` (one query,
+        connection held for the iterator). Opt in for keyset pages so each
+        page is a bounded fetch — no connection held across pages, and
+        ``ScanCursor`` resumes with ``after_key`` instead of a client-side seek.
+        """
+        return False
+
+    def scan_page_by_key_parts(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+        after_key: SqlDbRow | None,
+        page_size: int,
+    ) -> Sequence[SqlDbRow]:
+        """One keyset page: rows with ``key_fields > after_key``, ordered, limited.
+
+        Same equality/prefix filters as ``scan_by_key_parts``. When
+        ``after_key`` is set it must contain every ``key_fields`` column; the
+        page starts strictly after that full key (SQL row-value compare).
+        Returns a materialized sequence so the caller can close the underlying
+        cursor/connection before the next page.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement scan_page_by_key_parts"
+        )
+
     def scan_ordered(
         self,
         *,

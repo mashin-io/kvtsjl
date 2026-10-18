@@ -14,6 +14,7 @@ from kvtsjl import ExpiryGc, KeyLayout, TtlPolicy
 from kvtsjl.backends.sql import ExpiryBinding, SqlDbKvStore, SqliteSqlDbClientAdapter
 from kvtsjl.backends.sql.schema import SqlDbRow
 from kvtsjl.exceptions import KvStoreError, KvStoreReadOnlyError, KvStoreScanUnsupported
+from kvtsjl.store.schema.scan import Projection, ScanCursor, ScanOrder, ScanSpec
 from kvtsjl.store.schema.ttl import TTL_NONE_EXPIRES_AT
 from tests.conformance import assert_basic_crud, assert_batch_ops, assert_scan_and_scope
 from tests.sql_helpers import ensure_sql_table, make_composite_sql_kvset, make_sql_kvset
@@ -918,3 +919,195 @@ def test_sql_rebind_keeps_store_identity_and_routes_reads(
             ).fetchone()[0]
             == 1
         )
+
+
+class _PagingAdapter(SqliteSqlDbClientAdapter):
+    """Records keyset page fetches (after_key + page_size)."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        super().__init__(connection)
+        self.page_calls: list[dict[str, Any]] = []
+        self._paged = True
+
+    def supports_paged_scan(self) -> bool:
+        return self._paged
+
+    def disable_paged_scan(self) -> None:
+        self._paged = False
+
+    def scan_page_by_key_parts(
+        self,
+        *,
+        table: str,
+        columns: Sequence[str],
+        key_fields: Sequence[str],
+        exact: Mapping[str, Any],
+        prefixes: Mapping[str, str],
+        after_key: SqlDbRow | None,
+        page_size: int,
+    ) -> Sequence[SqlDbRow]:
+        self.page_calls.append(
+            {
+                "after_key": None if after_key is None else dict(after_key),
+                "page_size": page_size,
+            }
+        )
+        return super().scan_page_by_key_parts(
+            table=table,
+            columns=columns,
+            key_fields=key_fields,
+            exact=exact,
+            prefixes=prefixes,
+            after_key=after_key,
+            page_size=page_size,
+        )
+
+
+@pytest.mark.sql
+def test_sql_scan_is_resumable_and_key_ordered(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("paged")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _PagingAdapter(sqlite_conn)
+    store = SqlDbKvStore(sql_kvset, adapter=adapter)
+    assert store.scan_capabilities().resumable is True
+    store.batch_set({k: k for k in ("a", "b", "c", "d", "e")})
+
+    # KEY_ASC contract: exact sequence, not a sorted-set equality.
+    assert list(store.scan()) == ["a", "b", "c", "d", "e"]
+    assert len(adapter.page_calls) >= 1
+
+    adapter.page_calls.clear()
+    first_spec: ScanSpec[str] = ScanSpec(
+        project=Projection.KEYS,
+        limit=2,
+        page_size=2,
+        order=ScanOrder.UNORDERED,
+    )
+    first = [row.key for row in store.scan_rows(first_spec)]
+    assert first == ["a", "b"]
+    assert adapter.page_calls[0]["after_key"] is None
+    assert adapter.page_calls[0]["page_size"] == 2
+
+    adapter.page_calls.clear()
+    rest_spec: ScanSpec[str] = ScanSpec(
+        project=Projection.KEYS,
+        page_size=2,
+        cursor=ScanCursor(token=first[-1]),
+    )
+    rest = [row.key for row in store.scan_rows(rest_spec)]
+    assert rest == ["c", "d", "e"]
+    assert adapter.page_calls[0]["after_key"] == {"id": "b"}
+    assert first[-1] not in rest
+    assert first + rest == ["a", "b", "c", "d", "e"]
+
+
+@pytest.mark.sql
+def test_sql_scan_pages_bound_each_adapter_fetch(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("page_bound")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _PagingAdapter(sqlite_conn)
+    store = SqlDbKvStore(sql_kvset, adapter=adapter)
+    store.batch_set({f"k{i}": str(i) for i in range(5)})
+
+    assert list(store.scan(page_size=2)) == ["k0", "k1", "k2", "k3", "k4"]
+    sizes = [c["page_size"] for c in adapter.page_calls]
+    assert sizes == [2, 2, 2]
+    afters = [c["after_key"] for c in adapter.page_calls]
+    assert afters[0] is None
+    assert afters[1] == {"id": "k1"}
+    assert afters[2] == {"id": "k3"}
+
+
+@pytest.mark.sql
+def test_sql_scan_batches_uses_keyset_pages(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("scan_batches_pages")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _PagingAdapter(sqlite_conn)
+    store = SqlDbKvStore(sql_kvset, adapter=adapter, batch_size=2)
+    store.batch_set({k: k for k in ("a", "b", "c")})
+
+    batches = list(store.scan_batches(page_size=2))
+    assert batches == [["a", "b"], ["c"]]
+    assert adapter.page_calls[0]["page_size"] == 2
+
+
+@pytest.mark.sql
+def test_sql_composite_cursor_resumes_under_scope(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    import json
+
+    sql_kvset = make_composite_sql_kvset()
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    root = SqlDbKvStore(
+        sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn)
+    )
+    acme = root.scoped(tenant="acme")
+    acme.set(("electronics", "laptop"), "p2")
+    acme.set(("electronics", "phone"), "p1")
+    acme.set(("home", "chair"), "p3")
+
+    ordered = list(acme.scan())
+    assert ordered == [
+        ("electronics", "laptop"),
+        ("electronics", "phone"),
+        ("home", "chair"),
+    ]
+    first = ordered[0]
+    resume: ScanSpec[tuple[str, str]] = ScanSpec(
+        project=Projection.KEYS,
+        cursor=ScanCursor(token=json.dumps(list(first))),
+    )
+    rest = [row.key for row in acme.scan_rows(resume)]
+    assert rest == [
+        ("electronics", "phone"),
+        ("home", "chair"),
+    ]
+
+
+@pytest.mark.sql
+def test_sql_without_paged_scan_falls_back_and_is_not_resumable(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("no_pages")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    adapter = _PagingAdapter(sqlite_conn)
+    adapter.disable_paged_scan()
+    store = SqlDbKvStore(sql_kvset, adapter=adapter)
+    assert store.scan_capabilities().resumable is False
+    store.batch_set({k: k for k in ("a", "b", "c")})
+    assert list(store.scan()) == ["a", "b", "c"]
+    assert adapter.page_calls == []
+
+
+def test_a_page_that_does_not_advance_raises_instead_of_looping(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    """``SqlDbClientAdapter`` is implemented by third parties.
+
+    An adapter that ignores ``after_key`` returns the same full page forever.
+    Without a guard the scan spins rather than failing, so the loop names the
+    adapter instead of hanging.
+    """
+
+    class IgnoresAfterKey(SqliteSqlDbClientAdapter):
+        def scan_page_by_key_parts(
+            self, *, after_key: SqlDbRow | None, **kw: Any
+        ) -> Sequence[SqlDbRow]:
+            return super().scan_page_by_key_parts(after_key=None, **kw)
+
+    sql_kvset = make_sql_kvset("stuck")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    store = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn))
+    for i in range(6):
+        store.set(f"k{i}", "v")
+
+    stuck = store.rebind(IgnoresAfterKey(sqlite_conn))
+    with pytest.raises(KvStoreError, match="does not advance after_key"):
+        list(stuck.scan(page_size=2))

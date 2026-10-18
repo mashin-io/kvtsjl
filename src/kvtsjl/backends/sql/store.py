@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
+import json
 import time
 from typing import Any, cast
 
@@ -27,6 +28,7 @@ from kvtsjl.store.schema.scan import (
     OrderBy,
     Projection,
     ScanCapabilities,
+    ScanCursor,
     ScanOrder,
     ScanRow,
     ScanSpec,
@@ -583,7 +585,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         ``KEY_ASC`` rests on the adapter contract: ``scan_by_key_parts`` must
         yield rows in ascending ``key_fields`` order (the shipped SQLite adapter
         emits ``ORDER BY`` on them). ``orderable_columns`` is the declared
-        column set, so an unknown column is rejected by name.
+        column set, so an unknown column is rejected by name. ``resumable``
+        follows ``supports_paged_scan``: keyset pages + ``ScanCursor``.
         """
         orderable: frozenset[str] | None = None
         if self._adapter.supports_scan_ordering():
@@ -591,7 +594,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return ScanCapabilities(
             pushdown=frozenset({KeyPrefix}),
             orders=frozenset({ScanOrder.UNORDERED, ScanOrder.KEY_ASC}),
-            resumable=False,
+            resumable=self._adapter.supports_paged_scan(),
             # Only the ordered path fills ScanRow.stat; the default path goes
             # through compile_from_scan_entries, which has no stat to give.
             # Claiming True here would be the same wrong capability report this
@@ -630,6 +633,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
 
     def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
         if not spec.order_by:
+            if self._adapter.supports_paged_scan():
+                return self._compile_keyset_scan(spec)
             return compile_from_scan_entries(
                 self.scan_entries, spec, backend=type(self).__name__
             )
@@ -661,6 +666,139 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
         enforce_strict(spec, residual, backend=type(self).__name__)
         return CompiledScan(rows=rows, residual=residual, pushed=frozenset(pushed))
+
+    def _compile_keyset_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
+        if self.kvset.key_layout is not KeyLayout.LITERAL:
+            raise KvStoreScanUnsupported(
+                "SqlDbKvStore scan requires KeyLayout.LITERAL "
+                f"(got {self.kvset.key_layout!r})"
+            )
+        user_prefix, residual = peel_key_prefix(spec.where)
+        pushed = {"keyset"}
+        if user_prefix is not None:
+            pushed.add("KeyPrefix")
+        if spec.cursor is not None:
+            pushed.add("cursor")
+        after_key = (
+            self._after_key_from_cursor(spec.cursor)
+            if spec.cursor is not None
+            else None
+        )
+        rows = self._iter_keyset_rows(
+            user_prefix=user_prefix,
+            after_key=after_key,
+            page_size=spec.page_size,
+            include_values=spec.project is Projection.ENTRIES,
+            limit=spec.limit,
+        )
+        enforce_strict(spec, residual, backend=type(self).__name__)
+        return CompiledScan(rows=rows, residual=residual, pushed=frozenset(pushed))
+
+    def _after_key_from_cursor(self, cursor: ScanCursor) -> SqlDbRow:
+        """Decode a ``ScanCursor`` into the full SQL key row for keyset resume.
+
+        Single-leaf keys use the leaf string as the token (same shape as memory's
+        ``ScanCursor(token=last_key)``). Composite leaves use a JSON array of
+        leaf field values — opaque, stable, and independent of ``str(tuple)``.
+        """
+        sk = self._sql_kvset
+        fields = sk.leaf_key_fields
+        try:
+            if len(fields) == 1:
+                blob = cursor.token
+                if sk.scope_fields:
+                    key = self.kvset.key_serde.deserialize(blob)
+                else:
+                    decoded = self._decode_key_from_physical(blob)
+                    if decoded is None:
+                        raise KvStoreError(
+                            f"invalid scan cursor token for SqlDbKvStore: "
+                            f"{cursor.token!r}"
+                        )
+                    key = decoded
+                return self._full_key_row(key, require_scope=True)
+            values = json.loads(cursor.token)
+            if not isinstance(values, list) or len(values) != len(fields):
+                raise KvStoreError(
+                    f"scan cursor token must be a JSON array of "
+                    f"{len(fields)} leaf key parts"
+                )
+            key = cast(K, tuple(values))
+            return self._full_key_row(key, require_scope=True)
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise KvStoreError(
+                f"invalid scan cursor token for SqlDbKvStore: {cursor.token!r}"
+            ) from exc
+
+    def _iter_keyset_rows(
+        self,
+        *,
+        user_prefix: K | None,
+        after_key: SqlDbRow | None,
+        page_size: int,
+        include_values: bool,
+        limit: int | None,
+    ) -> Iterator[ScanRow[K, V]]:
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        sk = self._sql_kvset
+        exact = self._scope_key_row(require_all=False)
+        prefixes = self._leaf_prefix_map(user_prefix)
+        expired_keys: list[SqlDbRow] = []
+        after = after_key
+        yielded = 0
+        while True:
+            page = self._adapter.scan_page_by_key_parts(
+                table=self._table,
+                columns=sk.select_columns(),
+                key_fields=sk.key_fields,
+                exact=exact,
+                prefixes=prefixes,
+                after_key=after,
+                page_size=page_size,
+            )
+            if not page:
+                break
+            for row in page:
+                if self._row_expired(row):
+                    if self._expiry_gc is ExpiryGc.LAZY_DELETE:
+                        expired_keys.append({f: row[f] for f in sk.key_fields})
+                    continue
+                decoded = self._decode_leaf_key(row)
+                if decoded is None:
+                    continue
+                value = (
+                    self.kvset.value_serde.deserialize(row) if include_values else None
+                )
+                yield ScanRow(key=decoded, value=value)
+                yielded += 1
+                if limit is not None and yielded >= limit:
+                    if expired_keys:
+                        self._adapter.delete_by_keys(
+                            table=self._table,
+                            key_fields=sk.key_fields,
+                            keys=expired_keys,
+                        )
+                    return
+            advanced = {f: page[-1][f] for f in sk.key_fields}
+            if after is not None and advanced == after:
+                # A full page that ends where the last one ended means the
+                # adapter ignored after_key. Looping would spin forever on the
+                # same rows, so say which adapter is at fault instead.
+                raise KvStoreError(
+                    f"{type(self._adapter).__name__}.scan_page_by_key_parts "
+                    "returned a page that does not advance after_key; "
+                    "the scan would never terminate"
+                )
+            after = advanced
+            if len(page) < page_size:
+                break
+        if expired_keys:
+            self._adapter.delete_by_keys(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=expired_keys,
+            )
 
     def _iter_ordered_rows(
         self,
@@ -712,6 +850,16 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 "SqlDbKvStore scan requires KeyLayout.LITERAL "
                 f"(got {self.kvset.key_layout!r})"
             )
+        if self._adapter.supports_paged_scan():
+            for row in self._iter_keyset_rows(
+                user_prefix=query.prefix,
+                after_key=None,
+                page_size=query.page_size,
+                include_values=query.include_values,
+                limit=None,
+            ):
+                yield row.key, row.value
+            return
         sk = self._sql_kvset
         exact = self._scope_key_row(require_all=False)
         prefixes = self._leaf_prefix_map(query.prefix)
