@@ -139,12 +139,20 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         *,
         created_at: datetime | None = None,
     ) -> float | None:
-        if ttl is None:
-            return None
-        secs = ttl.ttl_seconds()
-        if secs is None:
+        """Bind a concrete death time on every write.
+
+        Relative collection TTL and per-write ``ttl=`` both store
+        ``expires_at = clock + seconds``. Explicit ``TtlPolicy.none()`` stores
+        the far-future sentinel. Only a kvset with **no** TTL policy writes
+        NULL, which then means "never expires".
+        """
+        secs = self.resolve_ttl_seconds(ttl)
+        if secs is not None:
+            return _clock_base(created_at) + secs
+        if ttl is not None:
+            # Explicit never — keep distinct from "no policy" NULL.
             return TTL_NONE_EXPIRES_AT.timestamp()
-        return _clock_base(created_at) + secs
+        return None
 
     def _scope_by_kind(self) -> dict[str, str]:
         return {s.kind: s.id for s in self.scope.segments}
