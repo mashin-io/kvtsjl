@@ -503,13 +503,32 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         require_write_clock_supported(
             created_at, allowed=True, backend="SqlDbKvStore"
         )
-        row = self._build_write_row(key, value, ttl=ttl, created_at=created_at)
+        self._write_rows([self._build_write_row(key, value, ttl=ttl, created_at=created_at)])
+
+    def _write_rows(self, rows: Sequence[SqlDbRow]) -> None:
+        """One write path, choosing the shape the kvset's sharing demands."""
         sk = self._sql_kvset
-        self._adapter.upsert_rows(
+        if not sk.shares_table:
+            self._adapter.upsert_rows(
+                table=self._table,
+                key_fields=sk.key_fields,
+                write_columns=sk.write_columns(),
+                rows=rows,
+            )
+            return
+        if not self._adapter.supports_update_first():
+            # Falling back to upsert is the write that cannot succeed on a
+            # shared table, so name the adapter instead of failing later with
+            # a NOT NULL error that points nowhere.
+            raise KvStoreError(
+                f"{type(self._adapter).__name__} does not support "
+                "upsert_rows_update_first, which shares_table=True requires"
+            )
+        self._adapter.upsert_rows_update_first(
             table=self._table,
             key_fields=sk.key_fields,
             write_columns=sk.write_columns(),
-            rows=[row],
+            rows=rows,
         )
 
     def delete(self, key: K) -> bool:
@@ -553,19 +572,13 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         require_write_clock_supported(
             created_at, allowed=True, backend="SqlDbKvStore"
         )
-        sk = self._sql_kvset
         pairs = list(items.items())
         for chunk in chunk_sequence(pairs, self.batch_size):
             rows = [
                 self._build_write_row(k, v, ttl=ttl, created_at=created_at)
                 for k, v in chunk
             ]
-            self._adapter.upsert_rows(
-                table=self._table,
-                key_fields=sk.key_fields,
-                write_columns=sk.write_columns(),
-                rows=rows,
-            )
+            self._write_rows(rows)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         deleted = 0

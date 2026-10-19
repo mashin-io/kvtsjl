@@ -1111,3 +1111,126 @@ def test_a_page_that_does_not_advance_raises_instead_of_looping(
     stuck = store.rebind(IgnoresAfterKey(sqlite_conn))
     with pytest.raises(KvStoreError, match="does not advance after_key"):
         list(stuck.scan(page_size=2))
+
+
+def test_not_null_sibling_blocks_a_non_owning_view_even_on_an_existing_row() -> None:
+    """The case the sharing docs got wrong, pinned so it cannot drift back.
+
+    ``set`` is one INSERT ... ON CONFLICT DO UPDATE, and SQLite validates the
+    INSERT's NOT NULL columns before resolving the conflict. So a NOT NULL
+    sibling blocks a non-owning view's *update*, not just its insert — which
+    is why NOT NULL cannot be used to say which view may create a row.
+
+    The earlier sharing test passed only because its siblings were nullable.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        'CREATE TABLE "shared_1" (id TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT, '
+        "updated_at REAL NOT NULL, expires_at REAL)"
+    )
+    owner = SqlDbKvStore(_column_view("a"), adapter=SqliteSqlDbClientAdapter(conn))
+    other = SqlDbKvStore(_column_view("b"), adapter=SqliteSqlDbClientAdapter(conn))
+
+    owner.set("k", "from-A")                      # the row exists and is complete
+    assert owner.get("k") == "from-A"
+
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+        other.set("k", "from-B")                  # still refused
+
+
+def test_autocommit_is_readable_on_the_reference_adapter() -> None:
+    conn = sqlite3.connect(":memory:")
+    assert SqliteSqlDbClientAdapter(conn).autocommit is True
+    assert SqliteSqlDbClientAdapter(conn, autocommit=False).autocommit is False
+
+
+def _shared_view(field: str, *, shares_table: bool) -> Any:
+    from dataclasses import replace
+
+    return replace(_column_view(field), shares_table=shares_table)
+
+
+def _shared_table(conn: sqlite3.Connection, *, not_null: bool) -> None:
+    sib = "TEXT NOT NULL" if not_null else "TEXT"
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        f'CREATE TABLE "shared_1" (id TEXT PRIMARY KEY, a {sib}, b TEXT, '
+        "updated_at REAL NOT NULL, expires_at REAL)"
+    )
+
+
+def test_shares_table_lets_a_non_owning_view_update_a_not_null_row() -> None:
+    """The case plain upsert cannot do: NOT NULL sibling, row already exists."""
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=True)
+    owner = SqlDbKvStore(
+        _shared_view("a", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+    )
+    other = SqlDbKvStore(
+        _shared_view("b", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+    )
+
+    owner.set("k", "from-A")
+    other.set("k", "from-B")          # refused without shares_table
+
+    assert (owner.get("k"), other.get("k")) == ("from-A", "from-B")
+    assert len(conn.execute('SELECT id FROM "shared_1"').fetchall()) == 1
+
+
+def test_shares_table_still_refuses_creation_by_a_non_owning_view() -> None:
+    """Update-first must not quietly start creating hollow rows."""
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=True)
+    other = SqlDbKvStore(
+        _shared_view("b", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+        other.set("missing", "from-B")
+    assert conn.execute('SELECT id FROM "shared_1"').fetchall() == []
+
+
+def test_shares_table_batch_set_updates_and_inserts_in_one_call() -> None:
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=False)
+    view = SqlDbKvStore(
+        _shared_view("a", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+    )
+    view.set("existing", "old")
+    view.batch_set({"existing": "new", "fresh": "made"})
+    assert (view.get("existing"), view.get("fresh")) == ("new", "made")
+
+
+def test_shares_table_refuses_an_adapter_that_cannot_update_first() -> None:
+    """Silently falling back is the write that cannot succeed."""
+
+    class NoUpdateFirst(SqliteSqlDbClientAdapter):
+        def supports_update_first(self) -> bool:
+            return False
+
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=False)
+    view = SqlDbKvStore(_shared_view("a", shares_table=True), adapter=NoUpdateFirst(conn))
+    with pytest.raises(KvStoreError, match="upsert_rows_update_first"):
+        view.set("k", "v")
+
+
+def test_without_shares_table_writes_stay_a_single_upsert() -> None:
+    """The default path must not pay for a feature it does not use."""
+    calls: list[str] = []
+
+    class Counting(SqliteSqlDbClientAdapter):
+        def upsert_rows(self, **kw: Any) -> None:
+            calls.append("upsert")
+            return super().upsert_rows(**kw)
+
+        def upsert_rows_update_first(self, **kw: Any) -> None:
+            calls.append("update_first")
+            return super().upsert_rows_update_first(**kw)
+
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=False)
+    view = SqlDbKvStore(_shared_view("a", shares_table=False), adapter=Counting(conn))
+    view.set("k", "v")
+    view.batch_set({"x": "1", "y": "2"})
+    assert calls == ["upsert", "upsert"]

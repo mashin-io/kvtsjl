@@ -81,10 +81,19 @@ class SqlDbKvSet[K, V]:
     nullable or carry a DEFAULT**. A ``NOT NULL`` column with no default makes
     that first insert impossible from any view that does not own it.
 
-    That constraint is also a tool. Leaving the *creating* view's columns
-    ``NOT NULL`` without a default enforces which view may create the row: a
-    non-owning view that writes first fails loudly instead of leaving a hollow
-    row behind for the owner to find.
+    The constraint applies to **every** write, not only the creating one.
+    ``set`` is one ``INSERT ... ON CONFLICT DO UPDATE``, and SQLite checks the
+    INSERT's ``NOT NULL`` columns before it resolves the conflict, so a
+    non-owning view cannot write even to a row that already exists::
+
+        CREATE TABLE t(k TEXT PRIMARY KEY, a TEXT NOT NULL, b TEXT);
+        INSERT INTO t VALUES('k','A',NULL);
+        INSERT INTO t(k,b) VALUES('k','B')
+          ON CONFLICT(k) DO UPDATE SET b=excluded.b;
+        -- IntegrityError: NOT NULL constraint failed: t.a
+
+    So ``NOT NULL`` on another view's columns is not a way to control which
+    view may create a row. It stops that view writing at all.
 
     ``updated_at`` and ``expires_at`` are row-level, not per-view: the view
     that writes last sets the row's clock for everyone sharing it. Pass
@@ -100,6 +109,13 @@ class SqlDbKvSet[K, V]:
     updated_at_field: str = "updated_at"
     expires_at_field: str = "expires_at"
     expiry_binding: ExpiryBinding = ExpiryBinding.LATE
+    shares_table: bool = False
+    """Whether other views write different columns of this same table.
+
+    Declaring it switches writes to update-first, so a view that does not own
+    a ``NOT NULL`` column can still update a row that already exists. Left
+    ``False``, writes stay a single batched upsert.
+    """
 
     def __post_init__(self) -> None:
         if not self.leaf_key_fields:

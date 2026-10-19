@@ -64,6 +64,15 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         return self._db_name
 
     @property
+    def autocommit(self) -> bool:
+        """Whether this adapter commits after each write.
+
+        ``False`` means the caller owns the transaction, and a write with none
+        open is refused rather than silently lost.
+        """
+        return self._autocommit
+
+    @property
     def connection(self) -> sqlite3.Connection:
         return self._conn
 
@@ -160,6 +169,49 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             )
         params = [tuple(row.get(c) for c in write_columns) for row in rows]
         self._conn.executemany(sql, params)
+        self._after_write()
+
+    def supports_update_first(self) -> bool:
+        return True
+
+    def upsert_rows_update_first(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> None:
+        if not rows:
+            return
+        missing = [f for f in key_fields if f not in write_columns]
+        if missing:
+            raise ValueError(f"key_fields missing from write_columns: {missing}")
+        self._ensure_write_txn()
+        t = _quote_ident(table)
+        key_set = set(key_fields)
+        set_cols = [c for c in write_columns if c not in key_set]
+        assigns = ", ".join(f"{_quote_ident(c)}=?" for c in set_cols)
+        where = " AND ".join(f"{_quote_ident(f)}=?" for f in key_fields)
+        update_sql = f"UPDATE {t} SET {assigns} WHERE {where}"
+        cols = ", ".join(_quote_ident(c) for c in write_columns)
+        placeholders = ", ".join("?" for _ in write_columns)
+        insert_sql = f"INSERT INTO {t} ({cols}) VALUES ({placeholders})"
+
+        # Row at a time: executemany cannot report which rows matched.
+        for row in rows:
+            params = [row.get(c) for c in set_cols] + [row.get(f) for f in key_fields]
+            if self._conn.execute(update_sql, params).rowcount:
+                continue
+            try:
+                self._conn.execute(insert_sql, [row.get(c) for c in write_columns])
+            except sqlite3.IntegrityError as exc:
+                if "UNIQUE" not in str(exc):
+                    # NOT NULL from a view that does not own the column: the
+                    # row genuinely cannot be created from here. Surface it.
+                    raise
+                # Another writer inserted between the update and the insert.
+                self._conn.execute(update_sql, params)
         self._after_write()
 
     def delete_by_keys(

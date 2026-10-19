@@ -46,6 +46,31 @@ class SqlDbClientAdapter(ABC):
     adapter defaults to ``autocommit=True`` (commit after each write) for
     backward compatibility; pass ``autocommit=False`` when the client opens
     the transaction.
+
+    **Wrapping the reference adapter.** Only five methods are abstract, so a
+    wrapper that forwards those and nothing else type-checks, passes its tests
+    and runs correctly — on the slow path for everything. The optional
+    capabilities default to "unsupported", and a wrapper inherits that default
+    rather than the adapter it wraps:
+
+    ===========================  =========================================
+    Forward this                 ...or lose
+    ===========================  =========================================
+    ``supports_scan_ordering``   ``order_by`` entirely — it raises
+    ``scan_ordered``             (forward ``live`` too, or a pushed ``LIMIT``
+                                 counts rows that have already expired)
+    ``supports_expiry_scan``     expiry pushdown; GC reads every row
+    ``scan_expired``
+    ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
+    ``supports_paged_scan``      keyset paging; scans materialise in full
+    ``scan_page_by_key_parts``
+    ===========================  =========================================
+
+    Forwarding a ``supports_*`` flag without its method is worse than
+    forwarding neither: the store takes the fast path and the method raises.
+    Subclassing ``SqliteSqlDbClientAdapter`` instead of delegating to it
+    inherits all of these, which is the simpler option when the wrapper only
+    needs to intercept a few calls.
     """
 
     @property
@@ -99,6 +124,35 @@ class SqlDbClientAdapter(ABC):
         keys: Sequence[SqlDbRow],
     ) -> int:
         """Delete rows by full key equality; return deleted count."""
+
+    def supports_update_first(self) -> bool:
+        """Whether this adapter implements ``upsert_rows_update_first``.
+
+        Needed only by a kvset declaring ``shares_table``; the store refuses
+        rather than silently falling back, because the fallback is the write
+        that cannot succeed.
+        """
+        return False
+
+    def upsert_rows_update_first(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> None:
+        """Update by key, inserting only where no row matched.
+
+        ``INSERT ... ON CONFLICT DO UPDATE`` validates the insert's
+        ``NOT NULL`` columns before resolving the conflict, so on a shared
+        table it refuses a view that does not own one — even when the row
+        already exists. Updating first avoids that, while still letting the
+        insert fail loudly when a non-owning view would have to create a row.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement upsert_rows_update_first"
+        )
 
     def supports_scan_ordering(self) -> bool:
         """Whether this adapter implements ``scan_ordered``.
