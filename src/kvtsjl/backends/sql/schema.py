@@ -138,6 +138,7 @@ class SqlDbKvSet[K, V]:
         updated_at_field: str = "updated_at",
         expires_at_field: str = "expires_at",
         expiry_binding: ExpiryBinding = ExpiryBinding.LATE,
+        shares_table: bool = False,
     ) -> SqlDbKvSet[K, V]:
         """Build a descriptor; pass ``key_field`` for a single leaf PK column."""
         if leaf_key_fields is not None and key_field is not None:
@@ -154,6 +155,7 @@ class SqlDbKvSet[K, V]:
             updated_at_field=updated_at_field,
             expires_at_field=expires_at_field,
             expiry_binding=expiry_binding,
+            shares_table=shares_table,
         )
 
     @property

@@ -738,7 +738,7 @@ def _column_view(field: str) -> Any:
             blob_type=dict,
         ),
     )
-    return SqlDbKvSet(kvset=kvset, leaf_key_fields=("id",), fields=(SqlDbField(field),))
+    return SqlDbKvSet.create(kvset, fields=(SqlDbField(field),), key_field="id")
 
 
 def test_set_is_already_insert_or_update_on_a_shared_table() -> None:
@@ -1146,9 +1146,14 @@ def test_autocommit_is_readable_on_the_reference_adapter() -> None:
 
 
 def _shared_view(field: str, *, shares_table: bool) -> Any:
-    from dataclasses import replace
+    from kvtsjl.backends.sql.schema import SqlDbField, SqlDbKvSet
 
-    return replace(_column_view(field), shares_table=shares_table)
+    return SqlDbKvSet.create(
+        _column_view(field).kvset,
+        fields=(SqlDbField(field),),
+        key_field="id",
+        shares_table=shares_table,
+    )
 
 
 def _shared_table(conn: sqlite3.Connection, *, not_null: bool) -> None:
@@ -1234,3 +1239,20 @@ def test_without_shares_table_writes_stay_a_single_upsert() -> None:
     view.set("k", "v")
     view.batch_set({"x": "1", "y": "2"})
     assert calls == ["upsert", "upsert"]
+
+
+def test_create_carries_shares_table_through_its_validation() -> None:
+    """Set it via ``create``; ``dataclasses.replace`` skips the checks."""
+    from kvtsjl.backends.sql.schema import SqlDbField, SqlDbKvSet
+
+    base = _column_view("a").kvset
+    assert SqlDbKvSet.create(
+        base, fields=(SqlDbField("a"),), key_field="id"
+    ).shares_table is False
+    assert SqlDbKvSet.create(
+        base, fields=(SqlDbField("a"),), key_field="id", shares_table=True
+    ).shares_table is True
+
+    # and the validation still runs with it set
+    with pytest.raises(ValueError, match="key_field or leaf_key_fields"):
+        SqlDbKvSet.create(base, fields=(SqlDbField("a"),), shares_table=True)
