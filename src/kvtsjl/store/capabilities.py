@@ -7,7 +7,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal, Self, cast, overload
 
-from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreScopeError
+from kvtsjl.exceptions import (
+    KvStoreError,
+    KvStoreScanUnsupported,
+    KvStoreScopeError,
+)
 from kvtsjl.scope import Scope
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
 from kvtsjl.store.schema.policy import SyncPolicy
@@ -77,6 +81,65 @@ class ScannableMixin[K, V](ABC):
         Leaves may override ``scan_rows`` for full ``ScanSpec`` support; the
         default adapts ``ScanSpec`` → ``ScanQuery``.
         """
+
+    def supports_scoped_scan(self) -> bool:
+        """Whether ``scan_scoped`` can recover the scope from a key.
+
+        Needs a declared ``scope_schema`` to know the arity, and a layout that
+        keeps the scope readable in the key. ``KeyLayout.HASHED`` discards it,
+        so there is nothing to recover.
+        """
+        kvset = getattr(self, "kvset", None)
+        if kvset is None or getattr(kvset, "scope_schema", None) is None:
+            return False
+        return self.key_layout() is not KeyLayout.HASHED
+
+    def scan_scoped(
+        self,
+        prefix: K | None = None,
+        *,
+        include_values: bool = False,
+        page_size: int | None = None,
+        where: Predicate[K] | None = None,
+        limit: int | None = None,
+    ) -> Iterator[tuple[Scope, K, V | None]]:
+        """Scan yielding each entry's **full** scope, not just the leaf.
+
+        ``scan`` decodes the leaf against the scope the store is bound to, so
+        on an unscoped store the scope is simply part of the key it returns.
+        This recovers it: on a store bound to a prefix of the schema, the
+        entries are still only that prefix's, but each one comes back with its
+        whole scope.
+
+        Raises ``KvStoreError`` where the scope is not recoverable rather than
+        guessing — see ``supports_scoped_scan``.
+        """
+        if not self.supports_scoped_scan():
+            raise KvStoreError(
+                f"{type(self).__name__} cannot recover scopes from keys: "
+                "scan_scoped needs a declared scope_schema and a layout that "
+                "keeps the scope in the key"
+            )
+        me = cast(Any, self)
+        kvset = me.kvset
+        ops = kvset.blob_ops
+        scope_prefix = kvset.encode_in_key(me.scope, None)
+        rows: Iterator[Any] = me.scan(
+            prefix,
+            include_values=include_values,
+            page_size=page_size,
+            where=where,
+            limit=limit,
+        )
+        for row in rows:
+            leaf, value = row if include_values else (row, None)
+            leaf_blob = kvset.key_serde.serialize(leaf)
+            in_key = ops.join([scope_prefix, leaf_blob]) if scope_prefix else leaf_blob
+            decoded = kvset.decode_in_key(in_key)
+            if decoded is None:
+                continue
+            scope, real_leaf = decoded
+            yield scope, real_leaf, value
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """Yield ``ScanRow``s for ``spec`` (default: legacy ``scan_entries``)."""

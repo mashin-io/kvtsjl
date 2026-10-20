@@ -140,3 +140,89 @@ def test_a_schema_less_kvset_does_not_collide_across_arities() -> None:
 
     assert one.get("b:2:x") == "ONE", "the deeper scope overwrote this row"
     assert two.get("x") == "TWO"
+
+
+# --- R8: recover the scope a key was written under ---------------------------
+
+
+def _seeded() -> MemoryKvStore[str, str, str, str]:
+    store = MemoryKvStore(kvset())
+    store.scoped(user="alice", slug="notes").set("sha1", "A")
+    store.scoped(user="alice", slug="a:b").set("sha2", "B")
+    store.scoped(user="bob", slug="notes").set("sha3", "C")
+    return store
+
+
+def test_scan_scoped_yields_every_entry_with_its_full_scope() -> None:
+    got = {
+        (s.segments[0].id, s.segments[1].id, leaf)
+        for s, leaf, _ in _seeded().scan_scoped()
+    }
+    assert got == {
+        ("alice", "notes", "sha1"),
+        ("alice", "a:b", "sha2"),   # separator inside an id survives
+        ("bob", "notes", "sha3"),
+    }
+
+
+def test_scan_scoped_on_a_partial_scope_keeps_the_filter_and_fills_the_scope() -> None:
+    got = {
+        (s.segments[0].id, s.segments[1].id, leaf)
+        for s, leaf, _ in _seeded().scoped(user="alice").scan_scoped()
+    }
+    assert got == {("alice", "notes", "sha1"), ("alice", "a:b", "sha2")}
+
+
+def test_scan_scoped_carries_values_when_asked() -> None:
+    rows = sorted(
+        (leaf, value) for _, leaf, value in _seeded().scan_scoped(include_values=True)
+    )
+    assert rows == [("sha1", "A"), ("sha2", "B"), ("sha3", "C")]
+    assert all(v is None for _, _, v in _seeded().scan_scoped())
+
+
+def test_scan_scoped_pages_without_dropping_or_duplicating() -> None:
+    store = MemoryKvStore(kvset())
+    for i in range(25):
+        store.scoped(user="u", slug=f"s{i:02d}").set(f"k{i:02d}", "v")
+    full = sorted(leaf for _, leaf, _ in store.scan_scoped())
+    for page in (1, 2, 7, 25, 100):
+        paged = sorted(leaf for _, leaf, _ in store.scan_scoped(page_size=page))
+        assert paged == full, f"page_size={page}"
+    assert len(full) == 25
+
+
+def test_scan_scoped_refuses_a_hashed_layout() -> None:
+    from kvtsjl.exceptions import KvStoreError
+    from kvtsjl.store.schema.layout import KeyLayout
+
+    hashed = KvSet.with_str_keys(
+        "h",
+        key_serde=SerDe.identity(str),
+        value_serde=SerDe.identity(str),
+        scope_schema=("user",),
+        key_layout=KeyLayout.HASHED,
+    )
+    store = MemoryKvStore(hashed)
+    assert store.supports_scoped_scan() is False
+    with pytest.raises(KvStoreError, match="cannot recover scopes"):
+        list(store.scan_scoped())
+
+
+def test_scan_scoped_refuses_a_kvset_without_a_schema() -> None:
+    from kvtsjl.exceptions import KvStoreError
+
+    store = MemoryKvStore(kvset(schema=None))
+    assert store.supports_scoped_scan() is False
+    with pytest.raises(KvStoreError, match="cannot recover scopes"):
+        list(store.scan_scoped())
+
+
+def test_plain_scan_is_unchanged() -> None:
+    """R8 adds a method; it must not alter what scan() returns."""
+    store = _seeded()
+    assert sorted(store.scoped(user="bob", slug="notes").list()) == ["sha3"]
+    assert sorted(store.scoped(user="alice").list()) == [
+        "slug:a%3Ab:sha2",
+        "slug:notes:sha1",
+    ]
