@@ -68,7 +68,12 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
         )
 
     def _physical_key_blob(self, key: K) -> KBLOB:
+        # Guards the path that actually writes: a leaf is only unambiguous
+        # when the number of scope segments is fixed, or the leaf is escaped.
+        escape_leaf = self.kvset.leaf_needs_escaping(self.scope)
         leaf = self.kvset.key_serde.serialize(key)
+        if escape_leaf:
+            leaf = self.kvset.blob_ops.escape(leaf)
         return self._item_key_blob(leaf)
 
     def _scan_prefix_blob(self, key_prefix: K | None) -> KBLOB:

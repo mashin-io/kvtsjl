@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kvtsjl.schema.blob_ops import BlobOps
+from kvtsjl.schema.blob_ops import BlobOps, escape_segment
 from kvtsjl.schema.ref import WireRef
 from kvtsjl.scope import Scope
 from kvtsjl.serde import SerDe
@@ -32,11 +32,13 @@ class CollectionBinding[KBLOB, COLL]:
         scope: Scope,
         *,
         str_serde: SerDe[str, KBLOB],
+        blob_ops: BlobOps[KBLOB],
     ) -> list[KBLOB]:
         parts: list[KBLOB] = []
+        sep = blob_ops.separator_str
         for seg in scope.segments:
-            parts.append(str_serde.serialize(seg.kind))
-            parts.append(str_serde.serialize(seg.id))
+            parts.append(str_serde.serialize(escape_segment(seg.kind, sep)))
+            parts.append(str_serde.serialize(escape_segment(seg.id, sep)))
         return parts
 
     def item_key(
@@ -48,7 +50,7 @@ class CollectionBinding[KBLOB, COLL]:
         blob_ops: BlobOps[KBLOB],
     ) -> KBLOB:
         parts = list(self.name_version_prefix)
-        parts.extend(self.scope_parts(scope, str_serde=str_serde))
+        parts.extend(self.scope_parts(scope, str_serde=str_serde, blob_ops=blob_ops))
         parts.append(key_blob)
         return blob_ops.join(parts)
 
@@ -61,7 +63,7 @@ class CollectionBinding[KBLOB, COLL]:
         key_prefix_blob: KBLOB | None = None,
     ) -> KBLOB:
         parts = list(self.name_version_prefix)
-        parts.extend(self.scope_parts(scope, str_serde=str_serde))
+        parts.extend(self.scope_parts(scope, str_serde=str_serde, blob_ops=blob_ops))
         if key_prefix_blob is not None:
             parts.append(key_prefix_blob)
         if not parts:
