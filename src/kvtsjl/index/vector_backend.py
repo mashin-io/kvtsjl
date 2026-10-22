@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
-from typing import override
+from typing import cast, override
 
 from kvtsjl.exceptions import KvStoreIndexError
 from kvtsjl.index.backend import IndexBackend
@@ -25,6 +25,41 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
     def supports_scoped_index(self) -> bool:
         """Whether this index isolates entries by the scope it is bound to."""
         return True
+
+    def is_patch_view(self) -> bool:
+        """Whether this view owns part of an entry rather than the whole.
+
+        A view with no ``document_of`` supplies no document, so it cannot have
+        created the entry and must not behave as though it owns it.
+        """
+        return self.index_set.document_of is None
+
+    def patch_write_is_skippable(self, previous: VectorRecord[D] | None) -> bool:
+        """Whether a patch write should be passed over rather than performed.
+
+        A patch view writing before the entry exists has nothing to attach to.
+        Creating a record with no document would put an entry in the index
+        that no search can rank and no reader can use, so the write is skipped.
+        It is not an error: the view wrote what it owns, and the entry it
+        belongs to simply is not there yet.
+        """
+        return self.is_patch_view() and previous is None
+
+    def clear_owned_fields(self, data: D) -> D:
+        """Drop this view's own fields, keeping the rest of the entry."""
+        owned = self.index_set.owned_fields
+        if owned is None:
+            raise KvStoreIndexError(
+                f"{type(self).__name__} is a patch view with no declared "
+                "owned_fields, so deleting from it cannot know which fields "
+                "are its own; declare them or delete through the owning view"
+            )
+        if not isinstance(data, dict):
+            return data
+        remaining = dict(cast("dict[str, object]", data))
+        for field in owned:
+            remaining.pop(field, None)
+        return cast("D", remaining)
 
     def supports_id_prefix_filter(self) -> bool:
         """Whether the scope filter can run *inside* the nearest-neighbour search.

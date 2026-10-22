@@ -28,6 +28,12 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
     only on payload. kvtsjl fills a field you declared and named; it never
     invents one. Leave unset where the backend can filter on the id prefix.
     """
+    owned_fields: Sequence[str] | None = None
+    """Metadata fields this view writes, for a view that owns part of an entry.
+
+    Deleting from such a view clears these and leaves the entry; without them
+    kvtsjl cannot tell which fields are yours, and will not guess.
+    """
     reuse_embedding: bool = True
     """Keep the stored embedding when the document has not changed.
 
@@ -61,6 +67,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         document_of: Callable[..., str | None] | None = None,
         reuse_embedding: bool = True,
         scope_fields: Mapping[str, str] | None = None,
+        owned_fields: Sequence[str] | None = None,
     ) -> IndexSet[K, D, ID, META]:
         return cls(
             name=name,
@@ -74,6 +81,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             document_of=document_of,
             reuse_embedding=reuse_embedding,
             scope_fields=scope_fields,
+            owned_fields=owned_fields,
         )
 
     @staticmethod
@@ -88,6 +96,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         document_of: Callable[..., str | None] | None = None,
         reuse_embedding: bool = True,
         scope_fields: Mapping[str, str] | None = None,
+        owned_fields: Sequence[str] | None = None,
     ) -> IndexSet[KK, DD, str, META_T]:
         return IndexSet(
             name=name,
@@ -101,6 +110,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             document_of=document_of,
             reuse_embedding=reuse_embedding,
             scope_fields=scope_fields,
+            owned_fields=owned_fields,
         )
 
     def same_schema_as(self, other: IndexSet[K, D, ID, META]) -> bool:

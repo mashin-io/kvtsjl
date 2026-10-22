@@ -21,6 +21,22 @@ def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b, strict=True)))
 
 
+_COLLECTIONS: dict[tuple[str, object], Any] = {}
+"""Storage keyed by collection name, as a real vector service is.
+
+A real backend resolves ``IndexSet.name`` to one collection, so two index
+objects over that name share entries — which is how a column-group view
+updates a field on an entry another view wrote. The reference backend keeps
+its records the same way, or tests against it would pass while the same code
+corrupted a shared collection.
+"""
+
+
+def reset_memory_vector_collections() -> None:
+    """Drop every shared collection (tests that reuse a name)."""
+    _COLLECTIONS.clear()
+
+
 class _VectorRoot[K, D]:
     """Storage shared by every scoped view of one index.
 
@@ -53,7 +69,13 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
         self.merge_data_fn = merge_data_fn
         self.embed_content = embed_content
         self.sync_on_write = sync_on_write
-        self._root: _VectorRoot[K, D] = root if root is not None else _VectorRoot()
+        if root is None:
+            collection = (index_set.name, index_set.version)
+            root = cast(
+                "_VectorRoot[K, D]",
+                _COLLECTIONS.setdefault(collection, _VectorRoot()),
+            )
+        self._root: _VectorRoot[K, D] = root
 
     def supports_id_prefix_filter(self) -> bool:
         # Brute force: the scope test runs per candidate, before anything is
@@ -143,6 +165,11 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
 
     @override
     def upsert(self, key: K, value: V, meta: VectorRecord[D]) -> None:
+        pid_existing = self._physical_id_blob(key)
+        if self.patch_write_is_skippable(
+            self._records.get(pid_existing, (None, None))[1]
+        ):
+            return
         emb = self._embedding_for(key, value, meta)
         stored = VectorRecord(
             data=meta.data,
@@ -179,6 +206,18 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
         pid = self._physical_id_blob(key)
         if pid not in self._records:
             return False
+        if self.is_patch_view():
+            leaf, stored = self._records[pid]
+            self._records[pid] = (
+                leaf,
+                VectorRecord(
+                    data=self.clear_owned_fields(stored.data),
+                    document=stored.document,
+                    embedding=stored.embedding,
+                    score=None,
+                ),
+            )
+            return True
         self._records.pop(pid, None)
         self._vectors.pop(pid, None)
         return True

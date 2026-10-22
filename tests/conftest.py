@@ -143,3 +143,18 @@ def sql_store(sqlite_conn: sqlite3.Connection) -> SqlDbKvStore[str, str]:
         sql_kvset,
         adapter=SqliteSqlDbClientAdapter(sqlite_conn, db_name="test-sqlite"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_vector_collections() -> Iterator[None]:
+    """Give each test its own vector collections.
+
+    ``MemoryVectorIndex`` shares records per ``IndexSet.name``, as a real
+    vector service does, so two tests reusing a name would otherwise see each
+    other's entries.
+    """
+    from kvtsjl.backends.index.memory_vector import reset_memory_vector_collections
+
+    reset_memory_vector_collections()
+    yield
+    reset_memory_vector_collections()
