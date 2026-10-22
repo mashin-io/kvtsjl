@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import datetime
 import math
-from typing import cast, override
+from typing import Any, cast, override
 
 from kvtsjl.bind import NativeStrCollectionBinder
 from kvtsjl.exceptions import KvStoreIndexError
@@ -13,11 +13,25 @@ from kvtsjl.index.logical.abc import IndexHit
 from kvtsjl.index.logical.vector import VectorQuery, VectorRecord, query_has_content
 from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.index.vector_backend import VectorIndexBackend
+from kvtsjl.scope import Scope
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 def _l2_distance(a: Sequence[float], b: Sequence[float]) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b, strict=True)))
+
+
+class _VectorRoot[K, D]:
+    """Storage shared by every scoped view of one index.
+
+    Keyed by the *scoped* physical id, so two scopes writing the same leaf key
+    occupy two entries. Filtering metadata after a keyed lookup cannot do that:
+    the second write would already have replaced the first.
+    """
+
+    def __init__(self) -> None:
+        self.vectors: dict[Any, tuple[float, ...]] = {}
+        self.records: dict[Any, tuple[K, VectorRecord[D]]] = {}
 
 
 class MemoryVectorIndex[K, V, D, ID, META, Q](
@@ -32,13 +46,38 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
         *,
         embed_content: Callable[[Q], Sequence[float]] | None = None,
         sync_on_write: bool = True,
+        scope: Scope | None = None,
+        root: _VectorRoot[K, D] | None = None,
     ) -> None:
-        super().__init__(index_set, binder=NativeStrCollectionBinder())
+        super().__init__(index_set, scope=scope, binder=NativeStrCollectionBinder())
         self.merge_data_fn = merge_data_fn
         self.embed_content = embed_content
         self.sync_on_write = sync_on_write
-        self._vectors: dict[K, tuple[float, ...]] = {}
-        self._records: dict[K, VectorRecord[D]] = {}
+        self._root: _VectorRoot[K, D] = root if root is not None else _VectorRoot()
+
+    def supports_id_prefix_filter(self) -> bool:
+        # Brute force: the scope test runs per candidate, before anything is
+        # ranked, so the top-k is drawn from in-scope entries only.
+        return True
+
+    def clone_with_scope(self, scope: Scope) -> MemoryVectorIndex[K, V, D, ID, META, Q]:
+        """A view of the same storage, bound to ``scope``."""
+        return type(self)(
+            self.index_set,
+            self.merge_data_fn,
+            embed_content=self.embed_content,
+            sync_on_write=self.sync_on_write,
+            scope=scope,
+            root=self._root,
+        )
+
+    @property
+    def _vectors(self) -> dict[Any, tuple[float, ...]]:
+        return self._root.vectors
+
+    @property
+    def _records(self) -> dict[Any, tuple[K, VectorRecord[D]]]:
+        return self._root.records
 
     @override
     def merge_data(self, key: K, value: V, *, previous: D | None) -> D:
@@ -67,15 +106,18 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
     def search(
         self, query: VectorQuery[Q], *, limit: int = 100
     ) -> Sequence[IndexHit[K, VectorRecord[D]]]:
+        self.assert_scoped_search_supported()
         if limit <= 0:
             return []
         q_emb = self._resolve_query_embedding(query)
         if q_emb is None:
             return []
         scored: list[tuple[float, IndexHit[K, VectorRecord[D]]]] = []
-        for key, vec in self._vectors.items():
+        for pid, vec in self._vectors.items():
+            key, stored = self._records[pid]
+            if not self.in_bound_scope_id(pid):
+                continue
             rank = _l2_distance(q_emb, vec)
-            stored = self._records[key]
             hit_meta = VectorRecord(
                 data=stored.data,
                 document=stored.document,
@@ -88,9 +130,10 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
 
     @override
     def get(self, key: K) -> VectorRecord[D] | None:
-        rec = self._records.get(key)
-        if rec is None:
+        found = self._records.get(self._physical_id_blob(key))
+        if found is None:
             return None
+        _leaf, rec = found
         return VectorRecord(
             data=rec.data,
             document=rec.document,
@@ -107,29 +150,35 @@ class MemoryVectorIndex[K, V, D, ID, META, Q](
             embedding=emb,
             score=None,
         )
-        self._vectors[key] = emb
-        self._records[key] = stored
+        pid = self._physical_id_blob(key)
+        self._vectors[pid] = emb
+        self._records[pid] = (key, stored)
 
     @override
     def set(self, key: K, value: VectorRecord[D], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        if key not in self._records:
+        pid = self._physical_id_blob(key)
+        if pid not in self._records:
             raise KvStoreIndexError("key is not in the index")
-        old = self._records[key]
+        _leaf, old = self._records[pid]
         emb = value.embedding if value.embedding is not None else old.embedding
         if emb is None:
             raise KvStoreIndexError("set requires embedding on record or existing index entry")
-        self._vectors[key] = emb
-        self._records[key] = VectorRecord(
-            data=value.data,
-            document=value.document,
-            embedding=emb,
-            score=None,
+        self._vectors[pid] = emb
+        self._records[pid] = (
+            key,
+            VectorRecord(
+                data=value.data,
+                document=value.document,
+                embedding=emb,
+                score=None,
+            ),
         )
 
     @override
     def delete(self, key: K) -> bool:
-        if key not in self._records:
+        pid = self._physical_id_blob(key)
+        if pid not in self._records:
             return False
-        self._records.pop(key, None)
-        self._vectors.pop(key, None)
+        self._records.pop(pid, None)
+        self._vectors.pop(pid, None)
         return True

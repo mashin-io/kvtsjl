@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from kvtsjl.schema.blob_ops import BlobOps, StrBlobOps
@@ -23,6 +23,11 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
     text_of: Callable[..., str | None] | None = None
     embedding_of: Callable[..., Sequence[float] | None] | None = None
     document_of: Callable[..., str | None] | None = None
+    scope_fields: Mapping[str, str] | None = None
+    """Scope kind -> the caller's own metadata field, for engines that filter
+    only on payload. kvtsjl fills a field you declared and named; it never
+    invents one. Leave unset where the backend can filter on the id prefix.
+    """
     reuse_embedding: bool = True
     """Keep the stored embedding when the document has not changed.
 
@@ -55,6 +60,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         embedding_of: Callable[..., Sequence[float] | None] | None = None,
         document_of: Callable[..., str | None] | None = None,
         reuse_embedding: bool = True,
+        scope_fields: Mapping[str, str] | None = None,
     ) -> IndexSet[K, D, ID, META]:
         return cls(
             name=name,
@@ -67,6 +73,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             embedding_of=embedding_of,
             document_of=document_of,
             reuse_embedding=reuse_embedding,
+            scope_fields=scope_fields,
         )
 
     @staticmethod
@@ -80,6 +87,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         embedding_of: Callable[..., Sequence[float] | None] | None = None,
         document_of: Callable[..., str | None] | None = None,
         reuse_embedding: bool = True,
+        scope_fields: Mapping[str, str] | None = None,
     ) -> IndexSet[KK, DD, str, META_T]:
         return IndexSet(
             name=name,
@@ -92,6 +100,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             embedding_of=embedding_of,
             document_of=document_of,
             reuse_embedding=reuse_embedding,
+            scope_fields=scope_fields,
         )
 
     def same_schema_as(self, other: IndexSet[K, D, ID, META]) -> bool:

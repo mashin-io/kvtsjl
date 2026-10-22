@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from typing import override
 
+from kvtsjl.exceptions import KvStoreIndexError
 from kvtsjl.index.backend import IndexBackend
 from kvtsjl.index.logical.envelope import VectorEnvelope
 from kvtsjl.index.logical.vector import VectorIndex, VectorRecord
@@ -20,6 +21,72 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
     ``IndexSet`` projection hooks (``embedding_of``, ``document_of``) apply here on
     ``meta_of``; logical ``VectorIndex`` only builds ``D`` via ``merge_data``.
     """
+
+    def supports_scoped_index(self) -> bool:
+        """Whether this index isolates entries by the scope it is bound to."""
+        return True
+
+    def supports_id_prefix_filter(self) -> bool:
+        """Whether the scope filter can run *inside* the nearest-neighbour search.
+
+        Default ``False``: a new backend has to opt in. Filtering after the
+        search is not an alternative. Dropping out-of-scope hits from a global
+        top-k starves the result — a search for one user's best 5 returns
+        whatever few of the global 5 happened to be theirs, so nothing leaks
+        but recall collapses, worst exactly where a collection holds many
+        scopes.
+
+        Engines whose filter reaches the id (``WHERE id LIKE 'prefix%'`` on
+        pgvector, a SQL-style id filter on LanceDB) return ``True``. Engines
+        that filter only on payload must instead be given a scope field the
+        caller declares, as ``SqlDbKvSet.scope_fields`` declares scope columns.
+        """
+        return False
+
+    def assert_scoped_search_supported(self) -> None:
+        """Refuse a scoped search the backend cannot do inside the search.
+
+        Backends call this at the top of ``search``. Returning a trimmed
+        global top-k instead would look like a working scoped search while
+        quietly losing most of the results.
+        """
+        if not self.scope.segments:
+            return
+        if self.supports_id_prefix_filter():
+            return
+        if self.index_set.scope_fields:
+            return
+        raise KvStoreIndexError(
+            f"{type(self).__name__} cannot filter by scope inside the search: "
+            "it reports no id-prefix filter and the index set declares no "
+            "scope_fields. Filtering after the search would starve the top-k"
+        )
+
+    def scope_id_prefix(self) -> ID:
+        """The bound scope as an id prefix — where the scope actually lives.
+
+        kvtsjl is footprint-free: a write stores the caller's payload and the
+        medium's own metadata, nothing else. So the scope goes in the id, which
+        kvtsjl already composes, and never into an invented metadata field. The
+        *same* ``Scope`` produces both this prefix and every physical id through
+        ``_physical_id_blob``, so a stored entry and the filter cannot disagree.
+
+        A backend that can only filter on metadata (most ANN engines) must have
+        the caller declare the field it may write, the way ``SqlDbKvSet``
+        declares its scope columns. It must not invent one.
+        """
+        return self._scope_prefix_blob()
+
+    def in_bound_scope_id(self, physical_id: ID) -> bool:
+        """Whether a stored id belongs to the scope this index is bound to.
+
+        A prefix scope matches its children, because its id prefix is a prefix
+        of theirs.
+        """
+        prefix = self.scope_id_prefix()
+        if not self.scope.segments:
+            return True
+        return self._blob_ops().startswith(physical_id, prefix)
 
     @override
     def meta_of(
