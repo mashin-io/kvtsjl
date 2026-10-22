@@ -30,6 +30,10 @@ def _index_fanout_label(i: int, index: Index[Any, Any, Any, Any]) -> str:
 class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     """Primary store plus attached indexes; mutations sync all indexes."""
 
+    _pending: list[
+        tuple[Callable[[Index[Any, Any, Any, Any]], object], str, SyncPolicy]
+    ]
+
     def __init__(
         self,
         underlying: KvStore[K, V],
@@ -47,6 +51,7 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         self._default_index = default_index
         self._bundle = bundle
         self._sync_policy = sync_policy
+        self._pending = []
         for index in self._indexes:
             index.bind_store(self)
 
@@ -244,6 +249,22 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         policy: SyncPolicy | None = None,
     ) -> None:
         effective = policy if policy is not None else self._sync_policy
+        if self._underlying.writes_are_deferred:
+            # The caller owns the commit, so the write is not durable yet.
+            # Running now would embed inside their transaction — holding the
+            # write lock across a network call — and a rollback would leave
+            # the index entry behind. Hold it until they say the commit landed.
+            self._pending.append((op, what, effective))
+            return
+        self._apply_index_ops(op, what=what, policy=effective)
+
+    def _apply_index_ops(
+        self,
+        op: Callable[[Index[Any, K, V, Any]], object],
+        *,
+        what: str,
+        policy: SyncPolicy,
+    ) -> None:
         failures: dict[str, Exception] = {}
         for i, index in enumerate(self._indexes):
             if not index.sync_on_write:
@@ -253,7 +274,29 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
             except Exception as exc:
                 label = _index_fanout_label(i, index)
                 failures[label] = exc
-        self._finish_fanout(failures, policy=effective, what=what)
+        self._finish_fanout(failures, policy=policy, what=what)
+
+    # --- deferred syncs -----------------------------------------------------
+
+    @property
+    def pending_index_syncs(self) -> int:
+        """Index operations waiting for the caller's commit."""
+        return len(self._pending)
+
+    def flush_index_syncs(self) -> None:
+        """Run the queued index operations; call this after the commit.
+
+        Failures surface here rather than at the write, under the same policy:
+        ``REQUIRED`` raises ``PartialSyncError``, ``BEST_EFFORT`` logs. The
+        queue is cleared either way, so a failed flush is not retried silently.
+        """
+        queued, self._pending = self._pending, []
+        for op, what, policy in queued:
+            self._apply_index_ops(op, what=what, policy=policy)
+
+    def discard_index_syncs(self) -> None:
+        """Drop the queued operations; call this after a rollback."""
+        self._pending = []
 
     def _sync_upsert(self, key: K, value: V) -> None:
         self._run_index_ops(

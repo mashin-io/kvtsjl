@@ -125,6 +125,15 @@ class SqlDbClientAdapter(ABC):
     ) -> int:
         """Delete rows by full key equality; return deleted count."""
 
+    def defers_commit(self) -> bool:
+        """Whether writes wait for a commit the caller owns.
+
+        ``True`` means a write is not durable when the call returns, so work
+        that depends on it — syncing an index, for one — must wait for the
+        commit rather than run beside it.
+        """
+        return False
+
     def supports_update_first(self) -> bool:
         """Whether this adapter implements ``upsert_rows_update_first``.
 

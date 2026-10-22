@@ -63,6 +63,9 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     def db_name(self) -> str:
         return self._db_name
 
+    def defers_commit(self) -> bool:
+        return not self._autocommit
+
     @property
     def autocommit(self) -> bool:
         """Whether this adapter commits after each write.

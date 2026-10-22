@@ -54,6 +54,15 @@ class KvStore[K, V](
     # with a non-incremental codec does not). The type rules out the cases that
     # can never work; the guard rules out the rest.
 
+    @property
+    def writes_are_deferred(self) -> bool:
+        """Whether a write is durable only after something the caller does.
+
+        ``True`` where the caller owns the transaction, so an index bound to
+        this store must queue its sync rather than run it beside the write.
+        """
+        return False
+
     def streaming[C](self, chunk_type: type[C]) -> StreamingView[K, C]:
         """A writable streaming view typed in ``chunk_type``.
 

@@ -41,6 +41,10 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
 
+    @property
+    def writes_are_deferred(self) -> bool:
+        return self._underlying.writes_are_deferred
+
     def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
         return self._underlying.expired_keys(now=now, limit=limit)
 

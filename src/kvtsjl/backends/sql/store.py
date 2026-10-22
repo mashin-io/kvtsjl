@@ -505,6 +505,10 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
         self._write_rows([self._build_write_row(key, value, ttl=ttl, created_at=created_at)])
 
+    @property
+    def writes_are_deferred(self) -> bool:
+        return self._adapter.defers_commit()
+
     def _write_rows(self, rows: Sequence[SqlDbRow]) -> None:
         """One write path, choosing the shape the kvset's sharing demands."""
         sk = self._sql_kvset

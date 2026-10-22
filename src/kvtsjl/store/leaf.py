@@ -194,6 +194,10 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
 
+    @property
+    def writes_are_deferred(self) -> bool:
+        return getattr(self._backend, "writes_are_deferred", False)
+
     def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
         return self._backend.expired_keys(now=now, limit=limit)
 
