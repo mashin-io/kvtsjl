@@ -23,6 +23,15 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
     text_of: Callable[..., str | None] | None = None
     embedding_of: Callable[..., Sequence[float] | None] | None = None
     document_of: Callable[..., str | None] | None = None
+    reuse_embedding: bool = True
+    """Keep the stored embedding when the document has not changed.
+
+    Embedding is the expensive part of a sync and usually a network call, so
+    re-running it for a write that did not touch the document is wasted. Set
+    ``False`` where the vector depends on something other than the document —
+    a model change, or metadata folded into the vector — and every sync should
+    re-embed.
+    """
 
     @property
     def id_serde(self) -> SerDe[K, ID]:
@@ -45,6 +54,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         text_of: Callable[..., str | None] | None = None,
         embedding_of: Callable[..., Sequence[float] | None] | None = None,
         document_of: Callable[..., str | None] | None = None,
+        reuse_embedding: bool = True,
     ) -> IndexSet[K, D, ID, META]:
         return cls(
             name=name,
@@ -56,6 +66,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             text_of=text_of,
             embedding_of=embedding_of,
             document_of=document_of,
+            reuse_embedding=reuse_embedding,
         )
 
     @staticmethod
@@ -68,6 +79,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
         text_of: Callable[..., str | None] | None = None,
         embedding_of: Callable[..., Sequence[float] | None] | None = None,
         document_of: Callable[..., str | None] | None = None,
+        reuse_embedding: bool = True,
     ) -> IndexSet[KK, DD, str, META_T]:
         return IndexSet(
             name=name,
@@ -79,6 +91,7 @@ class IndexSet[K, D, ID, META](PhysicalSchema[K, D, ID, META]):
             text_of=text_of,
             embedding_of=embedding_of,
             document_of=document_of,
+            reuse_embedding=reuse_embedding,
         )
 
     def same_schema_as(self, other: IndexSet[K, D, ID, META]) -> bool:
