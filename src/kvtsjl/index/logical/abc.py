@@ -70,10 +70,15 @@ class Index[Q, K, V, M](KeyMap[K, M], ScopedMixin, ABC):
         self.upsert(key, value, self.meta_of(key, value, previous=previous))
 
     def batch_sync(self, items: Mapping[K, V]) -> None:
-        prepared: dict[K, tuple[V, M]] = {}
-        for key, value in items.items():
-            previous = self.get(key)
-            prepared[key] = (value, self.meta_of(key, value, previous=previous))
+        # One read for the whole batch. meta_of needs the previous record for
+        # every key, and asking per key is a round trip per key; batch_get is
+        # already the contract for reading several, and a backend that can do
+        # it in one call overrides it there.
+        previous_by_key = self.batch_get(list(items))
+        prepared: dict[K, tuple[V, M]] = {
+            key: (value, self.meta_of(key, value, previous=previous_by_key.get(key)))
+            for key, value in items.items()
+        }
         self.batch_upsert(prepared)
 
     @overload
