@@ -63,6 +63,38 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     def db_name(self) -> str:
         return self._db_name
 
+    def supports_insert_if_absent(self) -> bool:
+        return True
+
+    def insert_rows_if_absent(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> int:
+        if not rows:
+            return 0
+        missing = [f for f in key_fields if f not in write_columns]
+        if missing:
+            raise ValueError(f"key_fields missing from write_columns: {missing}")
+        self._ensure_write_txn()
+        t = _quote_ident(table)
+        cols = ", ".join(_quote_ident(c) for c in write_columns)
+        placeholders = ", ".join("?" for _ in write_columns)
+        conflict = ", ".join(_quote_ident(f) for f in key_fields)
+        sql = (
+            f"INSERT INTO {t} ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT({conflict}) DO NOTHING"
+        )
+        written = 0
+        for row in rows:
+            cur = self._conn.execute(sql, [row.get(c) for c in write_columns])
+            written += cur.rowcount
+        self._after_write()
+        return written
+
     def defers_commit(self) -> bool:
         return not self._autocommit
 

@@ -220,6 +220,25 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             return None
         return iter((value,))
 
+    def supports_set_if_absent(self) -> bool:
+        return True
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        # A dict read and write with no await or I/O between them, so no other
+        # caller can interleave: this is the whole operation.
+        pk = self._physical_key_blob(key)
+        if pk in self._bucket():
+            return False
+        self.set(key, value, ttl=ttl, created_at=created_at)
+        return True
+
     def delete(self, key: K) -> bool:
         pk = self._physical_key_blob(key)
         return self._bucket().pop(pk, None) is not None

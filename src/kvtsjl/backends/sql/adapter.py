@@ -125,6 +125,28 @@ class SqlDbClientAdapter(ABC):
     ) -> int:
         """Delete rows by full key equality; return deleted count."""
 
+    def supports_insert_if_absent(self) -> bool:
+        """Whether this adapter implements ``insert_rows_if_absent``."""
+        return False
+
+    def insert_rows_if_absent(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> int:
+        """Insert rows that do not exist; return how many were written.
+
+        One statement, so a concurrent writer cannot land between a check and
+        the insert. An existing row is left exactly as it is, expired or not:
+        the database has no view of kvtsjl's TTL.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement insert_rows_if_absent"
+        )
+
     def defers_commit(self) -> bool:
         """Whether writes wait for a commit the caller owns.
 

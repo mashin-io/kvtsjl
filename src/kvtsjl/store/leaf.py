@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Self, cast
 
 from kvtsjl.bind.namespace import CollectionBinding
+from kvtsjl.exceptions import KvStoreError
 from kvtsjl.scope import Scope
 from kvtsjl.store.backend import KvBackend
 from kvtsjl.store.logical import KvStore
@@ -193,6 +194,24 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
 
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
+
+    def supports_set_if_absent(self) -> bool:
+        return bool(getattr(self._backend, "supports_set_if_absent", lambda: False)())
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        fn = getattr(self._backend, "set_if_absent", None)
+        if not callable(fn):
+            raise KvStoreError(
+                f"{type(self._backend).__name__} does not support set_if_absent"
+            )
+        return cast(bool, fn(key, value, ttl=ttl, created_at=created_at))
 
     @property
     def writes_are_deferred(self) -> bool:

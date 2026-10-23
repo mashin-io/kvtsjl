@@ -535,6 +535,38 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             rows=rows,
         )
 
+    def supports_set_if_absent(self) -> bool:
+        return self._adapter.supports_insert_if_absent()
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        if not self._adapter.supports_insert_if_absent():
+            raise KvStoreError(
+                f"{type(self._adapter).__name__} does not support "
+                "insert_rows_if_absent, which set_if_absent requires; it will "
+                "not fall back to a get-then-set"
+            )
+        require_write_clock_supported(
+            created_at, allowed=True, backend="SqlDbKvStore"
+        )
+        sk = self._sql_kvset
+        row = self._build_write_row(key, value, ttl=ttl, created_at=created_at)
+        return (
+            self._adapter.insert_rows_if_absent(
+                table=self._table,
+                key_fields=sk.key_fields,
+                write_columns=sk.write_columns(),
+                rows=[row],
+            )
+            > 0
+        )
+
     def delete(self, key: K) -> bool:
         sk = self._sql_kvset
         key_row = self._full_key_row(key, require_scope=True)

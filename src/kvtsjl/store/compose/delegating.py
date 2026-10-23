@@ -9,6 +9,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.stat import RecordStat
+from kvtsjl.store.schema.ttl import TtlPolicy
 
 
 class DelegatingKvStore[K, V](KvStore[K, V]):
@@ -40,6 +41,21 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
 
     def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
+
+    def supports_set_if_absent(self) -> bool:
+        return self._underlying.supports_set_if_absent()
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        return self._underlying.set_if_absent(
+            key, value, ttl=ttl, created_at=created_at
+        )
 
     @property
     def writes_are_deferred(self) -> bool:
