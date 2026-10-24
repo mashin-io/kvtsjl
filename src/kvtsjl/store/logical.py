@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap_algebra.topology import FillStats
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
@@ -104,6 +105,33 @@ class KvStore[K, V](
     # ``require_streaming_serde`` (a str store with a UTF-8 serde streams; one
     # with a non-incremental codec does not). The type rules out the cases that
     # can never work; the guard rules out the rest.
+
+    def missing_keys(self, *, page_size: int | None = None) -> Iterator[K]:
+        """Keys a read finds through a fallback that the authority lacks.
+
+        A composition with fallbacks — ``fallback_read`` — lists each
+        fallback's keys a page at a time and keeps those neither the authority
+        nor an earlier fallback holds; memory stays one page. A store without
+        a fallback lacks nothing a read through it could find.
+        """
+        return iter(())
+
+    def fill_missing(
+        self, *, page_size: int | None = None, limit: int | None = None
+    ) -> FillStats:
+        """Copy into the authority what its fallbacks hold and it lacks.
+
+        Every copy is a conditional write of the whole record, so nothing the
+        authority holds is ever replaced — a writer that got there first wins
+        and is counted in ``lost_race``. The fallback's write clock is carried
+        where the record keeps one, so a copied value keeps its remaining
+        life. ``limit`` bounds the records written, and a later call
+        continues, since what was copied is no longer missing::
+
+            records.fallback_read(live_turns).fill_missing()
+            records.fallback_read(history).fill_missing(limit=500)
+        """
+        return FillStats()
 
     @property
     def writes_are_deferred(self) -> bool:

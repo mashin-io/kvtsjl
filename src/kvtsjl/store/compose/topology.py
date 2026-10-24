@@ -15,6 +15,7 @@ from datetime import datetime
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.keymap_algebra.topology import (
+    FillStats,
     KeyMapTarget,
     Lookup,
     RecordTopologyMixin,
@@ -91,6 +92,10 @@ class StoreTarget[K, V, P](KeyMapTarget[K, V, P]):
         self: StoreTarget[K, V, C], key: K
     ) -> Iterator[C] | None:
         return self.store.read_stream(key)
+
+    def keys(self, page_size: int) -> Iterator[K]:
+        query = ScanQuery[K](include_values=False, page_size=page_size)
+        return (key for key, _ in self.store.scan_entries(query))
 
     def write_stream[C: (bytes, str)](
         self: StoreTarget[K, C, C],
@@ -278,6 +283,18 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
             part_key_spec(spec, key_where),
             name=type(self).__name__,
             residual_label=predicate_label(residual),
+        )
+
+    # --- what the fallbacks hold -------------------------------------------
+
+    def missing_keys(self, *, page_size: int | None = None) -> Iterator[K]:
+        return self.topology().missing_keys(page_size or self.batch_size)
+
+    def fill_missing(
+        self, *, page_size: int | None = None, limit: int | None = None
+    ) -> FillStats:
+        return self.topology().fill_missing(
+            page_size or self.batch_size, limit, self._dependent_syncs()
         )
 
     # --- expiry and bulk deletes ---------------------------------------------

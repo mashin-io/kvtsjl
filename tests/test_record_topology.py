@@ -23,6 +23,7 @@ from kvtsjl.backends.sql.sqlite import SqliteSqlDbClientAdapter
 from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import (
     KvStoreError,
+    KvStoreUnsupported,
     PartialSyncError,
     RecordWriteError,
     UncommittedWriteError,
@@ -116,7 +117,11 @@ class _Spy(Target[str, str, str]):
 
     def write_if_absent(self, key: str, value: str, options: WriteOptions) -> bool:
         self._note("cond")
-        return self.wrote
+        if not self.wrote or key in self.held:
+            return False
+        self.held[key] = value
+        self.written.append(options)
+        return True
 
     def batch_write(self, items: Mapping[str, str], options: WriteOptions) -> None:
         self._note("batch_write")
@@ -321,6 +326,88 @@ def test_a_failed_fill_still_returns_the_value() -> None:
     primary = _Unwritable(log, "primary", Role.AUTHORITY, fill=True)
     cold = _Spy(log, "cold", Role.FALLBACK, held={"k": "v"})
     assert Topology((primary, cold)).read("k") == "v"
+
+
+class _Raced(_Spy):
+    """Another writer lands right after this target misses."""
+
+    def read(self, key: str) -> str | None:
+        found = super().read(key)
+        self.held[key] = "newer"
+        return found
+
+    def batch_read(self, keys: Sequence[str]) -> dict[str, str]:
+        found = super().batch_read(keys)
+        self.held.update(dict.fromkeys(keys, "newer"))
+        return found
+
+
+def test_a_fill_never_replaces_a_value_written_since_the_miss() -> None:
+    """A promotion that overwrites would replace the newer write with the copy."""
+    log: list[str] = []
+    primary = _Raced(log, "primary", Role.AUTHORITY, fill=True)
+    cold = _Spy(log, "cold", Role.FALLBACK, held={"k": "older"})
+    assert Topology((primary, cold)).read("k") == "older"
+    assert primary.held["k"] == "newer", "the fill replaced a newer write"
+
+
+def test_a_batch_fill_never_replaces_one_either() -> None:
+    log: list[str] = []
+    primary = _Raced(log, "primary", Role.AUTHORITY, fill=True, clock=True)
+    cold = _Spy(log, "cold", Role.FALLBACK, held={"k": "older"})
+    assert Topology((primary, cold)).batch_read(["k"]) == {"k": "older"}
+    assert primary.held["k"] == "newer", "the batch fill replaced a newer write"
+
+
+def test_values_flow_downstream_only() -> None:
+    """A lagging replica must not write a record back into what it copies."""
+    log: list[str] = []
+    cache = _Spy(log, "cache", Role.DEPENDENT, lookup=Lookup.BEFORE_AUTHORITY, fill=True)
+    primary = _Spy(log, "primary", Role.AUTHORITY, fill=True)
+    replica = _Spy(
+        log, "replica", Role.DEPENDENT, lookup=Lookup.AFTER_AUTHORITY, held={"k": "stale"}
+    )
+    assert Topology((cache, primary, replica)).read("k") == "stale"
+    assert "k" not in primary.held, "a copy was written back into the authority"
+    assert "k" not in cache.held, "a copy fed a sibling copy"
+
+
+def test_a_fill_the_target_cannot_do_is_raised_not_logged() -> None:
+    """Best-effort tolerates a failing medium, not a composition that cannot work."""
+
+    class NoConditionalWrite(DictKeyMap[str, str]):
+        def set_if_absent(self, key: str, value: str, **_kw: Any) -> bool:
+            return KeyMap.set_if_absent(self, key, value)
+
+    hot = NoConditionalWrite({})
+    with pytest.raises(KvStoreUnsupported):
+        hot.coalesce(DictKeyMap({"k": "v"})).get("k")
+
+
+def test_a_streamed_fill_the_target_cannot_take_is_raised() -> None:
+    class NoStreams(_Spy):
+        def write_stream(self, *_a: Any, **_kw: Any) -> None:
+            raise KvStoreUnsupported("this target cannot take a stream")
+
+    log: list[str] = []
+    primary = NoStreams(log, "primary", Role.AUTHORITY, fill=True)
+    cold = _Spy(log, "cold", Role.FALLBACK, held={"k": "v"})
+    with pytest.raises(KvStoreUnsupported):
+        Topology((primary, cold)).read_stream("k")
+
+
+def test_best_effort_never_hides_an_unsupported_dependent() -> None:
+    class Unsupported(_Spy):
+        def write(self, key: str, value: str, options: WriteOptions) -> None:
+            raise KvStoreUnsupported("this copy cannot take that write")
+
+    log: list[str] = []
+    primary = _Spy(log, "primary", Role.AUTHORITY)
+    copy = Unsupported(log, "copy", Role.DEPENDENT, policy=SyncPolicy.BEST_EFFORT)
+    with pytest.raises(PartialSyncError) as caught:
+        Topology((primary, copy)).write("k", "v", OPTS, _now())
+    assert isinstance(caught.value.failures["copy"], KvStoreUnsupported)
+    assert caught.value.committed is True
 
 
 def test_a_batch_read_asks_each_target_only_for_what_is_still_missing() -> None:

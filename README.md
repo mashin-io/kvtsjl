@@ -268,7 +268,7 @@ Build behavior by **chaining methods on `KvStore`**—no subclassing, no wrapper
 | Method | Effect |
 |--------|--------|
 | `.indexed(index, …)` | Attach indexes; writes sync to all; enables `search` / `search_hits` |
-| `.coalesce(other)` / `.fallback_read(other)` | Left-biased merge; optional promote on secondary hit |
+| `.coalesce(other)` / `.fallback_read(other)` | Left-biased merge; a secondary hit is promoted without replacing anything; `.fill_missing()` copies all the primary lacks |
 | `.mirror(secondary)` | Write-through to secondary; reads stay on primary |
 | `.readonly()` | Reject mutations |
 | `.scoped(tenant_id=…)` | Narrow to a logical key prefix / namespace |
@@ -469,11 +469,13 @@ Each operation is one of those traversals plus when it stops, how it combines re
 2. **Referent before reference** — parts are written before the authority that refers to them, and removed after it.
 3. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
 4. **Scans list only records** — every key a scan yields is one `get` returns.
-5. **Reads write only fills** — best-effort, carrying the write clock so a promoted value keeps its remaining life.
-6. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
-7. **Budgets don't couple targets** — GC gives each target the full budget.
-8. **Dependents wait for your commit** — over a store in your transaction, index and copy syncs queue until `flush_index_syncs()` (or `discard_index_syncs()` on rollback).
-9. **Composition is closed** — a composition is a target to its parent, and the laws hold for the parent whatever the child is.
+5. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept; it carries the write clock so a promoted value keeps its remaining life.
+6. **Values flow downstream only** — fallback → authority → copies; a stale cache or a lagging replica is never written back.
+7. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
+8. **Unsupported is never best-effort** — a `KvStoreUnsupported` (asking a medium for something it cannot do) is raised under every sync policy, never logged away.
+9. **Budgets don't couple targets** — GC gives each target the full budget.
+10. **Dependents wait for your commit** — over a store in your transaction, index and copy syncs queue until `flush_index_syncs()` (or `discard_index_syncs()` on rollback).
+11. **Composition is closed** — a composition is a target to its parent, and the laws hold for the parent whatever the child is.
 
 Writing your own composition means declaring roles — no ordering code:
 
@@ -496,6 +498,20 @@ class WriteThroughCache[K, V](StoreTopologyMixin[K, V], DelegatingKvStore[K, V])
 ```
 
 Writes, conditional writes, deletes, cache-first reads that fill on a miss, existence, scans, GC and deferred syncs all follow. The full reference — every operation, the laws and the model's limits — is the docstring of `kvtsjl.keymap_algebra.topology`.
+
+### Filling a store from its fallback
+
+A fallback already says where the records a store lacks can be found, so copying them over is an operation of that composition — the same lookup, run over keys:
+
+```python
+filling = records.fallback_read(live_turns)
+
+list(filling.missing_keys())        # what live_turns holds and records lacks
+stats = filling.fill_missing(limit=500)
+# FillStats(scanned=…, missing=…, written=…, lost_race=…, source_miss=…)
+```
+
+Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional write in one request: SQL `ON CONFLICT DO NOTHING`, Redis `SET NX`, S3 `If-None-Match`, GCS `ifGenerationMatch=0`, Azure `If-None-Match`, and a filesystem link that fails if the name is taken.
 
 ---
 

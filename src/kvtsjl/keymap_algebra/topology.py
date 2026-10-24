@@ -48,7 +48,9 @@ cache), after it (a fallback, a failover replica) or never (an index).
 
 **Fill** — whether a target consulted and missed by a read is given the value
 found later. A fallback hit promoted into the authority and a cache filled on
-a miss are the same rule.
+a miss are the same rule. A fill is a conditional write, so it never replaces
+a value written since the miss, and it runs downstream only: a fallback feeds
+the authority, the authority feeds its dependents, never the reverse.
 
 **Policy** — for a dependent, whether a failure after the commit point is
 raised (``REQUIRED``) or logged (``BEST_EFFORT``).
@@ -124,6 +126,13 @@ Operation         Traversal   Stops            Combines                Side effe
 ``scan``          —           —                the authority's keys,   —
                                                or the parts' keys
                                                confirmed by ``get``
+``missing_keys``  lookup,     never            each fallback's keys    —
+                  over keys                    that the authority and
+                                               earlier fallbacks lack
+``fill_missing``  lookup,     at ``limit``     :class:`FillStats`      a
+                  then commit                                          conditional
+                                                                       write of
+                                                                       each record
 ================  ==========  ===============  ======================  ==========
 
 Batch forms take the same traversal, one call per target, and a batch read
@@ -133,17 +142,19 @@ an authority answers whether any target held the key. Streams take the same
 traversals as their point forms: the authority takes the stream and each
 dependent is fed by re-reading it, since a stream is consumed once.
 
-A new operation — ``missing_keys``, say — is defined the same way: pick a
-traversal, then the stop, combine, failure and side-effect rules. It never
-introduces an order.
+A new operation is defined the same way — ``missing_keys`` and
+``fill_missing`` were: pick a traversal, then the stop, combine, failure and
+side-effect rules. It never introduces an order. ``fill_missing`` differs from
+a read's fill only in its failure rule: it is an explicit write, so a failure
+raises instead of being logged.
 
 
 4. The laws
 ===========
 
 These hold for every composition built from a declaration, at every level of
-nesting. ``tests/test_record_topology.py`` checks each one, against the
-compositions kvtsjl ships and one it does not.
+nesting. ``tests/test_record_topology.py`` and ``tests/test_fill_missing.py``
+check each one, against the compositions kvtsjl ships and ones it does not.
 
 1. **Commit before derive.** No dependent is written before the commit point
    succeeds; a refused conditional write writes no dependent.
@@ -156,25 +167,35 @@ compositions kvtsjl ships and one it does not.
 4. **Scans list only records.** Every key a scan yields is one ``get``
    returns. A scan enumerates what decides existence — the authority — so a
    key held only by a fallback or a cache is readable but not listed.
-5. **Reads write only fills.** A read never changes a target except to fill
-   one marked ``fill``; a fill is best-effort and carries the write clock, so
+5. **Reads write only fills, and a fill never replaces.** A read changes a
+   target only to fill one marked ``fill``, with a conditional write: a value
+   written since the miss is kept, not overwritten by the copy. A fill is
+   best-effort — the read already succeeded — and carries the write clock, so
    a filled value keeps its remaining life.
-6. **Failures carry their side of the commit point.**
+6. **Values flow downstream only.** Fallback → authority → dependents. A copy
+   never feeds what it was copied from, so neither a read nor
+   ``fill_missing`` can write a stale cache or a lagging replica back into
+   the authority.
+7. **Failures carry their side of the commit point.**
    :class:`UncommittedWriteError` (``committed=False``) before it,
    :class:`PartialSyncError` (``committed=True``) after it. A target that is
    itself a composition reports its own outcome, and the parent maps it
    through the role that child plays — so the answer is right at every level.
-7. **The clock is all or nothing where it counts.** A write clock the
+8. **Unsupported is never best-effort.** Best-effort tolerates a medium
+   *failing*. A :class:`~kvtsjl.exceptions.KvStoreUnsupported` — a
+   composition asking a medium for something it cannot do — is raised under
+   every policy, by a fill as much as by a sync.
+9. **The clock is all or nothing where it counts.** A write clock the
    authority or a component cannot keep is refused before any target is
    written; a dependent that cannot keep one receives the write without it.
-8. **Budgets do not couple targets.** GC gives every target it collects the
-   full budget; targets expire independently, and a shared budget starved the
-   later ones. The union may therefore exceed the budget.
-9. **Dependents wait for a deferred commit.** When the caller owns the commit,
-   a dependent durable at once waits for ``flush_index_syncs``, and
-   ``discard_index_syncs`` drops it; one whose writes are deferred too joins
-   the caller's commit and runs at once.
-10. **Composition is closed.** A composition is a target to its parent. The
+10. **Budgets do not couple targets.** GC gives every target it collects the
+    full budget; targets expire independently, and a shared budget starved the
+    later ones. The union may therefore exceed the budget.
+11. **Dependents wait for a deferred commit.** When the caller owns the
+    commit, a dependent durable at once waits for ``flush_index_syncs``, and
+    ``discard_index_syncs`` drops it; one whose writes are deferred too joins
+    the caller's commit and runs at once.
+12. **Composition is closed.** A composition is a target to its parent. The
     laws hold for the parent whatever the child is, and the tree walk —
     flushing, discarding, counting deferred syncs — reaches every node.
 
@@ -205,8 +226,15 @@ compositions kvtsjl ships and one it does not.
 - *Assembled records are read whole.* A record made of parts has no lookup
   order of its own; put a cache or a fallback around the composition rather
   than among its parts.
-- *A fill writes one target.* Promoting a value into the authority does not
-  re-run the authority's dependents.
+- *A read's fill writes one target.* Promoting a value into the authority
+  does not re-run the authority's dependents. ``fill_missing``, an explicit
+  write, writes the whole record and does.
+- *A streamed fill replaces.* Media share no conditional streaming write —
+  S3's managed upload takes no precondition — so a fill during
+  ``read_stream`` overwrites; law 5 holds for ``get`` and ``batch_get``.
+- *Missing means missing at this node.* ``missing_keys`` lists the fallbacks
+  this composition declares; one nested inside its authority is that
+  child's to list.
 - *Conditional writes ask the medium.* ``set_if_absent`` asks the authority
   whether the key is absent to the medium, which can differ from law 3 — an
   expired entry, or a committed row whose mandatory part is gone, still
@@ -230,6 +258,7 @@ from enum import Enum
 import logging
 from typing import cast
 
+from kvtsjl.batching import iter_chunks
 from kvtsjl.exceptions import (
     KvStoreError,
     KvStoreUnsupported,
@@ -364,6 +393,10 @@ class Target[K, V, P](ABC):
     ) -> Iterator[C] | None:
         raise NotImplementedError(f"{self.name} cannot be streamed")
 
+    def keys(self, page_size: int) -> Iterator[K]:
+        """Every key held here, listed ``page_size`` at a time."""
+        raise KvStoreUnsupported(f"{self.name} cannot list its keys")
+
     # --- expiry and durability -----------------------------------------------
 
     @property
@@ -477,6 +510,24 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
 
     def children(self) -> tuple[object, ...]:
         return (self.keymap,)
+
+
+@dataclass(frozen=True, slots=True)
+class FillStats:
+    """What a ``fill_missing`` run saw and did, key by key.
+
+    ``scanned`` keys were listed by a fallback; ``missing`` of them were held
+    neither by the authority nor by an earlier fallback. Of those, ``written``
+    were copied; ``lost_race`` were written by someone else between the check
+    and the conditional write, and kept; ``source_miss`` were gone from the
+    fallback by the time they were read.
+    """
+
+    scanned: int = 0
+    missing: int = 0
+    written: int = 0
+    lost_race: int = 0
+    source_miss: int = 0
 
 
 class Parts[K, V]:
@@ -866,6 +917,79 @@ class Topology[K, V]:
                 collected.update(dict.fromkeys(own))
         return list(collected)
 
+    # --- what the fallbacks hold -------------------------------------------
+
+    def missing_keys(self, page_size: int) -> Iterator[K]:
+        """Keys a read finds in a fallback that the authority does not hold.
+
+        Each fallback's keys, in lookup order, a page at a time. A key is
+        missing where neither the authority nor an earlier fallback holds it,
+        so it belongs to the first fallback a read would reach, and memory
+        stays one page. Only fallbacks are listed: a cache or a replica is a
+        copy of the authority, and what a copy holds that the authority does
+        not is stale, not missing.
+        """
+        for _fallback, _page, missing in self._missing_pages(page_size):
+            yield from missing
+
+    def fill_missing(
+        self, page_size: int, limit: int | None, syncs: DependentSyncs
+    ) -> FillStats:
+        """Copy what the fallbacks hold and the authority lacks; never overwrite.
+
+        Each missing key is read from its fallback and written as the record —
+        components, the authority's conditional write, then dependents — with
+        the fallback's clock where the record keeps one, as a promotion does.
+        Unlike a read's fill this is an explicit write, so a failure raises.
+        ``limit`` bounds the records written; a later run continues, since
+        what was written is no longer missing.
+        """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        scanned = missing = written = lost_race = source_miss = 0
+        for fallback, page, absent in self._missing_pages(page_size):
+            wanted = set(absent)
+            found = fallback.batch_read(absent)
+            stats = fallback.batch_stat(list(found)) if self.supports_write_clock else {}
+            for key in page:
+                if limit is not None and written >= limit:
+                    return FillStats(scanned, missing, written, lost_race, source_miss)
+                scanned += 1
+                if key not in wanted:
+                    continue
+                missing += 1
+                value = found.get(key)
+                if value is None:
+                    source_miss += 1
+                    continue
+                options = WriteOptions(created_at=_clock(stats.get(key)))
+                if self.write_if_absent(key, value, options, syncs):
+                    written += 1
+                else:
+                    lost_race += 1
+        return FillStats(scanned, missing, written, lost_race, source_miss)
+
+    def _missing_pages(
+        self, page_size: int
+    ) -> Iterator[tuple[Target[K, V, V], list[K], list[K]]]:
+        """Per page of each fallback's keys: the fallback, the page, the missing."""
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
+        authority = self.whole_authority
+        if authority is None:
+            return
+        fallbacks = [t for t in self.lookups() if t.role is Role.FALLBACK]
+        for index, fallback in enumerate(fallbacks):
+            ahead = [authority, *fallbacks[:index]]
+            for page in iter_chunks(fallback.keys(page_size), page_size):
+                absent: list[K] = page
+                for target in ahead:
+                    if not absent:
+                        break
+                    held = target.batch_exists(absent)
+                    absent = [k for k in absent if k not in held]
+                yield fallback, page, absent
+
     # --- reads ---------------------------------------------------------------
 
     def read(self, key: K) -> V | None:
@@ -993,17 +1117,19 @@ class Topology[K, V]:
     def _fill(
         self, key: K, value: V, source: Target[K, V, V], consulted: list[Target[K, V, V]]
     ) -> None:
-        into = [t for t in consulted if t.fill]
+        """Give the value to each target that asked for it, unless it has one now.
+
+        A conditional write, so a value written between the miss and the fill
+        is kept rather than replaced by the copy.
+        """
+        into = _fillable(source, consulted)
         if not into:
             return
         clock = _clock(source.stat(key)) if any(t.supports_write_clock for t in into) else None
         for target in into:
             options = target.receives(WriteOptions(created_at=clock))
-            _settle(
-                target.name,
-                "fill",
-                SyncPolicy.BEST_EFFORT,
-                lambda t=target, o=options: t.write(key, value, o),
+            _try_fill(
+                target.name, lambda t=target, o=options: t.write_if_absent(key, value, o)
             )
 
     def _batch_fill(
@@ -1012,21 +1138,19 @@ class Topology[K, V]:
         source: Target[K, V, V],
         consulted: list[Target[K, V, V]],
     ) -> None:
-        into = [t for t in consulted if t.fill]
+        into = _fillable(source, consulted)
         if not into:
             return
         stats = source.batch_stat(list(hits)) if any(t.supports_write_clock for t in into) else {}
         for target in into:
 
             def fill(t: Target[K, V, V] = target) -> None:
-                if not t.supports_write_clock:
-                    t.batch_write(hits, WriteOptions())
-                    return
-                # One clock per key, so one write per key: a batch takes one.
+                # A conditional write is one key at a time, as is a clock.
                 for k, v in hits.items():
-                    t.write(k, v, WriteOptions(created_at=_clock(stats.get(k))))
+                    clock = WriteOptions(created_at=_clock(stats.get(k)))
+                    t.write_if_absent(k, v, t.receives(clock))
 
-            _settle(target.name, "fill", SyncPolicy.BEST_EFFORT, fill)
+            _try_fill(target.name, fill)
 
     # --- the whole tree ------------------------------------------------------
 
@@ -1047,8 +1171,12 @@ def _fill_stream[K, C: (bytes, str)](
     re-reading the target just written — one read of each, no buffer. A
     failed fill is best-effort: the spent stream is closed so the medium's
     response is released, and the source is read again.
+
+    Unlike a point fill this one replaces: media have no conditional
+    streaming write in common (S3's managed upload takes no precondition), so
+    a value written between the miss and the fill can be overwritten.
     """
-    into = [t for t in consulted if t.fill]
+    into = _fillable(source, consulted)
     if not into:
         return chunks
     clock = _clock(source.stat(key)) if any(t.supports_write_clock for t in into) else None
@@ -1059,6 +1187,8 @@ def _fill_stream[K, C: (bytes, str)](
         options = target.receives(WriteOptions(created_at=clock))
         try:
             target.write_stream(key, current, options, None)
+        except KvStoreUnsupported:
+            raise
         except Exception as exc:
             _log("fill", target.name, exc)
             close_stream(current)
@@ -1066,6 +1196,20 @@ def _fill_stream[K, C: (bytes, str)](
             continue
         current = target.read_stream(key) or source.read_stream(key)
     return current
+
+
+# Values flow downstream only: a fallback feeds the authority, the authority
+# feeds its dependents. A copy never feeds what it was copied from, so a stale
+# cache or a lagging replica cannot write a record back into the authority.
+_STREAM_ORDER = {Role.FALLBACK: 0, Role.AUTHORITY: 1, Role.COMPONENT: 1, Role.DEPENDENT: 2}
+
+
+def _fillable[K, V](
+    source: Target[K, V, V], consulted: Sequence[Target[K, V, V]]
+) -> list[Target[K, V, V]]:
+    """The consulted targets that asked to be filled and lie downstream of ``source``."""
+    rank = _STREAM_ORDER[source.role]
+    return [t for t in consulted if t.fill and _STREAM_ORDER[t.role] > rank]
 
 
 def _clock(meta: RecordStat | None) -> datetime | None:
@@ -1097,12 +1241,14 @@ def _settle(name: str, what: str, policy: SyncPolicy, run: Callable[[], object])
 
     A failure here is after the commit point, whatever a child composition
     says about its own record: ``REQUIRED`` raises :class:`PartialSyncError`,
-    ``BEST_EFFORT`` logs and carries on.
+    ``BEST_EFFORT`` logs and carries on. Best-effort tolerates a medium
+    failing, not one asked for something it cannot do: a
+    :class:`KvStoreUnsupported` is raised under either policy.
     """
     try:
         run()
     except Exception as exc:
-        if policy is SyncPolicy.BEST_EFFORT:
+        if policy is SyncPolicy.BEST_EFFORT and not isinstance(exc, KvStoreUnsupported):
             _log(what, name, exc)
             return
         if isinstance(exc, PartialSyncError):
@@ -1111,6 +1257,16 @@ def _settle(name: str, what: str, policy: SyncPolicy, run: Callable[[], object])
             f"{name} {what} failed after the record was committed",
             failures={name: exc},
         ) from exc
+
+
+def _try_fill(name: str, run: Callable[[], object]) -> None:
+    """A fill is best-effort — the read already succeeded — but loud when unsupported."""
+    try:
+        run()
+    except KvStoreUnsupported:
+        raise
+    except Exception as exc:
+        _log("fill", name, exc)
 
 
 def _log(what: str, name: str, exc: Exception) -> None:
