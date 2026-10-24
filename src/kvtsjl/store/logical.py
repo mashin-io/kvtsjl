@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
+from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
@@ -22,11 +23,61 @@ if TYPE_CHECKING:
     from kvtsjl.store.readable import ReadableKvStore as ReadableKvStoreType
 
 
+class SyncTreeNode(ABC):
+    """A node of a composed tree, reached by operations over the whole tree.
+
+    Flushing and discarding deferred syncs touch every node and nothing about
+    its keys or values, so the walk is typed by this, not by ``KvStore[K, V]``
+    — whose parameters differ from node to node.
+    """
+
+    def child_stores(self) -> tuple[object, ...]:
+        """What lies directly beneath this node; empty for a leaf.
+
+        A composition answers this once, and every operation that must reach
+        the whole tree — flushing deferred index syncs, for one — walks it.
+        """
+        return ()
+
+    def _child_nodes(self) -> list[SyncTreeNode]:
+        return [c for c in self.child_stores() if isinstance(c, SyncTreeNode)]
+
+    @property
+    def pending_index_syncs(self) -> int:
+        """Index operations anywhere beneath this store awaiting a commit."""
+        return sum(child.pending_index_syncs for child in self._child_nodes())
+
+    def flush_index_syncs(self) -> None:
+        """Apply deferred index syncs anywhere in the tree; call after commit.
+
+        Every node is visited even when one fails, so one failing index does
+        not strand the others' queued work. Failures are reported together.
+        The record is committed by then, so this raises the committed side:
+        ``PartialSyncError``.
+        """
+        failures: dict[str, Exception] = {}
+        for child in self._child_nodes():
+            try:
+                child.flush_index_syncs()
+            except PartialSyncError as exc:
+                failures.update(exc.failures)
+        if failures:
+            raise PartialSyncError(
+                "deferred index syncs failed after commit", failures=failures
+            )
+
+    def discard_index_syncs(self) -> None:
+        """Drop deferred index syncs anywhere in the tree; call after rollback."""
+        for child in self._child_nodes():
+            child.discard_index_syncs()
+
+
 class KvStore[K, V](
     ReadableKvStore[K, V],
     KeyMap[K, V],
     TtlWritesMixin[K, V],
     ExpiringMixin[K],
+    SyncTreeNode,
     ABC,
 ):
     """Logical document store: read + write + scope + scan + TTL + GC.

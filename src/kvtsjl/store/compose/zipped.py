@@ -8,15 +8,9 @@ from typing import Any, cast
 
 from kvtsjl.keymap_algebra.zip import ZippedKeyMap, ZipWithKeyMap
 from kvtsjl.scope import Scope
-from kvtsjl.store.fanout import (
-    GcFanoutMixin,
-    ScanUnionMixin,
-    ScopeFanoutMixin,
-    clone_parts,
-    clone_parts_mapping,
-)
+from kvtsjl.store.compose.topology import StoreTopologyMixin
+from kvtsjl.store.fanout import ScopeFanoutMixin, clone_parts, clone_parts_mapping
 from kvtsjl.store.logical import KvStore
-from kvtsjl.store.schema.layout import KeyLayout
 from kvtsjl.store.schema.stat import RecordStat
 
 
@@ -69,9 +63,8 @@ def merge_part_stats(
 
 
 class ZippedKvStore[K](
+    StoreTopologyMixin[K, tuple[Any, ...]],
     ZippedKeyMap[K],
-    ScanUnionMixin[K, tuple[Any, ...]],
-    GcFanoutMixin[K],
     ScopeFanoutMixin,
     KvStore[K, tuple[Any, ...]],
 ):
@@ -88,26 +81,10 @@ class ZippedKvStore[K](
         super().__init__(parts, mandatory=mandatory)
         self.scope = parts[0].scope
         self.batch_size = parts[0].batch_size
-        store_parts = tuple(parts)
-        self._scan_parts = store_parts
-        self._gc_parts = store_parts
         self._created_at_merge = created_at_merge
 
     def _store_parts(self) -> tuple[KvStore[K, Any], ...]:
         return cast(tuple[KvStore[K, Any], ...], self._parts)
-
-    @property
-    def supports_write_clock(self) -> bool:
-        return all(part.supports_write_clock for part in self._store_parts())
-
-    def key_layout(self) -> KeyLayout:
-        return self._store_parts()[0].key_layout()
-
-    def exists(self, key: K) -> bool:
-        return self.get(key) is not None
-
-    def batch_exists(self, keys: Sequence[K]) -> set[K]:
-        return set(self.batch_get(keys).keys())
 
     def stat(self, key: K) -> RecordStat | None:
         if self.get(key) is None:
@@ -156,9 +133,8 @@ class ZippedKvStore[K](
 
 
 class ZipWithKvStore[K, V](
+    StoreTopologyMixin[K, V],
     ZipWithKeyMap[K, V],
-    ScanUnionMixin[K, V],
-    GcFanoutMixin[K],
     ScopeFanoutMixin,
     KvStore[K, V],
 ):
@@ -167,36 +143,21 @@ class ZipWithKvStore[K, V](
         ctor: Callable[..., V],
         parts: Mapping[str, KvStore[K, Any]],
         *,
+        commit_part: str | None = None,
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
     ) -> None:
         if not parts:
             raise ValueError("zip_with requires at least one part")
-        super().__init__(ctor, parts, mandatory=mandatory)
+        super().__init__(ctor, parts, commit_part=commit_part, mandatory=mandatory)
         first = next(iter(parts.values()))
         self.scope = first.scope
         self.batch_size = first.batch_size
-        store_parts = dict(parts)
-        self._scan_parts = list(store_parts.values())
-        self._gc_parts = list(store_parts.values())
         self._created_at_merge = created_at_merge
 
     def _store_parts(self) -> dict[str, KvStore[K, Any]]:
         return cast(dict[str, KvStore[K, Any]], self._parts)
-
-    @property
-    def supports_write_clock(self) -> bool:
-        return all(part.supports_write_clock for part in self._store_parts().values())
-
-    def key_layout(self) -> KeyLayout:
-        return next(iter(self._store_parts().values())).key_layout()
-
-    def exists(self, key: K) -> bool:
-        return self.get(key) is not None
-
-    def batch_exists(self, keys: Sequence[K]) -> set[K]:
-        return set(self.batch_get(keys).keys())
 
     def stat(self, key: K) -> RecordStat | None:
         if self.get(key) is None:
@@ -237,6 +198,7 @@ class ZipWithKvStore[K, V](
         return ZipWithKvStore(
             self._ctor,
             clone_parts_mapping(self._store_parts(), scope),
+            commit_part=self._commit_part,
             mandatory=self._mandatory,
             created_at_merge=self._created_at_merge,
         )

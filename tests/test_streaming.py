@@ -21,6 +21,7 @@ import pytest
 
 from kvtsjl import KvSet, MemoryKvStore, SerDe
 from kvtsjl.backends.filesystem import FilesystemKvStore
+from kvtsjl.exceptions import UncommittedWriteError
 from kvtsjl.serde import ChainedStreamingSerDe, CompressedSerDe, StreamingSerDe
 from kvtsjl.serde.compress import STREAM_CHUNK, CompressionCodec
 from kvtsjl.store.streaming import StreamingReadView, StreamingView, close_stream
@@ -869,8 +870,10 @@ def test_a_failed_mirror_write_does_not_touch_the_secondary(backend: str) -> Non
     try:
         primary = cast(Any, stores[backend])
         secondary = fs_store(None)
-        with pytest.raises(OSError, match="source failed midway"):
+        with pytest.raises(UncommittedWriteError) as caught:
             primary.mirror(secondary).set_stream("k", FailsMidStream(CHUNK * 20))
+        assert caught.value.committed is False
+        assert "source failed midway" in str(caught.value.failures["primary"])
         assert primary.get("k") is None
         assert secondary.get("k") is None, "secondary got a value the primary rejected"
     finally:

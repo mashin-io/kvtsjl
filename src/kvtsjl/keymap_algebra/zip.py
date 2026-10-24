@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from typing import Any
 
+from kvtsjl.exceptions import KvStoreError
 from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap_algebra.topology import RecordTopologyMixin, Role, Topology
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -34,7 +36,7 @@ def row_present(values: Sequence[Any | None], mandatory: Sequence[bool]) -> bool
     return True
 
 
-class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
+class ZippedKeyMap[K](RecordTopologyMixin[K, tuple[Any, ...]], KeyMap[K, tuple[Any, ...]]):
     """Pointwise product; presence controlled by ``mandatory`` (default OR)."""
 
     def __init__(
@@ -48,94 +50,50 @@ class ZippedKeyMap[K](KeyMap[K, tuple[Any, ...]]):
         self._parts = tuple(parts)
         self._mandatory = normalize_mandatory(len(parts), mandatory)
 
-    def get(self, key: K) -> tuple[Any, ...] | None:
-        values = tuple(part.get(key) for part in self._parts)
-        if not row_present(values, self._mandatory):
-            return None
-        return values
+    def topology(self) -> Topology[K, tuple[Any, ...]]:
+        """Every part a component: no part alone decides the row exists."""
+        parts = tuple(
+            self._part(f"part[{index}]", Role.COMPONENT, part, _slot(index))
+            for index, part in enumerate(self._parts)
+        )
+        return Topology(
+            parts=parts,
+            assemble=lambda held: self._row(tuple(held[part] for part in parts)),
+        )
 
-    def set(self, key: K, value: tuple[Any, ...], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        if len(value) != len(self._parts):
-            raise ValueError(
-                f"zip set expects {len(self._parts)}-tuple, got {len(value)}"
-            )
-        for part, item in zip(self._parts, value, strict=True):
-            if item is None:
-                part.delete(key)
-            else:
-                part.set(key, item, ttl=ttl, created_at=created_at)
+    def _row(self, values: tuple[Any, ...]) -> tuple[Any, ...] | None:
+        return values if row_present(values, self._mandatory) else None
 
-    def delete(self, key: K) -> bool:
-        return any(part.delete(key) for part in self._parts)
+    def _check(self, values: Iterable[tuple[Any, ...]]) -> None:
+        for value in values:
+            if len(value) != len(self._parts):
+                raise ValueError(
+                    f"zip set expects {len(self._parts)}-tuple, got {len(value)}"
+                )
 
-    def batch_get(self, keys: Sequence[K]) -> dict[K, tuple[Any, ...]]:
-        """Fan out to each part's ``batch_get`` once; assemble like point ``get``.
+    def set(
+        self,
+        key: K,
+        value: tuple[Any, ...],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._check([value])
+        super().set(key, value, ttl=ttl, created_at=created_at)
 
-        Empty ``keys`` returns ``{}`` without calling parts. Duplicate keys are
-        collapsed (order-preserving) before part calls; the result is a dict so
-        duplicates would last-win either way.
-        """
-        if not keys:
-            return {}
-        unique = list(dict.fromkeys(keys))
-        part_maps = [part.batch_get(unique) for part in self._parts]
-        out: dict[K, tuple[Any, ...]] = {}
-        for key in unique:
-            values = tuple(pm.get(key) for pm in part_maps)
-            if row_present(values, self._mandatory):
-                out[key] = values
-        return out
-
-    def batch_set(self, items: Mapping[K, tuple[Any, ...]], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
-
-        Per part: non-``None`` tuple slots are ``batch_set``; ``None`` slots are
-        ``batch_delete`` (same as point ``set``).
-        """
-        if not items:
-            return
-        n = len(self._parts)
-        for value in items.values():
-            if len(value) != n:
-                raise ValueError(f"zip set expects {n}-tuple, got {len(value)}")
-        for index, part in enumerate(self._parts):
-            to_set: dict[K, Any] = {}
-            to_delete: list[K] = []
-            for key, value in items.items():
-                item = value[index]
-                if item is None:
-                    to_delete.append(key)
-                else:
-                    to_set[key] = item
-            if to_set:
-                part.batch_set(to_set, ttl=ttl, created_at=created_at)
-            if to_delete:
-                part.batch_delete(to_delete)
-
-    def batch_delete(self, keys: Sequence[K]) -> int:
-        """Fan out to each part's ``batch_delete`` once; count like point ``delete``.
-
-        A key counts as present if any part has it (probed via part ``batch_get``
-        before deletes). Duplicate keys in ``keys`` count at most once.
-        """
-        if not keys:
-            return 0
-        unique = list(dict.fromkeys(keys))
-        present: set[K] = set()
-        for part in self._parts:
-            present.update(part.batch_get(unique).keys())
-        for part in self._parts:
-            part.batch_delete(unique)
-        n = 0
-        seen: set[K] = set()
-        for key in keys:
-            if key in present and key not in seen:
-                n += 1
-                seen.add(key)
-        return n
+    def batch_set(
+        self,
+        items: Mapping[K, tuple[Any, ...]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._check(items.values())
+        super().batch_set(items, ttl=ttl, created_at=created_at)
 
 
-class ZipWithKeyMap[K, V](KeyMap[K, V]):
+class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
     """``zip`` assembled via a dataclass (or constructor) with optional fields."""
 
     def __init__(
@@ -145,6 +103,7 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         *,
         field_names: Sequence[str] | None = None,
         mandatory: Sequence[bool] | None = None,
+        commit_part: str | None = None,
     ) -> None:
         if not parts:
             raise ValueError("zip_with requires at least one part")
@@ -163,88 +122,63 @@ class ZipWithKeyMap[K, V](KeyMap[K, V]):
         if extra:
             raise ValueError(f"zip_with unknown part names: {extra}")
         self._mandatory = normalize_mandatory(len(self.field_names), mandatory)
+        if commit_part is not None and commit_part not in self._parts:
+            raise ValueError(
+                f"commit_part {commit_part!r} is not one of {tuple(self._parts)}"
+            )
+        self._commit_part = commit_part
 
-    def get(self, key: K) -> V | None:
-        values = tuple(self._parts[name].get(key) for name in self.field_names)
+    def topology(self) -> Topology[K, V]:
+        """The commit part is the authority; every other part a component.
+
+        Without a commit part no part alone decides the record exists, so
+        every part is a component and presence stays with ``mandatory``.
+        """
+        parts = tuple(
+            self._part(
+                name,
+                Role.AUTHORITY if name == self._commit_part else Role.COMPONENT,
+                self._parts[name],
+                _field(name),
+            )
+            for name in self.field_names
+        )
+        return Topology(
+            parts=parts,
+            assemble=lambda held: self._record(tuple(held[part] for part in parts)),
+        )
+
+    def _record(self, values: tuple[Any, ...]) -> V | None:
         if not row_present(values, self._mandatory):
             return None
-        kwargs = dict(zip(self.field_names, values, strict=True))
-        return self._ctor(**kwargs)
+        return self._ctor(**dict(zip(self.field_names, values, strict=True)))
 
-    def set(self, key: K, value: V, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        for name in self.field_names:
-            item = getattr(value, name)
-            part = self._parts[name]
-            if item is None:
-                part.delete(key)
-            else:
-                part.set(key, item, ttl=ttl, created_at=created_at)
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """Write the other parts, then commit only if the record is absent.
 
-    def delete(self, key: K) -> bool:
-        return any(part.delete(key) for part in self._parts.values())
-
-    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
-        """Fan out to each part's ``batch_get`` once; assemble like point ``get``.
-
-        Empty ``keys`` returns ``{}`` without calling parts. Duplicate keys are
-        collapsed (order-preserving) before part calls; the result is a dict so
-        duplicates would last-win either way.
+        Two writers may both write the non-commit parts — nothing can see them
+        while the commit part is absent — and only one commits. Where those
+        parts are keyed by the record key, the winner's commit can end up
+        beside the loser's body; key them by content to rule that out.
         """
-        if not keys:
-            return {}
-        unique = list(dict.fromkeys(keys))
-        part_found = {
-            name: part.batch_get(unique) for name, part in self._parts.items()
-        }
-        out: dict[K, V] = {}
-        for key in unique:
-            values = tuple(part_found[name].get(key) for name in self.field_names)
-            if row_present(values, self._mandatory):
-                kwargs = dict(zip(self.field_names, values, strict=True))
-                out[key] = self._ctor(**kwargs)
-        return out
+        if self._commit_part is None:
+            raise KvStoreError(
+                "set_if_absent on a zip needs a commit_part: without one no "
+                "part decides whether the record exists"
+            )
+        return super().set_if_absent(key, value, ttl=ttl, created_at=created_at)
 
-    def batch_set(self, items: Mapping[K, V], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        """Fan out to each part's ``batch_set`` / ``batch_delete`` once.
 
-        Per field: non-``None`` values are ``batch_set``; ``None`` values are
-        ``batch_delete`` (same as point ``set``).
-        """
-        if not items:
-            return
-        for name in self.field_names:
-            part = self._parts[name]
-            to_set: dict[K, Any] = {}
-            to_delete: list[K] = []
-            for key, value in items.items():
-                item = getattr(value, name)
-                if item is None:
-                    to_delete.append(key)
-                else:
-                    to_set[key] = item
-            if to_set:
-                part.batch_set(to_set, ttl=ttl, created_at=created_at)
-            if to_delete:
-                part.batch_delete(to_delete)
+def _slot(index: int) -> Callable[[tuple[Any, ...]], Any]:
+    return lambda value: value[index]
 
-    def batch_delete(self, keys: Sequence[K]) -> int:
-        """Fan out to each part's ``batch_delete`` once; count like point ``delete``.
 
-        A key counts as present if any part has it (probed via part ``batch_get``
-        before deletes). Duplicate keys in ``keys`` count at most once.
-        """
-        if not keys:
-            return 0
-        unique = list(dict.fromkeys(keys))
-        present: set[K] = set()
-        for part in self._parts.values():
-            present.update(part.batch_get(unique).keys())
-        for part in self._parts.values():
-            part.batch_delete(unique)
-        n = 0
-        seen: set[K] = set()
-        for key in keys:
-            if key in present and key not in seen:
-                n += 1
-                seen.add(key)
-        return n
+def _field(name: str) -> Callable[[object], Any]:
+    return lambda value: getattr(value, name)

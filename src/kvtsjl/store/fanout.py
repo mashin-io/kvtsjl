@@ -1,4 +1,4 @@
-"""Fan-out mixins for composed KvStores (scope / scan / GC).
+"""Fan-out helpers for composed KvStores (scope / scan / GC passthrough).
 
 Not exported in package ``__all__`` — same rule as capability mixins.
 
@@ -18,7 +18,6 @@ from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap import ReadableKeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, ScannableMixin, ScopedMixin
-from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.scan import (
     Needs,
@@ -55,6 +54,39 @@ def iter_paged_batch_get[K, V](
         found = store.batch_get(page)
         for k in page:
             yield k, found.get(k)
+
+
+def iter_present[K, V](
+    store: ReadableKeyMap[K, V],
+    keys: Iterator[K],
+    *,
+    page_size: int,
+    include_values: bool,
+) -> Iterator[tuple[K, V | None]]:
+    """Yield the keys that ``store`` confirms, a page at a time.
+
+    For a composition whose keys come from somewhere other than the record
+    itself — the parts of an assembled record — a key found is a candidate,
+    not a record: it is yielded only if ``batch_get`` (or ``batch_exists``,
+    when no values are wanted) agrees, so a scan never lists what ``get``
+    would not return.
+    """
+    page: list[K] = []
+
+    def confirm(batch: list[K]) -> Iterator[tuple[K, V | None]]:
+        if include_values:
+            found = store.batch_get(batch)
+            return ((k, found[k]) for k in batch if k in found)
+        present = store.batch_exists(batch)
+        return ((k, None) for k in batch if k in present)
+
+    for key in keys:
+        page.append(key)
+        if len(page) >= page_size:
+            yield from confirm(page)
+            page = []
+    if page:
+        yield from confirm(page)
 
 
 def iter_union_keys[K](
@@ -99,40 +131,7 @@ def iter_union_keys_spec[K](
                 yield row.key
 
 
-def gc_across_parts[K](
-    parts: Sequence[ExpiringMixin[K]],
-    *,
-    max_entries: int,
-) -> list[K]:
-    """GC each part independently; return the de-duplicated union of keys.
-
-    ``max_entries`` is the budget **per part**, not a shared allowance.
-
-    Parts own their own ``TtlPolicy`` and expire independently, so a key may be
-    expired in one part and live in another — there is no composition-level
-    expiry. Sharing one budget across parts coupled them for no reason and
-    starved later ones: with two parts and ``max_entries`` equal to the number
-    of expired rows, part 0 consumed the whole allowance and part 1 was never
-    visited, while the call still reported success. Entries in the unvisited
-    part were then unreachable if the visited part held the only index.
-
-    Consequence of the per-part budget: the returned union may exceed
-    ``max_entries`` when parts expire disjointly. That is deliberate — the
-    alternative is silently skipping parts.
-    """
-    if max_entries < 1:
-        raise ValueError(f"max_entries must be >= 1, got {max_entries}")
-    seen: set[K] = set()
-    unique: list[K] = []
-    for part in parts:
-        for key in part.gc_expired_keys(max_entries=max_entries):
-            if key not in seen:
-                seen.add(key)
-                unique.append(key)
-    return unique
-
-
-def _part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
+def part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
     return ScanSpec(
         where=key_where,
         project=Projection.KEYS,
@@ -143,7 +142,7 @@ def _part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
     )
 
 
-def _explain_parts[K](
+def explain_parts[K](
     parts: Sequence[ScannableMixin[K, Any]],
     spec: ScanSpec[K],
     *,
@@ -161,7 +160,7 @@ def _explain_parts[K](
     )
 
 
-def _needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
+def needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
     if spec.project is Projection.ENTRIES:
         return True
     if residual.needs() & Needs.VALUE:
@@ -169,7 +168,7 @@ def _needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
     return False
 
 
-def _require_unordered_zip[K](spec: ScanSpec[K], op: str) -> None:
+def require_unordered[K](spec: ScanSpec[K], op: str) -> None:
     if spec.order is not ScanOrder.UNORDERED:
         raise KvStoreScanUnsupported(
             f"{op} scan supports ScanOrder.UNORDERED only "
@@ -206,9 +205,9 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
+        part_spec = part_key_spec(spec, key_where)
         keys = (row.key for row in self._scan_src.scan_rows(part_spec))
-        need_values = _needs_values(spec, residual)
+        need_values = needs_values(spec, residual)
         raw = (
             ScanRow(key=k, value=v)
             for k, v in iter_paged_batch_get(
@@ -231,123 +230,9 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
         from kvtsjl.store.schema.scan import predicate_label
 
         key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
-        return _explain_parts(
+        part_spec = part_key_spec(spec, key_where)
+        return explain_parts(
             [self._scan_src],
-            part_spec,
-            name=type(self).__name__,
-            residual_label=predicate_label(residual),
-        )
-
-
-class ScanUnionMixin[K, V](ReadableKeyMap[K, V], ABC):
-    """Key-union scan across ``_scan_parts``; values via ``self.batch_get`` pages."""
-
-    _scan_parts: Sequence[ScannableMixin[K, Any]]
-
-    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        yield from iter_paged_batch_get(
-            self,
-            iter_union_keys(self._scan_parts, query),
-            page_size=query.page_size,
-            include_values=query.include_values,
-        )
-
-    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
-        _require_unordered_zip(spec, "zip")
-        key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
-        keys = iter_union_keys_spec(self._scan_parts, part_spec)
-        need_values = _needs_values(spec, residual)
-        raw = (
-            ScanRow(key=k, value=v)
-            for k, v in iter_paged_batch_get(
-                self,
-                keys,
-                page_size=spec.page_size,
-                include_values=need_values,
-            )
-        )
-        yield from apply_cascade(
-            raw,
-            residual=residual,
-            store=self,
-            refine=spec.refine,
-            limit=spec.limit,
-            project=spec.project,
-        )
-
-    def explain_node(self, spec: ScanSpec[K]) -> Any:
-        from kvtsjl.store.schema.scan import predicate_label
-
-        _require_unordered_zip(spec, "zip")
-        key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
-        return _explain_parts(
-            list(self._scan_parts),
-            part_spec,
-            name=type(self).__name__,
-            residual_label=predicate_label(residual),
-        )
-
-
-class ScanPrimaryMixin[K, V]:
-    """Scan keys from primary; values via ``primary.batch_get`` only (no promote).
-
-    ``_scan_primary`` is a ``ReadableKvStore`` (scannable + ``batch_get``).
-    Must **not** call ``self.batch_get`` — coalesce/fallback promote on that path.
-    """
-
-    _scan_primary: ReadableKvStore[K, V]
-
-    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        keys = (
-            key
-            for key, _ in self._scan_primary.scan_entries(
-                ScanQuery(
-                    prefix=query.prefix,
-                    include_values=False,
-                    page_size=query.page_size,
-                )
-            )
-        )
-        yield from iter_paged_batch_get(
-            self._scan_primary,
-            keys,
-            page_size=query.page_size,
-            include_values=query.include_values,
-        )
-
-    def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
-        key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
-        keys = (row.key for row in self._scan_primary.scan_rows(part_spec))
-        need_values = _needs_values(spec, residual)
-        raw = (
-            ScanRow(key=k, value=v)
-            for k, v in iter_paged_batch_get(
-                self._scan_primary,
-                keys,
-                page_size=spec.page_size,
-                include_values=need_values,
-            )
-        )
-        yield from apply_cascade(
-            raw,
-            residual=residual,
-            store=self._scan_primary,
-            refine=spec.refine,
-            limit=spec.limit,
-            project=spec.project,
-        )
-
-    def explain_node(self, spec: ScanSpec[K]) -> Any:
-        from kvtsjl.store.schema.scan import predicate_label
-
-        key_where, residual = split_key_predicates(spec.where)
-        part_spec = _part_key_spec(spec, key_where)
-        return _explain_parts(
-            [self._scan_primary],
             part_spec,
             name=type(self).__name__,
             residual_label=predicate_label(residual),
@@ -361,15 +246,6 @@ class GcPassthroughMixin[K]:
 
     def gc_expired_keys(self, *, max_entries: int) -> list[K]:
         return self._gc_src.gc_expired_keys(max_entries=max_entries)
-
-
-class GcFanoutMixin[K]:
-    """Budget-capped GC across ``_gc_parts``."""
-
-    _gc_parts: Sequence[ExpiringMixin[K]]
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        return gc_across_parts(self._gc_parts, max_entries=max_entries)
 
 
 class ScopeFanoutMixin(ABC):

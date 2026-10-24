@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import fields, is_dataclass
-from datetime import datetime
-import logging
-from typing import Any, Literal, cast, overload
+from typing import Any, Literal, Never, cast, overload
 
 from kvtsjl.exceptions import KvStoreIndexError, PartialSyncError
 from kvtsjl.index.logical.abc import Index, IndexHit
+from kvtsjl.keymap_algebra.topology import Role, Target, Topology, WriteOptions
 from kvtsjl.scope import Scope
 from kvtsjl.store.compose.delegating import DelegatingKvStore
+from kvtsjl.store.compose.topology import StoreTopologyMixin
 from kvtsjl.store.logical import KvStore
-from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
-from kvtsjl.store.schema.scan import Predicate
-from kvtsjl.store.schema.ttl import TtlPolicy
-
-logger = logging.getLogger(__name__)
 
 
 def _index_fanout_label(i: int, index: Index[Any, Any, Any, Any]) -> str:
@@ -27,12 +22,63 @@ def _index_fanout_label(i: int, index: Index[Any, Any, Any, Any]) -> str:
     return f"{i}:{name}"
 
 
-class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
-    """Primary store plus attached indexes; mutations sync all indexes."""
+class _IndexesTarget[K, V](Target[K, V, Never]):
+    """The attached indexes, as one dependent of the record.
 
-    _pending: list[
-        tuple[Callable[[Index[Any, Any, Any, Any]], object], str, SyncPolicy]
-    ]
+    It holds nothing a read could return — hence ``Never`` — so it is never
+    looked up, only written and deleted.
+
+    Every index is attempted even when one fails, and the failures are
+    reported together, labelled by index; the topology applies the policy.
+    """
+
+    def __init__(
+        self, indexes: Sequence[Index[Any, K, V, Any]], *, policy: SyncPolicy
+    ) -> None:
+        super().__init__("indexes", Role.DEPENDENT, policy=policy)
+        self._indexes = indexes
+
+    def _each(self, op: Callable[[Index[Any, K, V, Any]], object], what: str) -> None:
+        failures: dict[str, Exception] = {}
+        for i, index in enumerate(self._indexes):
+            if not index.sync_on_write:
+                continue
+            try:
+                op(index)
+            except Exception as exc:
+                failures[_index_fanout_label(i, index)] = exc
+        if failures:
+            first = next(iter(failures.values()))
+            raise PartialSyncError(
+                f"index {what} failed for {len(failures)} target(s)",
+                failures=failures,
+            ) from first
+
+    def write(self, key: K, value: V, options: WriteOptions) -> None:
+        self._each(lambda index: index.sync(key, value), "upsert")
+
+    def batch_write(self, items: Mapping[K, V], options: WriteOptions) -> None:
+        self._each(lambda index: index.batch_sync(items), "batch upsert")
+
+    def delete(self, key: K) -> bool:
+        self._each(lambda index: index.delete(key), "delete")
+        return False
+
+    def batch_delete(self, keys: Sequence[K]) -> int:
+        self._each(lambda index: index.batch_delete(keys), "batch delete")
+        return 0
+
+
+class IndexedKvStore[K, V, ViaT](StoreTopologyMixin[K, V], DelegatingKvStore[K, V]):
+    """Primary store plus attached indexes; mutations sync all indexes.
+
+    The store is the authority and the indexes one dependent, so every
+    operation's order follows from those roles — see
+    :mod:`kvtsjl.keymap_algebra.topology`. Where the store's writes are
+    deferred to the caller's commit, index syncs wait for
+    ``flush_index_syncs``; GC syncs are best-effort, since leftover index
+    entries are phantoms that ``search`` filters out.
+    """
 
     def __init__(
         self,
@@ -51,7 +97,6 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         self._default_index = default_index
         self._bundle = bundle
         self._sync_policy = sync_policy
-        self._pending = []
         for index in self._indexes:
             index.bind_store(self)
 
@@ -75,92 +120,14 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
     def default_index(self) -> Index[Any, K, V, Any] | None:
         return self._default_index
 
-    def get(self, key: K) -> V | None:
-        return self._underlying.get(key)
-
-    def set(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        self._underlying.set(key, value, ttl=ttl, created_at=created_at)
-        self._sync_upsert(key, value)
-
-    def delete(self, key: K) -> bool:
-        deleted = self._underlying.delete(key)
-        if deleted:
-            self._sync_delete(key)
-        return deleted
-
-    def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
-        return self._underlying.batch_get(keys)
-
-    def batch_set(
-        self,
-        items: Mapping[K, V],
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> None:
-        self._underlying.batch_set(items, ttl=ttl, created_at=created_at)
-        self._sync_batch_upsert(items)
-
-    def batch_delete(self, keys: Sequence[K]) -> int:
-        deleted = self._underlying.batch_delete(keys)
-        self._sync_batch_delete(keys)
-        return deleted
-
-    def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
-        yield from self._underlying.scan_entries(query)
-
-    def delete_where(
-        self,
-        where: Predicate[K],
-        *,
-        limit: int | None = None,
-        sync_policy: SyncPolicy | None = None,
-    ) -> int:
-        from kvtsjl.store.schema.scan import Projection, ScanSpec, is_gc_predicate
-
-        if is_gc_predicate(where):
-            max_entries = limit if limit is not None else 2_147_483_647
-            if max_entries < 1:
-                raise ValueError(f"limit must be >= 1 for GC, got {limit}")
-            keys = self._underlying.gc_expired_keys(max_entries=max_entries)
-            if keys:
-                # Always BEST_EFFORT unless overridden: raising would fail a
-                # successful cleanup; leftover index entries are phantoms
-                # filtered by _hydrate.
-                policy = (
-                    sync_policy
-                    if sync_policy is not None
-                    else SyncPolicy.BEST_EFFORT
-                )
-                self._sync_batch_delete(keys, policy=policy)
-            return len(keys)
-        keys = [
-            row.key
-            for row in self.scan_rows(
-                ScanSpec(where=where, project=Projection.KEYS, limit=limit)
+    def topology(self) -> Topology[K, V]:
+        """The store is the authority; the indexes a dependent derivation."""
+        return Topology(
+            (
+                self._target("store", Role.AUTHORITY, self._underlying),
+                _IndexesTarget(self._indexes, policy=self._sync_policy),
             )
-        ]
-        if not keys:
-            return 0
-        deleted = self._underlying.batch_delete(keys)
-        policy = sync_policy if sync_policy is not None else self._sync_policy
-        self._sync_batch_delete(keys, policy=policy)
-        return deleted
-
-    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
-        keys = self._underlying.gc_expired_keys(max_entries=max_entries)
-        if keys:
-            # Always BEST_EFFORT: raising would fail a successful cleanup;
-            # leftover index entries are phantoms filtered by _hydrate.
-            self._sync_batch_delete(keys, policy=SyncPolicy.BEST_EFFORT)
-        return keys
+        )
 
     def clone_with_scope(self, scope: Scope) -> IndexedKvStore[K, V, ViaT]:
         clones = [idx.clone_with_scope(scope) for idx in self._indexes]
@@ -212,125 +179,6 @@ class IndexedKvStore[K, V, ViaT](DelegatingKvStore[K, V]):
         if id(index) not in self._index_ids:
             raise KvStoreIndexError("index is not attached to this store")
         return index
-
-    def _finish_fanout(
-        self,
-        failures: dict[str, Exception],
-        *,
-        policy: SyncPolicy,
-        what: str,
-    ) -> None:
-        if not failures:
-            return
-        if policy is SyncPolicy.BEST_EFFORT:
-            for label, exc in failures.items():
-                try:
-                    logger.exception(
-                        "index %s failed (%s)",
-                        what,
-                        label,
-                        exc_info=exc,
-                    )
-                except Exception:
-                    # Logging must not replace the sync failure already in `failures`.
-                    pass
-            return
-        first = next(iter(failures.values()))
-        raise PartialSyncError(
-            f"index {what} failed for {len(failures)} target(s)",
-            failures=failures,
-        ) from first
-
-    def _run_index_ops(
-        self,
-        op: Callable[[Index[Any, K, V, Any]], object],
-        *,
-        what: str,
-        policy: SyncPolicy | None = None,
-    ) -> None:
-        effective = policy if policy is not None else self._sync_policy
-        if self._underlying.writes_are_deferred:
-            # The caller owns the commit, so the write is not durable yet.
-            # Running now would embed inside their transaction — holding the
-            # write lock across a network call — and a rollback would leave
-            # the index entry behind. Hold it until they say the commit landed.
-            self._pending.append((op, what, effective))
-            return
-        self._apply_index_ops(op, what=what, policy=effective)
-
-    def _apply_index_ops(
-        self,
-        op: Callable[[Index[Any, K, V, Any]], object],
-        *,
-        what: str,
-        policy: SyncPolicy,
-    ) -> None:
-        failures: dict[str, Exception] = {}
-        for i, index in enumerate(self._indexes):
-            if not index.sync_on_write:
-                continue
-            try:
-                op(index)
-            except Exception as exc:
-                label = _index_fanout_label(i, index)
-                failures[label] = exc
-        self._finish_fanout(failures, policy=policy, what=what)
-
-    # --- deferred syncs -----------------------------------------------------
-
-    @property
-    def pending_index_syncs(self) -> int:
-        """Index operations waiting for the caller's commit."""
-        return len(self._pending)
-
-    def flush_index_syncs(self) -> None:
-        """Run the queued index operations; call this after the commit.
-
-        Failures surface here rather than at the write, under the same policy:
-        ``REQUIRED`` raises ``PartialSyncError``, ``BEST_EFFORT`` logs. The
-        queue is cleared either way, so a failed flush is not retried silently.
-        """
-        queued, self._pending = self._pending, []
-        for op, what, policy in queued:
-            self._apply_index_ops(op, what=what, policy=policy)
-
-    def discard_index_syncs(self) -> None:
-        """Drop the queued operations; call this after a rollback."""
-        self._pending = []
-
-    def _sync_upsert(self, key: K, value: V) -> None:
-        self._run_index_ops(
-            lambda index: index.sync(key, value),
-            what="upsert",
-        )
-
-    def _sync_batch_upsert(self, items: Mapping[K, V]) -> None:
-        if not items:
-            return
-        self._run_index_ops(
-            lambda index: index.batch_sync(items),
-            what="batch upsert",
-        )
-
-    def _sync_delete(self, key: K) -> None:
-        self._run_index_ops(
-            lambda index: index.delete(key),
-            what="delete",
-        )
-
-    def _sync_batch_delete(
-        self,
-        keys: Sequence[K],
-        *,
-        policy: SyncPolicy | None = None,
-    ) -> None:
-        if not keys:
-            return
-        self._run_index_ops(
-            lambda index: index.batch_delete(keys),
-            what="batch delete",
-            policy=policy,
-        )
 
     def search_hits[Q, M](
         self, index: Index[Q, K, V, M], query: Q, *, limit: int = 100

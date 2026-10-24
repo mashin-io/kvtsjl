@@ -139,6 +139,32 @@ def test_it_respects_the_bound_scope() -> None:
 # --- the capability must survive composition -------------------------------
 
 
+def _mem_pair() -> tuple[Any, Any]:
+    return _memory(), _memory()
+
+
+def test_it_survives_mirror_and_the_secondary_only_copies_a_real_write() -> None:
+    """A losing writer must not plant its value in the secondary."""
+    primary, secondary = _mem_pair()
+    store = primary.mirror(secondary)
+
+    assert store.set_if_absent("k", "first") is True
+    assert secondary.get("k") == "first"
+
+    assert store.set_if_absent("k", "second") is False
+    assert primary.get("k") == "first"
+    assert secondary.get("k") == "first", "the losing write reached the secondary"
+
+
+def test_it_survives_fallback_read() -> None:
+    primary, source = _mem_pair()
+    store = primary.fallback_read(source)
+
+    assert store.set_if_absent("k", "v") is True
+    assert store.set_if_absent("k", "other") is False
+    assert primary.get("k") == "v"
+
+
 def test_it_survives_a_mapped_view() -> None:
     inner = _memory()
     view = inner.imap(lambda s: s.upper(), lambda s: s.lower())
@@ -156,3 +182,37 @@ def test_readonly_refuses_it_as_a_write() -> None:
     store.set_if_absent("k", "v")
     with pytest.raises(KvStoreReadOnlyError, match="set_if_absent"):
         store.readonly().set_if_absent("j", "v")
+
+
+def test_an_indexed_store_indexes_only_a_write_that_happened() -> None:
+    """A losing writer must not sync: the stored value is someone else's.
+
+    Indexing our value would describe a record that is not there — search
+    would return a hit whose hydrated value is the winner's, or nothing.
+    """
+    synced: list[tuple[str, str]] = []
+
+    class SpyIndex:
+        name = "spy"
+        sync_on_write = True
+        sync_policy = None
+
+        def bind_store(self, store: Any) -> None:
+            self._store = store
+
+        def sync(self, key: str, value: str) -> None:
+            synced.append((key, value))
+
+        def batch_sync(self, items: Any) -> None: ...
+        def delete(self, key: str) -> None: ...
+        def batch_delete(self, keys: Any) -> None: ...
+        def clone_with_scope(self, scope: Any) -> Any:
+            return self
+
+    store = _memory().indexed(SpyIndex())
+
+    assert store.set_if_absent("k", "first") is True
+    assert synced == [("k", "first")]
+
+    assert store.set_if_absent("k", "second") is False
+    assert synced == [("k", "first")], "indexed a write that never happened"

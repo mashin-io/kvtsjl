@@ -125,6 +125,9 @@ class IMappedKvStore[K, V, U](
     ) -> None:
         self._src().set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
+    def child_stores(self) -> tuple[object, ...]:
+        return (self._src(),)
+
     def set_if_absent(
         self,
         key: K,
@@ -224,6 +227,9 @@ class IMappedKeysKvStore[K, SK, V](
         created_at: datetime | None = None,
     ) -> None:
         self._src().set(self._to_store(key), value, ttl=ttl, created_at=created_at)
+
+    def child_stores(self) -> tuple[object, ...]:
+        return (self._src(),)
 
     def set_if_absent(
         self,

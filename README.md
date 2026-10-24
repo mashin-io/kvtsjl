@@ -316,7 +316,7 @@ Underlying wrapper types (`IndexedKvStore`, `FallbackReadKvStore`, …) exist fo
 
 ### Optional zip
 
-A row exists if **any** part is present; each field is independently `PartV | None`. `set` writes non-`None` parts and clears `None` ones. `scan` is the union of part keys.
+A row exists if **any** part is present (or, with `mandatory=[…]`, every mandatory one); each field is independently `PartV | None`. `set` writes non-`None` parts and clears `None` ones. `scan` lists exactly the keys `get` returns.
 
 ```python
 from dataclasses import dataclass
@@ -333,6 +333,13 @@ articles = KeyMap.zip_with(Article, meta=meta_store, body=body_store)
 
 articles.set("doc:1", Article(meta={"tag": "news"}, body="…"))
 articles.set("doc:1", Article(meta=None, body="updated"))  # clears meta, keeps body
+```
+
+**A part that decides existence** — when one part refers to the others (a row pointing at a body), name it `commit_part`. It is written last and removed first, so a reader that finds it always finds what it refers to; it alone answers `exists` and `scan`; and `set_if_absent` commits the record once:
+
+```python
+records = KvStore.zip_with(Record, commit_part="row", row=rows, body=bodies)
+records.set_if_absent("doc:1", Record(row=row, body=body))  # True once, then False
 ```
 
 **Strict typing** — prefer `.zip_as` with a parts bundle (like `.indexed_as` for indexes):
@@ -429,6 +436,66 @@ imap_keys → imap → coalesce → zip_with → then → expand → map → ind
 ```
 
 Light laws: zip row iff any part; `then` is `other.get(self.get(k))`; expand miss iff left miss; coalesce is left-or-right with writes on left.
+
+---
+
+## Composition laws
+
+The store algebra above builds stores from stores. A second, smaller algebra governs it: one set of rules for how **every** composition that puts a record in more than one place — `mirror`, `fallback_read`, `indexed`, `zip_with`, and any you write — carries out **every** operation.
+
+A composition declares only what each place is to the record. That is its **role**:
+
+| Role | Example | Written | Removed | Read |
+|------|---------|---------|---------|------|
+| **Component** | a zip's body | before the authority | after it | assembled into the record |
+| **Authority** | mirror's primary, a zip's `commit_part` | the commit point | first | decides existence |
+| **Dependent** | mirror's secondary, indexes, a cache | after the authority | after it | per its *lookup* |
+| **Fallback** | `fallback_read`'s secondary | never | never | after the authority misses |
+
+A target has exactly one role — a component is written before the commit point and the authority *is* it, so the two never merge. But role is independent of **shape**: whether a target holds the whole record or a piece of it. A piece that decides existence is the authority holding a piece — a zip's `commit_part`. When several pieces must *all* be present, there is no authority: every piece is a component and `mandatory=[…]` decides, at the cost of `set_if_absent`.
+
+Plus, per target: its **lookup** (read before the authority — a cache; after it — a fallback; or never — an index), whether a read **fills** it on a miss (promotion, read-through caching), and for a dependent its **sync policy**.
+
+From that declaration come the only orders any operation uses:
+
+- **Commit** — components → authority → dependents (`set`, `batch_set`, `set_if_absent`, `set_stream`)
+- **Removal** — authority → components → dependents (`delete`, `batch_delete`, `delete_where`, GC)
+- **Lookup** — caches → authority → fallbacks (`get`, `exists`, `stat`, `read_stream`)
+- **Assembly** — authority, then the other parts (records split across a zip)
+
+Each operation is one of those traversals plus when it stops, how it combines results, and what a failure means. So these hold for every composition, at every level of nesting:
+
+1. **Commit before derive** — no dependent is written before the record is committed.
+2. **Referent before reference** — parts are written before the authority that refers to them, and removed after it.
+3. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
+4. **Scans list only records** — every key a scan yields is one `get` returns.
+5. **Reads write only fills** — best-effort, carrying the write clock so a promoted value keeps its remaining life.
+6. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
+7. **Budgets don't couple targets** — GC gives each target the full budget.
+8. **Dependents wait for your commit** — over a store in your transaction, index and copy syncs queue until `flush_index_syncs()` (or `discard_index_syncs()` on rollback).
+9. **Composition is closed** — a composition is a target to its parent, and the laws hold for the parent whatever the child is.
+
+Writing your own composition means declaring roles — no ordering code:
+
+```python
+from kvtsjl.keymap_algebra.topology import Lookup, Role, Topology
+from kvtsjl.store.compose.delegating import DelegatingKvStore
+from kvtsjl.store.compose.topology import StoreTopologyMixin
+
+class WriteThroughCache[K, V](StoreTopologyMixin[K, V], DelegatingKvStore[K, V]):
+    def __init__(self, store: KvStore[K, V], cache: KvStore[K, V]) -> None:
+        super().__init__(store)
+        self._store, self._cache = store, cache
+
+    def topology(self) -> Topology[K, V]:
+        return Topology((
+            self._target("store", Role.AUTHORITY, self._store),
+            self._target("cache", Role.DEPENDENT, self._cache,
+                         lookup=Lookup.BEFORE_AUTHORITY, fill=True),
+        ))
+```
+
+Writes, conditional writes, deletes, cache-first reads that fill on a miss, existence, scans, GC and deferred syncs all follow. The full reference — every operation, the laws and the model's limits — is the docstring of `kvtsjl.keymap_algebra.topology`.
 
 ---
 

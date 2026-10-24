@@ -37,7 +37,47 @@ class KvStoreTtlUnsupported(KvStoreError):
     """Backend cannot honor a per-write TTL override."""
 
 
-class PartialSyncError(KvStoreError):
+class RecordWriteError(KvStoreError):
+    """A record spread over several targets was not written everywhere.
+
+    ``committed`` is the one thing a caller needs to know: whether the target
+    that decides the record exists — the commit point — was written.
+
+    - ``True`` (:class:`PartialSyncError`): the record exists. Something
+      written *after* the commit point failed, so a copy or index may be stale.
+    - ``False`` (:class:`UncommittedWriteError`): the record does not exist.
+      Something written *before* the commit point may now be orphaned, for GC.
+
+    The flag holds at every level of a composed tree: each composition
+    reclassifies a failure by where it happened relative to its own commit
+    point, so the caller never needs to know the tree's shape.
+
+    ``failures`` maps target labels to the exceptions they raised.
+    """
+
+    committed: bool
+
+    def __init__(
+        self,
+        message: str = "record write failed",
+        *,
+        failures: Mapping[str, Exception],
+    ) -> None:
+        super().__init__(message)
+        self.failures: dict[str, Exception] = dict(failures)
+
+
+class UncommittedWriteError(RecordWriteError):
+    """The commit point was not written, so the record does not exist.
+
+    Targets written before it may hold orphaned data, which is unreferenced
+    and left to the GC policy.
+    """
+
+    committed = False
+
+
+class PartialSyncError(RecordWriteError):
     """One or more fan-out targets failed after the primary write landed.
 
     ``failures`` maps target labels to the exceptions they raised — that map is
@@ -45,8 +85,12 @@ class PartialSyncError(KvStoreError):
     only the *first* failure for traceback purposes; do not treat it as the
     full set.
 
-    The primary / earlier write is **not** rolled back.
+    The primary / earlier write is **not** rolled back. This is the committed
+    side of :class:`RecordWriteError`: the record exists, and what failed was
+    written after its commit point.
     """
+
+    committed = True
 
     def __init__(
         self,
@@ -54,5 +98,4 @@ class PartialSyncError(KvStoreError):
         *,
         failures: Mapping[str, Exception],
     ) -> None:
-        super().__init__(message)
-        self.failures: dict[str, Exception] = dict(failures)
+        super().__init__(message, failures=failures)

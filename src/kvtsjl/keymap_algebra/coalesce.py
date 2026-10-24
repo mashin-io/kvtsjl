@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from datetime import datetime
-
 from kvtsjl.keymap import KeyMap
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.keymap_algebra.topology import RecordTopologyMixin, Role, Topology
 
 
-class CoalescedKeyMap[K, T](KeyMap[K, T]):
-    """``get`` prefers left; writes go to left only."""
+class CoalescedKeyMap[K, T](RecordTopologyMixin[K, T], KeyMap[K, T]):
+    """``get`` prefers left; writes go to left only.
+
+    The left side is the authority and the right a fallback, consulted when
+    the left misses. With ``promote`` a fallback hit is written into the left,
+    best-effort — the read already succeeded.
+    """
 
     def __init__(
         self,
@@ -23,34 +25,10 @@ class CoalescedKeyMap[K, T](KeyMap[K, T]):
         self._right = right
         self._promote = promote
 
-    def get(self, key: K) -> T | None:
-        value = self._left.get(key)
-        if value is not None:
-            return value
-        value = self._right.get(key)
-        if value is not None and self._promote:
-            self._left.set(key, value)
-        return value
-
-    def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        self._left.set(key, value, ttl=ttl, created_at=created_at)
-
-    def delete(self, key: K) -> bool:
-        return self._left.delete(key)
-
-    def batch_get(self, keys: Sequence[K]) -> dict[K, T]:
-        found = self._left.batch_get(keys)
-        missing = [k for k in keys if k not in found]
-        if not missing:
-            return found
-        secondary = self._right.batch_get(missing)
-        if secondary and self._promote:
-            self._left.batch_set(secondary)
-        found.update(secondary)
-        return found
-
-    def batch_set(self, items: Mapping[K, T], *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
-        self._left.batch_set(items, ttl=ttl, created_at=created_at)
-
-    def batch_delete(self, keys: Sequence[K]) -> int:
-        return self._left.batch_delete(keys)
+    def topology(self) -> Topology[K, T]:
+        return Topology(
+            (
+                self._target("primary", Role.AUTHORITY, self._left, fill=self._promote),
+                self._target("secondary", Role.FALLBACK, self._right),
+            )
+        )

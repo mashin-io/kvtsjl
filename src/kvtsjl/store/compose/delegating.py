@@ -54,6 +54,9 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
             key, value, ttl=ttl, created_at=created_at
         )
 
+    def child_stores(self) -> tuple[object, ...]:
+        return (self._underlying,)
+
     @property
     def writes_are_deferred(self) -> bool:
         return self._underlying.writes_are_deferred

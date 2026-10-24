@@ -428,6 +428,7 @@ class ReadableKeyMap[K, T](ABC):
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
+        commit_part: str | None = None,
         **parts: KvStore[ZipK, Any],
     ) -> KvStore[ZipK, W]: ...
 
@@ -440,6 +441,7 @@ class ReadableKeyMap[K, T](ABC):
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
+        commit_part: str | None = None,
         **parts: KeyMap[ZipK, Any],
     ) -> KeyMap[ZipK, W]: ...
 
@@ -451,6 +453,7 @@ class ReadableKeyMap[K, T](ABC):
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
+        commit_part: str | None = None,
         **parts: ReadableKeyMap[ZipK, Any],
     ) -> ReadableKeyMap[ZipK, W]:
         """Assemble a dataclass (or constructor) from named part maps."""
@@ -460,6 +463,7 @@ class ReadableKeyMap[K, T](ABC):
             ctor,
             mandatory=mandatory,
             created_at_merge=created_at_merge,
+            commit_part=commit_part,
             **parts,
         )
 
@@ -472,6 +476,7 @@ class ReadableKeyMap[K, T](ABC):
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
+        commit_part: str | None = None,
     ) -> ReadableKeyMap[ZipK, W]:
         """Assemble from a dataclass bundle of part maps (strict field typing)."""
         from kvtsjl.keymap_algebra.build import build_zip_with
@@ -481,6 +486,7 @@ class ReadableKeyMap[K, T](ABC):
             ctor,
             mandatory=mandatory,
             created_at_merge=created_at_merge,
+            commit_part=commit_part,
             **parts_from_bundle(parts),
         )
 
