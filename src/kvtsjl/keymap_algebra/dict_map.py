@@ -25,6 +25,17 @@ class DictKeyMap[K, T](KeyMap[K, T]):
     def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._data[key] = value
 
+    def set_if_absent(
+        self,
+        key: K,
+        value: T,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """``dict.setdefault``: one step, so two callers cannot both insert."""
+        return self._data.setdefault(key, value) is value
+
     def delete(self, key: K) -> bool:
         if key not in self._data:
             return False

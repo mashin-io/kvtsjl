@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 from typing import Any, BinaryIO
+import uuid
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.serde.compress import STREAM_CHUNK
@@ -89,6 +90,30 @@ class FilesystemBlobDriver(BlobDriver):
         _write_atomic(path, data)
         self._apply_write_headers(path, headers)
 
+    def write_if_absent(
+        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    ) -> bool:
+        """Write the body beside the target, then link it into place.
+
+        ``os.link`` fails if the name is taken, so of two writers exactly one
+        succeeds, and a reader never sees a partial file. The modification
+        time is set on the body before the link, since it is the TTL clock.
+        """
+        path = Path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_bytes(data)
+            self._apply_mtime(tmp, headers)
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                return False
+        finally:
+            tmp.unlink(missing_ok=True)
+        self._apply_sidecar(path, headers)
+        return True
+
     def write_stream(
         self,
         key: str,
@@ -132,10 +157,16 @@ class FilesystemBlobDriver(BlobDriver):
         return stream(), stat
 
     def _apply_write_headers(self, path: Path, headers: dict[str, Any] | None) -> None:
-        headers = headers or {}
-        mtime = headers.get("mtime")
+        self._apply_mtime(path, headers)
+        self._apply_sidecar(path, headers)
+
+    def _apply_mtime(self, path: Path, headers: dict[str, Any] | None) -> None:
+        mtime = (headers or {}).get("mtime")
         if isinstance(mtime, (int, float)):
             os.utime(path, (float(mtime), float(mtime)))
+
+    def _apply_sidecar(self, path: Path, headers: dict[str, Any] | None) -> None:
+        headers = headers or {}
         if "expires_sidecar" in headers:
             sidecar = _expires_sidecar(path)
             token = headers["expires_sidecar"]

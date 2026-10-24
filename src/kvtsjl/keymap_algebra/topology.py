@@ -232,6 +232,7 @@ from typing import cast
 
 from kvtsjl.exceptions import (
     KvStoreError,
+    KvStoreUnsupported,
     PartialSyncError,
     RecordWriteError,
     UncommittedWriteError,
@@ -316,7 +317,7 @@ class Target[K, V, P](ABC):
         raise KvStoreError(f"{self.name} cannot be written")
 
     def write_if_absent(self, key: K, value: V, options: WriteOptions) -> bool:
-        raise KvStoreError(f"{self.name} cannot write conditionally")
+        raise KvStoreUnsupported(f"{self.name} cannot write conditionally")
 
     def batch_write(self, items: Mapping[K, V], options: WriteOptions) -> None:
         for key, value in items.items():
@@ -652,7 +653,7 @@ class Topology[K, V]:
     def _require_authority(self, op: str) -> Target[K, V, object]:
         authority = self.authority
         if authority is None:
-            raise KvStoreError(
+            raise KvStoreUnsupported(
                 f"{op} needs a target that decides whether the record exists"
             )
         return authority

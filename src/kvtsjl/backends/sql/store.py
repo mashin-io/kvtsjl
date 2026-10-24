@@ -16,7 +16,12 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeCollectionBinder,
 )
-from kvtsjl.exceptions import KvStoreError, KvStoreScanUnsupported, KvStoreScopeError
+from kvtsjl.exceptions import (
+    KvStoreError,
+    KvStoreScanUnsupported,
+    KvStoreScopeError,
+    KvStoreUnsupported,
+)
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
@@ -524,7 +529,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             # Falling back to upsert is the write that cannot succeed on a
             # shared table, so name the adapter instead of failing later with
             # a NOT NULL error that points nowhere.
-            raise KvStoreError(
+            raise KvStoreUnsupported(
                 f"{type(self._adapter).__name__} does not support "
                 "upsert_rows_update_first, which shares_table=True requires"
             )
@@ -544,7 +549,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         created_at: datetime | None = None,
     ) -> bool:
         if not self._adapter.supports_insert_if_absent():
-            raise KvStoreError(
+            raise KvStoreUnsupported(
                 f"{type(self._adapter).__name__} does not support "
                 "insert_rows_if_absent, which set_if_absent requires; it will "
                 "not fall back to a get-then-set"

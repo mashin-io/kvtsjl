@@ -17,7 +17,19 @@ class KvStoreReadOnlyError(KvStoreError):
     """Mutation attempted on a read-only store view."""
 
 
-class KvStoreScanUnsupported(KvStoreError):
+class KvStoreUnsupported(KvStoreError):
+    """The store cannot do this as asked, and will not emulate it.
+
+    A request its medium has no primitive for — a conditional write with no
+    atomic one, a scan the key layout cannot answer, a per-write TTL it cannot
+    keep. Unlike a failure, retrying cannot help: the composition asked its
+    media for something they do not do. So a best-effort sync, which tolerates
+    a medium *failing*, never hides one of these; it is raised where the
+    composition is put together, not logged where it runs.
+    """
+
+
+class KvStoreScanUnsupported(KvStoreUnsupported):
     """Prefix/layout cannot honor the requested scan (e.g. Hashed + prefix)."""
 
 
@@ -33,7 +45,7 @@ class KvStoreIndexError(KvStoreError):
     """Unknown or incompatible index for search."""
 
 
-class KvStoreTtlUnsupported(KvStoreError):
+class KvStoreTtlUnsupported(KvStoreUnsupported):
     """Backend cannot honor a per-write TTL override."""
 
 

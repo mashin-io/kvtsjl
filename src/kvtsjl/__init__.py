@@ -25,6 +25,7 @@ from kvtsjl.exceptions import (
     KvStoreScopeError,
     KvStoreSerDeError,
     KvStoreTtlUnsupported,
+    KvStoreUnsupported,
     PartialSyncError,
 )
 from kvtsjl.index import (
@@ -95,6 +96,7 @@ __all__ = [
     "KvStoreScopeError",
     "KvStoreSerDeError",
     "KvStoreTtlUnsupported",
+    "KvStoreUnsupported",
     "MemoryKeyIndex",
     "MemoryKvStore",
     "MemoryTermIndex",

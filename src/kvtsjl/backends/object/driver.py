@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, BinaryIO
 
+from kvtsjl.exceptions import KvStoreUnsupported
+
 
 @dataclass(frozen=True, slots=True)
 class BlobStat:
@@ -39,6 +41,18 @@ class BlobDriver(ABC):
     @abstractmethod
     def write(self, key: str, data: bytes, *, headers: dict[str, Any] | None = None) -> None:
         """Put object; ``headers`` carries medium-specific write options."""
+
+    def write_if_absent(
+        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    ) -> bool:
+        """Put ``key`` only if no object is there; ``True`` if this call did.
+
+        One request the medium itself makes conditional — ``If-None-Match: *``,
+        ``ifGenerationMatch=0``, a link that fails if the name is taken. There
+        is no default: a head-then-put is the race this exists to remove, so a
+        driver without the primitive refuses.
+        """
+        raise KvStoreUnsupported(f"{type(self).__name__} has no conditional put")
 
     def write_stream(
         self,

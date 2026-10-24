@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO
 
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
 
 @dataclass
@@ -80,7 +80,9 @@ class FakeAzureBlobClient:
                 f"upload_blob length={length} but stream had {len(data)} bytes"
             )
         if not overwrite and self.name in self._store:
-            raise ValueError(f"blob already exists: {self.name}")
+            # The service sends overwrite=False as If-None-Match: * and
+            # answers 409 BlobAlreadyExists, which the SDK raises as this.
+            raise ResourceExistsError(f"blob already exists: {self.name}")
         body = data if isinstance(data, bytes) else bytes(data)
         self._store[self.name] = _StoredBlob(
             body=body,

@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, overload
 
-from kvtsjl.exceptions import KvStoreError
+from kvtsjl.exceptions import KvStoreUnsupported
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -527,7 +527,7 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
         Reconciling the two silently would mean a read-modify-write, which is
         the race this method exists to avoid.
         """
-        raise KvStoreError(
+        raise KvStoreUnsupported(
             f"{type(self).__name__} does not support set_if_absent"
         )
 

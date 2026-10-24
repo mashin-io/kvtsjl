@@ -6,7 +6,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.batching import AZURE_DELETE_BLOBS_MAX
@@ -51,6 +51,13 @@ def _stat_from_props(props: BlobProperties, *, key: str) -> BlobStat:
     )
 
 
+def _metadata(headers: dict[str, Any] | None) -> Mapping[str, str] | None:
+    raw = None if headers is None else headers.get("metadata")
+    if not isinstance(raw, Mapping):
+        return None
+    return {str(k): str(v) for k, v in cast(Mapping[object, object], raw).items()}
+
+
 class AzureBlobDriver(BlobDriver):
     def __init__(self, container: ContainerClient) -> None:
         self._container = container
@@ -82,12 +89,18 @@ class AzureBlobDriver(BlobDriver):
 
     def write(self, key: str, data: bytes, *, headers: dict[str, Any] | None = None) -> None:
         blob = self._container.get_blob_client(key)
-        metadata: Mapping[str, str] | None = None
-        if headers is not None:
-            raw_meta = headers.get("metadata")
-            if isinstance(raw_meta, Mapping):
-                metadata = {str(k): str(v) for k, v in raw_meta.items()}
-        blob.upload_blob(data, overwrite=True, metadata=metadata)
+        blob.upload_blob(data, overwrite=True, metadata=_metadata(headers))
+
+    def write_if_absent(
+        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    ) -> bool:
+        """Upload without ``overwrite``, which the service sends as ``If-None-Match: *``."""
+        blob = self._container.get_blob_client(key)
+        try:
+            blob.upload_blob(data, overwrite=False, metadata=_metadata(headers))
+        except ResourceExistsError:
+            return False
+        return True
 
     def write_stream(
         self,
@@ -98,12 +111,7 @@ class AzureBlobDriver(BlobDriver):
         headers: dict[str, Any] | None = None,
     ) -> None:
         blob = self._container.get_blob_client(key)
-        metadata: Mapping[str, str] | None = None
-        if headers is not None:
-            raw_meta = headers.get("metadata")
-            if isinstance(raw_meta, Mapping):
-                metadata = {str(k): str(v) for k, v in raw_meta.items()}
-        blob.upload_blob(src, overwrite=True, metadata=metadata, length=size)
+        blob.upload_blob(src, overwrite=True, metadata=_metadata(headers), length=size)
 
     def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
         blob = self._container.get_blob_client(key)

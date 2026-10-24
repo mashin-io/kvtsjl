@@ -7,7 +7,7 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime
 from typing import Any
 
-from kvtsjl.exceptions import KvStoreError
+from kvtsjl.exceptions import KvStoreUnsupported
 from kvtsjl.keymap import KeyMap
 from kvtsjl.keymap_algebra.topology import RecordTopologyMixin, Role, Topology
 from kvtsjl.store.schema.ttl import TtlPolicy
@@ -169,7 +169,7 @@ class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
         beside the loser's body; key them by content to rule that out.
         """
         if self._commit_part is None:
-            raise KvStoreError(
+            raise KvStoreUnsupported(
                 "set_if_absent on a zip needs a commit_part: without one no "
                 "part decides whether the record exists"
             )

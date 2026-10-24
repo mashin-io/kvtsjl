@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
+import time
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 from botocore.exceptions import ClientError
@@ -16,9 +17,19 @@ if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
 
 
+# A 409 on a conditional put means another one to the same key is in flight.
+# Its outcome decides ours, so the request is repeated a few times, as AWS
+# advises, before the conflict is reported.
+_CONFLICT_ATTEMPTS = 3
+_CONFLICT_BACKOFF_SECONDS = 0.1
+
+
+def _error_code(exc: ClientError) -> str:
+    return exc.response.get("Error", {}).get("Code", "")
+
+
 def _not_found(exc: ClientError) -> bool:
-    code = exc.response.get("Error", {}).get("Code", "")
-    return code in {"404", "NoSuchKey", "NotFound"}
+    return _error_code(exc) in {"404", "NoSuchKey", "NotFound"}
 
 
 class S3BlobDriver(BlobDriver):
@@ -62,6 +73,31 @@ class S3BlobDriver(BlobDriver):
         if headers:
             kwargs.update(headers)
         self._client.put_object(**cast(Any, kwargs))
+
+    def write_if_absent(
+        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    ) -> bool:
+        """``PutObject`` with ``If-None-Match: *``: a 412 means the key is taken."""
+        kwargs: dict[str, object] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "Body": data,
+            "IfNoneMatch": "*",
+        }
+        if headers:
+            kwargs.update(headers)
+        for attempt in range(1, _CONFLICT_ATTEMPTS + 1):
+            try:
+                self._client.put_object(**cast(Any, kwargs))
+                return True
+            except ClientError as exc:
+                code = _error_code(exc)
+                if code == "PreconditionFailed":
+                    return False
+                if code != "ConditionalRequestConflict" or attempt == _CONFLICT_ATTEMPTS:
+                    raise
+            time.sleep(_CONFLICT_BACKOFF_SECONDS * attempt)
+        raise AssertionError("unreachable: the last attempt returns or raises")
 
     def write_stream(
         self,

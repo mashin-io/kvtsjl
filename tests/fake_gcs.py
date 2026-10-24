@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 import io
 from types import TracebackType
 
+from google.api_core.exceptions import PreconditionFailed
+
 
 @dataclass
 class _StoredObject:
@@ -62,7 +64,13 @@ class FakeGcsBlob:
         assert mode == "rb", f"fake only supports 'rb', got {mode!r}"
         return io.BytesIO(self._store[self.name].body)
 
-    def upload_from_string(self, data: bytes | str) -> None:
+    def upload_from_string(
+        self, data: bytes | str, *, if_generation_match: int | None = None
+    ) -> None:
+        # Generation 0 is the one no existing object has: the precondition
+        # holds only while the name is free, else the service answers 412.
+        if if_generation_match == 0 and self.name in self._store:
+            raise PreconditionFailed(f"object already exists: {self.name}")
         body = data if isinstance(data, bytes) else data.encode("utf-8")
         now = datetime.now(timezone.utc)
         prev = self._store.get(self.name)

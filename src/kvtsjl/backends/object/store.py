@@ -192,6 +192,35 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         ttl: TtlPolicy | None = None,
         created_at: datetime | None = None,
     ) -> None:
+        self._driver.write(
+            self._key_codec.encode_physical(key),
+            self.kvset.value_serde.serialize(value),
+            headers=self._write_headers(ttl, created_at),
+        )
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """The driver's conditional put: the medium decides, in one request.
+
+        "Absent" is absent to the medium: an object kvtsjl considers expired
+        is still an object until GC removes it, so it refuses the write.
+        """
+        return self._driver.write_if_absent(
+            self._key_codec.encode_physical(key),
+            self.kvset.value_serde.serialize(value),
+            headers=self._write_headers(ttl, created_at),
+        )
+
+    def _write_headers(
+        self, ttl: TtlPolicy | None, created_at: datetime | None
+    ) -> dict[str, Any] | None:
+        """Validate a write's TTL and clock, and turn them into medium headers."""
         require_explicit_ttl_supported(
             ttl,
             allowed=self._ttl_source.supports_per_write_ttl,
@@ -208,11 +237,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             explicit_ttl=ttl is not None,
             created_at_set=created_at is not None,
         )
-        self._driver.write(
-            self._key_codec.encode_physical(key),
-            self.kvset.value_serde.serialize(value),
-            headers=headers or None,
-        )
+        return headers or None
 
     def _require_streaming_serde(self, op: str) -> StreamingSerDe[V, Any, bytes]:
         return require_streaming_serde(self.kvset.value_serde, op=op, backend=type(self).__name__)
@@ -227,22 +252,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         size: int | None = None,
     ) -> None:
         serde = self._require_streaming_serde("set_stream")
-        require_explicit_ttl_supported(
-            ttl,
-            allowed=self._ttl_source.supports_per_write_ttl,
-            backend=type(self).__name__,
-        )
-        require_write_clock_supported(
-            created_at,
-            allowed=self.supports_write_clock,
-            backend=type(self).__name__,
-        )
-        headers = self._ttl_source.write_headers(
-            ttl_seconds=self.resolve_ttl_seconds(ttl),
-            clock_base=self._clock_base(created_at),
-            explicit_ttl=ttl is not None,
-            created_at_set=created_at is not None,
-        )
+        headers = self._write_headers(ttl, created_at)
         physical = self._key_codec.encode_physical(key)
         with iter_source(source) as chunks:
             # The serde turns value chunks into wire chunks; the driver only
@@ -253,7 +263,7 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
                 physical,
                 wrapped,
                 size=serde.encoded_size(size),
-                headers=headers or None,
+                headers=headers,
             )
 
     def read_stream(self, key: K) -> Iterator[Any] | None:

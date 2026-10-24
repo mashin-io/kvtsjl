@@ -68,6 +68,21 @@ class GcsBlobDriver(BlobDriver):
             blob.custom_time = headers["custom_time"]
         blob.upload_from_string(data)
 
+    def write_if_absent(
+        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    ) -> bool:
+        """Upload with ``ifGenerationMatch=0``, which only an absent object meets."""
+        from google.api_core.exceptions import PreconditionFailed
+
+        blob = self._bucket.blob(key)
+        if headers is not None and "custom_time" in headers:
+            blob.custom_time = headers["custom_time"]
+        try:
+            blob.upload_from_string(data, if_generation_match=0)
+        except PreconditionFailed:
+            return False
+        return True
+
     def write_stream(
         self,
         key: str,

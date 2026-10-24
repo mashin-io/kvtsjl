@@ -215,6 +215,40 @@ class RedisKvBackend[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COL
         else:
             self._client.set(pk, raw, ex=ttl_secs)
 
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """``SET NX`` — or ``HSETNX`` for a hash collection — in one command.
+
+        The expiry rides on the same ``SET``, so a key never exists without
+        it. A hash collection expires as a whole, as ``set`` already does.
+        """
+        pk = self._pk(key)
+        raw = self._serialize_value(value)
+        require_explicit_ttl_supported(
+            ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
+        )
+        require_write_clock_supported(
+            created_at,
+            allowed=self.supports_write_clock,
+            backend="RedisKvStore",
+        )
+        ttl_secs = self.resolve_ttl_seconds(ttl)
+        if self._use_hash:
+            wrote = bool(self._client.hsetnx(self._collection_key(), pk, raw))
+            if wrote and ttl_secs is not None:
+                self._client.expire(self._collection_key(), ttl_secs)
+            return wrote
+        if created_at is not None and ttl_secs is not None:
+            expire_at = int(_clock_base(created_at) + ttl_secs)
+            return bool(self._client.set(pk, raw, nx=True, exat=expire_at))
+        return bool(self._client.set(pk, raw, nx=True, ex=ttl_secs))
+
     def delete(self, key: K) -> bool:
         pk = self._pk(key)
         if self._use_hash:

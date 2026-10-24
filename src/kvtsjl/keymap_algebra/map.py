@@ -66,6 +66,18 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
     def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
+    def set_if_absent(
+        self,
+        key: K,
+        value: U,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        return self._underlying.set_if_absent(
+            key, self._inverse(value), ttl=ttl, created_at=created_at
+        )
+
     def delete(self, key: K) -> bool:
         return self._underlying.delete(key)
 
@@ -97,6 +109,18 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
 
     def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(self._to_store(key), value, ttl=ttl, created_at=created_at)
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: T,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        return self._underlying.set_if_absent(
+            self._to_store(key), value, ttl=ttl, created_at=created_at
+        )
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(self._to_store(key))
