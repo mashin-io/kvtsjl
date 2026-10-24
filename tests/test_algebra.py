@@ -60,6 +60,9 @@ class _StoreProbe(KvStore[str, str]):
     def key_layout(self):  # type: ignore[no-untyped-def]
         return self._u.key_layout()
 
+    def missing_pages(self, page_size: int) -> Any:
+        return self._u.missing_pages(page_size)
+
     def get(self, key: str) -> str | None:
         return self.m_get(key)
 

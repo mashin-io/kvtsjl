@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Self, cast
 
 from kvtsjl.bind.namespace import CollectionBinding
+from kvtsjl.keymap_algebra.topology import MissingPage
 from kvtsjl.scope import Scope
 from kvtsjl.store.backend import KvBackend
 from kvtsjl.store.logical import KvStore
@@ -203,6 +204,10 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
         created_at: datetime | None = None,
     ) -> bool:
         return self._backend.set_if_absent(key, value, ttl=ttl, created_at=created_at)
+
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
+        """A leaf has no fallback, so it lacks nothing a read through it finds."""
+        return iter(())
 
     @property
     def writes_are_deferred(self) -> bool:

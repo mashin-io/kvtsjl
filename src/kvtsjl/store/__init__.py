@@ -9,7 +9,7 @@ from kvtsjl.store.compose import (
     MirrorKvStore,
     ReadonlyKvStore,
 )
-from kvtsjl.store.logical import KvStore
+from kvtsjl.store.logical import FillStats, KvStore
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema import (
     KeyLayout,
@@ -40,6 +40,7 @@ __all__ = [
     "KeyLayout",
     "KvBackend",
     "KvSet",
+    "FillStats",
     "KvStore",
     "MirrorKvStore",
     "Predicate",

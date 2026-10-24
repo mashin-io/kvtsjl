@@ -511,7 +511,7 @@ stats = filling.fill_missing(limit=500)
 # FillStats(scanned=…, missing=…, written=…, lost_race=…, source_miss=…)
 ```
 
-Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional write in one request: SQL `ON CONFLICT DO NOTHING`, Redis `SET NX`, S3 `If-None-Match`, GCS `ifGenerationMatch=0`, Azure `If-None-Match`, and a filesystem link that fails if the name is taken.
+Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. It works at any depth: ask `records.fallback_read(src).indexed(index)` and the fallback inside is found and the copies are indexed; `imap` and `imap_keys` views translate what the store behind them lacks. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional write in one request: SQL `ON CONFLICT DO NOTHING`, Redis `SET NX`, S3 `If-None-Match`, GCS `ifGenerationMatch=0`, Azure `If-None-Match`, and a filesystem link that fails if the name is taken.
 
 ---
 

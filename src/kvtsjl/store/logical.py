@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
-from kvtsjl.keymap_algebra.topology import FillStats
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
@@ -20,8 +20,34 @@ from kvtsjl.store.streaming import StreamingView, StreamSource
 
 if TYPE_CHECKING:
     from kvtsjl.index.logical.abc import Index
+    from kvtsjl.keymap_algebra.topology import MissingPage
     from kvtsjl.store.compose.indexed import IndexedKvStore
     from kvtsjl.store.readable import ReadableKvStore as ReadableKvStoreType
+    from kvtsjl.store.schema.stat import RecordStat
+
+
+@dataclass(frozen=True, slots=True)
+class FillStats:
+    """What a ``fill_missing`` run saw and did, key by key.
+
+    ``scanned`` keys were listed by a fallback; ``missing`` of them the store
+    lacked. Of those, ``written`` were copied; ``lost_race`` were written by
+    someone else between the check and the conditional write, and kept;
+    ``source_miss`` were gone from the fallback by the time they were read.
+    """
+
+    scanned: int = 0
+    missing: int = 0
+    written: int = 0
+    lost_race: int = 0
+    source_miss: int = 0
+
+
+def _page_size(asked: int | None, default: int) -> int:
+    size = default if asked is None else asked
+    if size < 1:
+        raise ValueError(f"page_size must be >= 1, got {size}")
+    return size
 
 
 class SyncTreeNode(ABC):
@@ -106,32 +132,71 @@ class KvStore[K, V](
     # with a non-incremental codec does not). The type rules out the cases that
     # can never work; the guard rules out the rest.
 
-    def missing_keys(self, *, page_size: int | None = None) -> Iterator[K]:
-        """Keys a read finds through a fallback that the authority lacks.
+    @abstractmethod
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
+        """Pages of keys a fallback holds and this store lacks, at any depth.
 
-        A composition with fallbacks — ``fallback_read`` — lists each
-        fallback's keys a page at a time and keeps those neither the authority
-        nor an earlier fallback holds; memory stays one page. A store without
-        a fallback lacks nothing a read through it could find.
+        Every store answers, so none can answer by accident: a leaf lacks
+        nothing, a composition asks down its chain of authorities and adds its
+        own fallbacks, and a view translates what the store behind it says.
+        ``missing_keys`` and ``fill_missing`` are built on this alone.
         """
-        return iter(())
+
+    def missing_keys(self, *, page_size: int | None = None) -> Iterator[K]:
+        """Keys a read finds through a fallback that the store itself lacks.
+
+        Fallbacks anywhere down the chain of authorities count — ``fallback_read``
+        nested inside ``indexed`` or ``mirror`` still reports what it lacks —
+        and each is listed a page at a time, so memory stays one page.
+        """
+        for page in self.missing_pages(_page_size(page_size, self.batch_size)):
+            yield from page.missing
 
     def fill_missing(
         self, *, page_size: int | None = None, limit: int | None = None
     ) -> FillStats:
-        """Copy into the authority what its fallbacks hold and it lacks.
+        """Copy in what the fallbacks hold and this store lacks; never overwrite.
 
-        Every copy is a conditional write of the whole record, so nothing the
-        authority holds is ever replaced — a writer that got there first wins
-        and is counted in ``lost_race``. The fallback's write clock is carried
-        where the record keeps one, so a copied value keeps its remaining
-        life. ``limit`` bounds the records written, and a later call
-        continues, since what was copied is no longer missing::
+        Each copy is this store's own ``set_if_absent``, so it is written at
+        the level the fill was asked for: indexes and copies on the way down
+        receive it, and nothing the store holds is ever replaced — a writer
+        that got there first wins and is counted in ``lost_race``. The
+        fallback's write clock is carried where the store keeps one, so a
+        copy keeps its remaining life. A failure raises: this is an explicit
+        write, not a read's best-effort fill. ``limit`` bounds the records
+        written, and a later call continues, since what was copied is no
+        longer missing::
 
             records.fallback_read(live_turns).fill_missing()
-            records.fallback_read(history).fill_missing(limit=500)
+            records.fallback_read(history).indexed(index).fill_missing(limit=500)
         """
-        return FillStats()
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        scanned = missing = written = lost_race = source_miss = 0
+        for page in self.missing_pages(_page_size(page_size, self.batch_size)):
+            wanted = set(page.missing)
+            found: Mapping[K, V] = page.read(page.missing) if page.missing else {}
+            clocks: Mapping[K, RecordStat] = (
+                page.stat(list(found)) if found and self.supports_write_clock else {}
+            )
+            for key in page.listed:
+                if limit is not None and written >= limit:
+                    return FillStats(scanned, missing, written, lost_race, source_miss)
+                scanned += 1
+                if key not in wanted:
+                    continue
+                missing += 1
+                value = found.get(key)
+                if value is None:
+                    source_miss += 1
+                    continue
+                meta = clocks.get(key)
+                clock = None if meta is None else meta.write_clock
+                if self.set_if_absent(key, value, created_at=clock):
+                    written += 1
+                else:
+                    lost_race += 1
+        return FillStats(scanned, missing, written, lost_race, source_miss)
 
     @property
     def writes_are_deferred(self) -> bool:

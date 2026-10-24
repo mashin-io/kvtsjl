@@ -42,7 +42,6 @@ from kvtsjl.index import (
 )
 from kvtsjl.keymap import KeyMap, ReadableKeyMap
 from kvtsjl.keymap_algebra import DictKeyMap
-from kvtsjl.keymap_algebra.topology import FillStats
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
@@ -50,6 +49,7 @@ from kvtsjl.serde import CompressionCodec, SerDe
 from kvtsjl.store import (
     ExpiryGc,
     FallbackReadKvStore,
+    FillStats,
     IndexedKvStore,
     KeyLayout,
     KvBackend,

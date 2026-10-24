@@ -126,10 +126,12 @@ Operation         Traversal   Stops            Combines                Side effe
 ``scan``          —           —                the authority's keys,   —
                                                or the parts' keys
                                                confirmed by ``get``
-``missing_keys``  lookup,     never            each fallback's keys    —
-                  over keys                    that the authority and
-                                               earlier fallbacks lack
-``fill_missing``  lookup,     at ``limit``     :class:`FillStats`      a
+``missing_keys``  lookup,     never            the authority's own     —
+                  over keys                    gaps, then each
+                                               fallback's keys the
+                                               authority and earlier
+                                               fallbacks lack
+``fill_missing``  lookup,     at ``limit``     ``FillStats``           a
                   then commit                                          conditional
                                                                        write of
                                                                        each record
@@ -144,9 +146,16 @@ dependent is fed by re-reading it, since a stream is consumed once.
 
 A new operation is defined the same way — ``missing_keys`` and
 ``fill_missing`` were: pick a traversal, then the stop, combine, failure and
-side-effect rules. It never introduces an order. ``fill_missing`` differs from
-a read's fill only in its failure rule: it is an explicit write, so a failure
-raises instead of being logged.
+side-effect rules. It never introduces an order.
+
+``missing_keys`` follows the chain of authorities down, so a fallback nested
+inside ``indexed`` or ``mirror`` still counts: every store answers
+``missing_pages``, and a view in front of one translates the answer.
+``fill_missing`` then writes each copy with the store's own
+``set_if_absent``, at the level it was asked for, so the indexes and copies
+on the way down receive it. It differs from a read's fill in two rules: it
+writes the whole record rather than one target, and as an explicit write a
+failure raises instead of being logged.
 
 
 4. The laws
@@ -232,9 +241,9 @@ check each one, against the compositions kvtsjl ships and ones it does not.
 - *A streamed fill replaces.* Media share no conditional streaming write —
   S3's managed upload takes no precondition — so a fill during
   ``read_stream`` overwrites; law 5 holds for ``get`` and ``batch_get``.
-- *Missing means missing at this node.* ``missing_keys`` lists the fallbacks
-  this composition declares; one nested inside its authority is that
-  child's to list.
+- *An assembled record is filled at its parts.* No fallback holds a whole
+  record made of parts, so a zip lists nothing missing; a part that is
+  itself a ``fallback_read`` is filled by asking that part.
 - *Conditional writes ask the medium.* ``set_if_absent`` asks the authority
   whether the key is absent to the medium, which can differ from law 3 — an
   expired entry, or a committed row whose mandatory part is gone, still
@@ -397,6 +406,10 @@ class Target[K, V, P](ABC):
         """Every key held here, listed ``page_size`` at a time."""
         raise KvStoreUnsupported(f"{self.name} cannot list its keys")
 
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, P]]:
+        """What this target's own fallbacks hold and it lacks; none by default."""
+        return iter(())
+
     # --- expiry and durability -----------------------------------------------
 
     @property
@@ -513,21 +526,47 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
 
 
 @dataclass(frozen=True, slots=True)
-class FillStats:
-    """What a ``fill_missing`` run saw and did, key by key.
+class MissingPage[K, V]:
+    """One page of keys a fallback holds, and which of them the record lacks.
 
-    ``scanned`` keys were listed by a fallback; ``missing`` of them were held
-    neither by the authority nor by an earlier fallback. Of those, ``written``
-    were copied; ``lost_race`` were written by someone else between the check
-    and the conditional write, and kept; ``source_miss`` were gone from the
-    fallback by the time they were read.
+    ``listed`` is the page in the fallback's order, ``missing`` the keys in it
+    the record does not hold. ``read`` and ``stat`` fetch those from where
+    they are. A store answers with these at every level, and a view in front
+    of it translates them, so a fill can be asked for at any level.
     """
 
-    scanned: int = 0
-    missing: int = 0
-    written: int = 0
-    lost_race: int = 0
-    source_miss: int = 0
+    listed: Sequence[K]
+    missing: Sequence[K]
+    read: Callable[[Sequence[K]], Mapping[K, V]]
+    stat: Callable[[Sequence[K]], Mapping[K, RecordStat]]
+
+    def map_values[U](self, forward: Callable[[V], U | None]) -> MissingPage[K, U]:
+        """This page seen through a value view; ``None`` from ``forward`` is absent."""
+        read = self.read
+
+        def mapped(keys: Sequence[K]) -> dict[K, U]:
+            return {k: u for k, v in read(keys).items() if (u := forward(v)) is not None}
+
+        return MissingPage(self.listed, self.missing, mapped, self.stat)
+
+    def map_keys[J](self, outward: Callable[[K], J]) -> MissingPage[J, V]:
+        """This page under the keys a view shows; reads go back to the stored ones."""
+        shown = {k: outward(k) for k in self.listed}
+        stored = {j: k for k, j in shown.items()}
+        read, stat = self.read, self.stat
+
+        def mapped_read(keys: Sequence[J]) -> dict[J, V]:
+            return {shown[k]: v for k, v in read([stored[j] for j in keys]).items()}
+
+        def mapped_stat(keys: Sequence[J]) -> dict[J, RecordStat]:
+            return {shown[k]: m for k, m in stat([stored[j] for j in keys]).items()}
+
+        return MissingPage(
+            [shown[k] for k in self.listed],
+            [shown[k] for k in self.missing],
+            mapped_read,
+            mapped_stat,
+        )
 
 
 class Parts[K, V]:
@@ -919,65 +958,23 @@ class Topology[K, V]:
 
     # --- what the fallbacks hold -------------------------------------------
 
-    def missing_keys(self, page_size: int) -> Iterator[K]:
-        """Keys a read finds in a fallback that the authority does not hold.
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
+        """What a read finds through a fallback that the record does not hold.
 
-        Each fallback's keys, in lookup order, a page at a time. A key is
-        missing where neither the authority nor an earlier fallback holds it,
-        so it belongs to the first fallback a read would reach, and memory
-        stays one page. Only fallbacks are listed: a cache or a replica is a
-        copy of the authority, and what a copy holds that the authority does
-        not is stale, not missing.
+        Down the chain of authorities first — what the authority's own
+        fallbacks hold and it lacks — then each fallback of this record in
+        lookup order, a page at a time. A fallback's key is missing where
+        neither the authority nor an earlier fallback holds it, so it belongs
+        to the first fallback a read would reach, and memory stays one page.
+
+        Only fallbacks are listed: what a cache or a replica holds beyond the
+        authority is stale, not missing. A record assembled from parts lists
+        nothing, since no fallback holds a whole one.
         """
-        for _fallback, _page, missing in self._missing_pages(page_size):
-            yield from missing
-
-    def fill_missing(
-        self, page_size: int, limit: int | None, syncs: DependentSyncs
-    ) -> FillStats:
-        """Copy what the fallbacks hold and the authority lacks; never overwrite.
-
-        Each missing key is read from its fallback and written as the record —
-        components, the authority's conditional write, then dependents — with
-        the fallback's clock where the record keeps one, as a promotion does.
-        Unlike a read's fill this is an explicit write, so a failure raises.
-        ``limit`` bounds the records written; a later run continues, since
-        what was written is no longer missing.
-        """
-        if limit is not None and limit < 1:
-            raise ValueError(f"limit must be >= 1, got {limit}")
-        scanned = missing = written = lost_race = source_miss = 0
-        for fallback, page, absent in self._missing_pages(page_size):
-            wanted = set(absent)
-            found = fallback.batch_read(absent)
-            stats = fallback.batch_stat(list(found)) if self.supports_write_clock else {}
-            for key in page:
-                if limit is not None and written >= limit:
-                    return FillStats(scanned, missing, written, lost_race, source_miss)
-                scanned += 1
-                if key not in wanted:
-                    continue
-                missing += 1
-                value = found.get(key)
-                if value is None:
-                    source_miss += 1
-                    continue
-                options = WriteOptions(created_at=_clock(stats.get(key)))
-                if self.write_if_absent(key, value, options, syncs):
-                    written += 1
-                else:
-                    lost_race += 1
-        return FillStats(scanned, missing, written, lost_race, source_miss)
-
-    def _missing_pages(
-        self, page_size: int
-    ) -> Iterator[tuple[Target[K, V, V], list[K], list[K]]]:
-        """Per page of each fallback's keys: the fallback, the page, the missing."""
-        if page_size < 1:
-            raise ValueError(f"page_size must be >= 1, got {page_size}")
         authority = self.whole_authority
         if authority is None:
             return
+        yield from authority.missing_pages(page_size)
         fallbacks = [t for t in self.lookups() if t.role is Role.FALLBACK]
         for index, fallback in enumerate(fallbacks):
             ahead = [authority, *fallbacks[:index]]
@@ -988,7 +985,7 @@ class Topology[K, V]:
                         break
                     held = target.batch_exists(absent)
                     absent = [k for k in absent if k not in held]
-                yield fallback, page, absent
+                yield MissingPage(page, absent, fallback.batch_read, fallback.batch_stat)
 
     # --- reads ---------------------------------------------------------------
 
@@ -1213,8 +1210,7 @@ def _fillable[K, V](
 
 
 def _clock(meta: RecordStat | None) -> datetime | None:
-    """The clock a filled value carries, so it keeps its remaining life."""
-    return None if meta is None else meta.created_at or meta.modified_at
+    return None if meta is None else meta.write_clock
 
 
 def _committing[T](name: str, role: Role, run: Callable[[], T]) -> T:

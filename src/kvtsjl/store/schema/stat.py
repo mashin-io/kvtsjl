@@ -22,3 +22,11 @@ class RecordStat:
     size: int | None = None
     etag: str | None = None
     persistent: bool = False
+
+    @property
+    def write_clock(self) -> datetime | None:
+        """The clock a copy of this value carries, so it keeps its remaining life.
+
+        ``created_at`` where the medium keeps one, else the last write time.
+        """
+        return self.created_at or self.modified_at

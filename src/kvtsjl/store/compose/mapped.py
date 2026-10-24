@@ -8,6 +8,7 @@ from typing import cast
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKeyMap
+from kvtsjl.keymap_algebra.topology import MissingPage
 from kvtsjl.scope import Scope
 from kvtsjl.store.fanout import GcPassthroughMixin, ScopeFanoutMixin
 from kvtsjl.store.logical import KvStore
@@ -140,6 +141,9 @@ class IMappedKvStore[K, V, U](
             key, self._inverse(value), ttl=ttl, created_at=created_at
         )
 
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, U]]:
+        return (page.map_values(self._forward) for page in self._src().missing_pages(page_size))
+
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
         for key, value in self._src().scan_entries(
             ScanQuery(
@@ -242,6 +246,15 @@ class IMappedKeysKvStore[K, SK, V](
         return self._src().set_if_absent(
             self._to_store(key), value, ttl=ttl, created_at=created_at
         )
+
+    def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
+        """What the store behind lacks, under the caller's keys.
+
+        Needs ``from_store``: without it a stored key cannot be shown, so this
+        refuses as ``scan`` does.
+        """
+        from_store = self.require_from_store()
+        return (page.map_keys(from_store) for page in self._src().missing_pages(page_size))
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         from_store = self.require_from_store()

@@ -140,26 +140,29 @@ def test_a_key_listed_but_gone_before_it_is_read_is_counted() -> None:
     assert stats == FillStats(scanned=2, missing=2, written=1, source_miss=1)
 
 
+class _SpyIndex:
+    name = "spy"
+    sync_on_write = True
+    sync_policy = None
+
+    def __init__(self, synced: list[str]) -> None:
+        self._synced = synced
+
+    def bind_store(self, store: Any) -> None: ...
+    def sync(self, key: str, value: Any) -> None:
+        self._synced.append(key)
+
+    def batch_sync(self, items: Any) -> None: ...
+    def delete(self, key: str) -> None: ...
+    def batch_delete(self, keys: Any) -> None: ...
+    def clone_with_scope(self, scope: Any) -> Any:
+        return self
+
+
 def test_the_copy_is_written_as_the_record_so_its_dependents_follow() -> None:
     """Filling an indexed store indexes what it copies."""
     synced: list[str] = []
-
-    class SpyIndex:
-        name = "spy"
-        sync_on_write = True
-        sync_policy = None
-
-        def bind_store(self, store: Any) -> None: ...
-        def sync(self, key: str, value: Any) -> None:
-            synced.append(key)
-
-        def batch_sync(self, items: Any) -> None: ...
-        def delete(self, key: str) -> None: ...
-        def batch_delete(self, keys: Any) -> None: ...
-        def clone_with_scope(self, scope: Any) -> Any:
-            return self
-
-    primary = _leaf("primary").indexed(SpyIndex())
+    primary = _leaf("primary").indexed(_SpyIndex(synced))
     primary.fallback_read(_filled(k="v")).fill_missing()
     assert synced == ["k"]
 
@@ -184,14 +187,76 @@ def test_a_store_without_a_fallback_lacks_nothing() -> None:
     assert primary.get("k") is None
 
 
-def test_a_chain_of_fallbacks_fills_through_the_inner_composition() -> None:
-    """Composition is closed: the outer authority is itself a fallback_read."""
+def test_a_chain_of_fallbacks_fills_the_innermost_store_from_the_nearest_tier() -> None:
+    """Composition is closed: the outer authority is itself a fallback_read.
+
+    ``b`` is missing from ``hot`` although ``warm`` holds it — the chain of
+    authorities ends at ``hot`` — and it is filled from ``warm``, the tier a
+    read reaches first, not from ``cold``.
+    """
     hot, warm, cold = _filled(a="hot"), _filled(b="warm"), _filled(a="x", b="y", c="cold")
     chained = hot.fallback_read(warm).fallback_read(cold)
 
-    assert sorted(chained.missing_keys()) == ["c"], "a key the warm tier holds is not missing"
-    assert chained.fill_missing().written == 1
-    assert (hot.get("c"), warm.get("c")) == ("cold", None)
+    assert sorted(chained.missing_keys()) == ["b", "c"]
+    assert chained.fill_missing().written == 2
+    assert (hot.get("b"), hot.get("c")) == ("warm", "cold"), "a farther tier won"
+    assert (warm.get("c"), hot.get("a")) == (None, "hot")
+
+
+def test_a_fallback_inside_an_index_is_filled_through_the_index() -> None:
+    """Filling at the outer level indexes the copy; the inner level cannot."""
+    synced: list[str] = []
+    primary = _leaf("primary")
+    indexed = primary.fallback_read(_filled(k="v")).indexed(_SpyIndex(synced))
+
+    assert list(indexed.missing_keys()) == ["k"], "the nested fallback was not seen"
+    assert indexed.fill_missing() == FillStats(scanned=1, missing=1, written=1)
+    assert primary.get("k") == "v"
+    assert synced == ["k"], "the copy skipped the index around it"
+
+
+def test_a_fallback_inside_a_mirror_is_filled_through_the_mirror() -> None:
+    primary, backup = _leaf("primary"), _leaf("backup")
+    mirrored = primary.fallback_read(_filled(k="v")).mirror(backup)
+
+    assert mirrored.fill_missing().written == 1
+    assert (primary.get("k"), backup.get("k")) == ("v", "v"), "the backup missed the copy"
+
+
+def test_a_value_view_shows_what_the_store_behind_it_lacks() -> None:
+    primary = _leaf("primary")
+    view = primary.fallback_read(_filled(k="v")).imap(lambda s: s + "!", lambda s: s[:-1])
+
+    assert list(view.missing_keys()) == ["k"]
+    assert view.fill_missing().written == 1
+    assert primary.get("k") == "v", "the value went through the view twice or not at all"
+
+
+def test_a_key_view_shows_it_under_its_own_keys() -> None:
+    primary = _leaf("primary")
+    stored = primary.fallback_read(_filled(**{"n:k": "v"}))
+    view = stored.imap_keys(lambda k: f"n:{k}", lambda sk: sk[2:])
+
+    assert list(view.missing_keys()) == ["k"]
+    assert view.fill_missing().written == 1
+    assert primary.get("n:k") == "v"
+
+
+def test_a_key_view_without_an_inverse_refuses() -> None:
+    """It cannot show a stored key, so it says so rather than claiming nothing is missing."""
+    from kvtsjl.exceptions import KvStoreUnsupported
+
+    view = _leaf("p").fallback_read(_filled(k="v")).imap_keys(lambda k: f"n:{k}")
+    with pytest.raises(KvStoreUnsupported):
+        list(view.missing_keys())
+    with pytest.raises(KvStoreUnsupported):
+        view.fill_missing()
+
+
+def test_a_leaf_lacks_nothing() -> None:
+    leaf = _filled(k="v")
+    assert list(leaf.missing_keys()) == []
+    assert leaf.fill_missing() == FillStats()
 
 
 class TwoFallbacks[K, V](StoreTopologyMixin[K, V], DelegatingKvStore[K, V]):
@@ -226,3 +291,11 @@ def test_a_key_belongs_to_the_first_fallback_a_read_would_reach() -> None:
     assert store.get("k") == "first", "a later fallback won over an earlier one"
     assert store.get("stale") is None, "a copy was written back into the authority"
     assert replica.get("a") == "1", "the copy skipped the record's dependents"
+
+
+def test_a_page_must_hold_at_least_one_key() -> None:
+    filling = _leaf("p").fallback_read(_filled(k="v"))
+    with pytest.raises(ValueError, match="page_size"):
+        list(filling.missing_keys(page_size=0))
+    with pytest.raises(ValueError, match="page_size"):
+        filling.fill_missing(page_size=0)
