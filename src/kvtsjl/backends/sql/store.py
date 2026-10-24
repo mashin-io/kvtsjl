@@ -535,9 +535,6 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             rows=rows,
         )
 
-    def supports_set_if_absent(self) -> bool:
-        return self._adapter.supports_insert_if_absent()
-
     def set_if_absent(
         self,
         key: K,

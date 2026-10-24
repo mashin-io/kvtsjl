@@ -220,9 +220,6 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             return None
         return iter((value,))
 
-    def supports_set_if_absent(self) -> bool:
-        return True
-
     def set_if_absent(
         self,
         key: K,

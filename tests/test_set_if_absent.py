@@ -109,17 +109,17 @@ def test_a_backend_without_the_capability_raises_rather_than_racing() -> None:
     ensure_sql_table(conn, sql_kvset)
     store = SqlDbKvStore(sql_kvset, adapter=NoPrimitive(conn))
 
-    assert store.supports_set_if_absent() is False
     with pytest.raises(KvStoreError, match="set_if_absent"):
         store.set_if_absent("k", "v")
     assert store.get("k") is None, "the refused write still landed"
 
 
-def test_the_default_is_unsupported() -> None:
-    """A store that never opts in must raise, not silently race."""
-    from kvtsjl.store.logical import KvStore
+def test_the_default_is_to_refuse() -> None:
+    """A store that never implements it must raise, not silently race."""
+    from kvtsjl.keymap import KeyMap
 
-    assert KvStore.supports_set_if_absent(object()) is False  # type: ignore[arg-type]
+    with pytest.raises(KvStoreError, match="set_if_absent"):
+        KeyMap.set_if_absent(object(), "k", "v")  # type: ignore[arg-type]
 
 
 def test_it_respects_the_bound_scope() -> None:
@@ -134,3 +134,25 @@ def test_it_respects_the_bound_scope() -> None:
     assert store.scoped(user="a").set_if_absent("k", "A") is True
     assert store.scoped(user="b").set_if_absent("k", "B") is True, "scopes collided"
     assert store.scoped(user="a").get("k") == "A"
+
+
+# --- the capability must survive composition -------------------------------
+
+
+def test_it_survives_a_mapped_view() -> None:
+    inner = _memory()
+    view = inner.imap(lambda s: s.upper(), lambda s: s.lower())
+
+    assert view.set_if_absent("k", "ABC") is True
+    assert inner.get("k") == "abc", "the inverse was not applied"
+    assert view.set_if_absent("k", "XYZ") is False
+    assert view.get("k") == "ABC"
+
+
+def test_readonly_refuses_it_as_a_write() -> None:
+    from kvtsjl.exceptions import KvStoreReadOnlyError
+
+    store = _memory()
+    store.set_if_absent("k", "v")
+    with pytest.raises(KvStoreReadOnlyError, match="set_if_absent"):
+        store.readonly().set_if_absent("j", "v")

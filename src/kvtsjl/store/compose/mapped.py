@@ -125,6 +125,18 @@ class IMappedKvStore[K, V, U](
     ) -> None:
         self._src().set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
+    def set_if_absent(
+        self,
+        key: K,
+        value: U,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        return self._src().set_if_absent(
+            key, self._inverse(value), ttl=ttl, created_at=created_at
+        )
+
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, U | None]]:
         for key, value in self._src().scan_entries(
             ScanQuery(
@@ -212,6 +224,18 @@ class IMappedKeysKvStore[K, SK, V](
         created_at: datetime | None = None,
     ) -> None:
         self._src().set(self._to_store(key), value, ttl=ttl, created_at=created_at)
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        return self._src().set_if_absent(
+            self._to_store(key), value, ttl=ttl, created_at=created_at
+        )
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
         from_store = self.require_from_store()

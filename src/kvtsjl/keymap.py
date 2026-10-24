@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, overload
 
+from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -496,6 +497,33 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
     ``ttl`` / ``created_at`` are accepted on the ABC so ``KvStore`` (TTL writes)
     and plain ``KeyMap`` share one signature; non-store maps ignore them.
     """
+
+    def set_if_absent(
+        self,
+        key: K,
+        value: T,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """Write ``key`` only if it is absent. ``True`` if this call wrote it.
+
+        First of the ``set_if_*`` family: a write the medium performs only when
+        a condition holds, reporting whether it did. Compare-and-set joins it
+        later as ``set_if_matches``, with its own capability — a backend can
+        have one primitive and not the other.
+
+        **"Absent" means absent to the medium.** Where kvtsjl emulates TTL
+        rather than the medium enforcing it, an expired entry is still a row
+        or an object, so the native primitive refuses and this returns
+        ``False`` even though ``get`` returns ``None``. A caller that wants
+        expired entries treated as absent runs ``gc_expired_keys`` first.
+        Reconciling the two silently would mean a read-modify-write, which is
+        the race this method exists to avoid.
+        """
+        raise KvStoreError(
+            f"{type(self).__name__} does not support set_if_absent"
+        )
 
     @abstractmethod
     def set(

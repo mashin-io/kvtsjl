@@ -195,9 +195,6 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
 
-    def supports_set_if_absent(self) -> bool:
-        return bool(getattr(self._backend, "supports_set_if_absent", lambda: False)())
-
     def set_if_absent(
         self,
         key: K,

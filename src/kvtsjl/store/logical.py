@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.exceptions import KvStoreError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
@@ -101,43 +100,6 @@ class KvStore[K, V](
         may buffer, but they override and say so.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support set_stream")
-
-    def supports_set_if_absent(self) -> bool:
-        """Whether this store can insert without overwriting, atomically.
-
-        ``False`` by default: a backend opts in only where the medium makes it
-        one operation — ``ON CONFLICT DO NOTHING``, ``If-None-Match: *``,
-        ``ifGenerationMatch=0``, ``O_EXCL``, ``SET NX``. A get-then-set is not
-        an implementation of this; it is the race it exists to remove.
-        """
-        return False
-
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        """Write ``key`` only if it is absent. ``True`` if this call wrote it.
-
-        First of the ``set_if_*`` family: a write the medium performs only when
-        a condition holds, reporting whether it did. Compare-and-set joins it
-        later as ``set_if_matches``, with its own capability — a backend can
-        have one primitive and not the other.
-
-        **"Absent" means absent to the medium.** Where kvtsjl emulates TTL
-        rather than the medium enforcing it, an expired entry is still a row
-        or an object, so the native primitive refuses and this returns
-        ``False`` even though ``get`` returns ``None``. A caller that wants
-        expired entries treated as absent runs ``gc_expired_keys`` first.
-        Reconciling the two silently would mean a read-modify-write, which is
-        the race this method exists to avoid.
-        """
-        raise KvStoreError(
-            f"{type(self).__name__} does not support set_if_absent"
-        )
 
     @abstractmethod
     def set(

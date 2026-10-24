@@ -63,6 +63,16 @@ class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
     def delete(self, key: K) -> bool:
         raise KvStoreReadOnlyError("delete on readonly store")
 
+    def set_if_absent(
+        self,
+        key: K,
+        value: V,
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        raise KvStoreReadOnlyError("set_if_absent on readonly store")
+
     def stream_chunk_type(self) -> type[Any]:
         return self._underlying.stream_chunk_type()
 

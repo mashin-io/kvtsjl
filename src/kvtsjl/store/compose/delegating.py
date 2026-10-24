@@ -42,9 +42,6 @@ class DelegatingKvStore[K, V](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> KvStore[K, V]:
         raise NotImplementedError
 
-    def supports_set_if_absent(self) -> bool:
-        return self._underlying.supports_set_if_absent()
-
     def set_if_absent(
         self,
         key: K,
