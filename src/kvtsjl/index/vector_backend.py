@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC
 from typing import cast, override
 
-from kvtsjl.exceptions import KvStoreIndexError
+from kvtsjl.exceptions import KvStoreIndexUnsupported
 from kvtsjl.index.backend import IndexBackend
 from kvtsjl.index.logical.envelope import VectorEnvelope
 from kvtsjl.index.logical.vector import VectorIndex, VectorRecord
@@ -49,7 +49,7 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
         """Drop this view's own fields, keeping the rest of the entry."""
         owned = self.index_set.owned_fields
         if owned is None:
-            raise KvStoreIndexError(
+            raise KvStoreIndexUnsupported(
                 f"{type(self).__name__} is a patch view with no declared "
                 "owned_fields, so deleting from it cannot know which fields "
                 "are its own; declare them or delete through the owning view"
@@ -91,7 +91,7 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
             return
         if self.index_set.scope_fields:
             return
-        raise KvStoreIndexError(
+        raise KvStoreIndexUnsupported(
             f"{type(self).__name__} cannot filter by scope inside the search: "
             "it reports no id-prefix filter and the index set declares no "
             "scope_fields. Filtering after the search would starve the top-k"

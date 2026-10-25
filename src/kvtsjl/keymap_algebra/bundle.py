@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from abc import ABC
 from dataclasses import fields, is_dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from kvtsjl.keymap import KeyMap
 
@@ -11,10 +12,17 @@ if TYPE_CHECKING:
     from kvtsjl.store.logical import KvStore
 
 
-class ZipPartsBundle[ZipK](Protocol):
-    """Dataclass bundle whose fields are ``KeyMap[ZipK, *]`` part maps."""
+class ZipPartsBundle[ZipK](ABC):
+    """Base for a dataclass bundle whose fields are ``KeyMap[ZipK, *]`` part maps.
 
-    pass
+    Subclassing it names the key type, so ``zip_as`` returns a map keyed by
+    it::
+
+        @dataclass
+        class ArticleParts(ZipPartsBundle[str]):
+            meta: KvStore[str, dict]
+            body: KvStore[str, str]
+    """
 
 
 def parts_from_bundle(bundle: object) -> dict[str, KeyMap[Any, Any]]:

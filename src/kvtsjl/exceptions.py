@@ -45,6 +45,15 @@ class KvStoreIndexError(KvStoreError):
     """Unknown or incompatible index for search."""
 
 
+class KvStoreIndexUnsupported(KvStoreIndexError, KvStoreUnsupported):
+    """An index view asked for something it cannot do — the index-side refusal.
+
+    Both an index error, as it always was, and a ``KvStoreUnsupported``, so a
+    view of a shared entry refuses the same way whether the entry is an index
+    record or a table row.
+    """
+
+
 class KvStoreTtlUnsupported(KvStoreUnsupported):
     """Backend cannot honor a per-write TTL override."""
 

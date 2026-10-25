@@ -116,16 +116,30 @@ class SqlDbKvSet[K, V]:
     a ``NOT NULL`` column can still update a row that already exists. Left
     ``False``, writes stay a single batched upsert.
 
-    It also makes the row not the view's own. The view holds a key while one
-    of its ``own_columns`` is set, and ``unset`` nulls those columns instead
-    of deleting the row, which its siblings still hold. ``delete`` still
-    removes the row the key names: it is how a record is removed, through the
-    view that decides the record exists.
+    It also makes the row not the view's alone. The view holds a key while
+    one of its ``own_columns`` is set, ``unset`` nulls those columns, and so
+    does ``delete`` — unless the view ``owns_rows``.
+    """
+    owns_rows: bool = False
+    """Whether this view of a shared table creates and removes its rows.
+
+    Only meaningful with ``shares_table``: a view that does not share its
+    table owns every row in it. Among views of a shared table, ``delete``
+    removes the row only from the view that owns rows — the core row a record
+    is committed through — and every other view's ``delete`` removes just its
+    own columns, as ``unset`` does. Deleting a record through a zip whose
+    commit part owns rows therefore removes the row, and deleting from a
+    sibling view never takes the record with it.
     """
 
     def __post_init__(self) -> None:
         if not self.leaf_key_fields:
             raise ValueError("leaf_key_fields must be non-empty")
+        if self.owns_rows and not self.shares_table:
+            raise ValueError(
+                "owns_rows describes a view of a shared table; a view that does "
+                "not share its table owns its rows already"
+            )
         seen: set[str] = set()
         for name in [*self.scope_fields, *self.leaf_key_fields]:
             if name in seen:
@@ -145,6 +159,7 @@ class SqlDbKvSet[K, V]:
         expires_at_field: str = "expires_at",
         expiry_binding: ExpiryBinding = ExpiryBinding.LATE,
         shares_table: bool = False,
+        owns_rows: bool = False,
     ) -> SqlDbKvSet[K, V]:
         """Build a descriptor; pass ``key_field`` for a single leaf PK column."""
         if leaf_key_fields is not None and key_field is not None:
@@ -162,7 +177,13 @@ class SqlDbKvSet[K, V]:
             expires_at_field=expires_at_field,
             expiry_binding=expiry_binding,
             shares_table=shares_table,
+            owns_rows=owns_rows,
         )
+
+    @property
+    def deletes_rows(self) -> bool:
+        """Whether ``delete`` removes the row, rather than only this view's columns."""
+        return self.owns_rows or not self.shares_table
 
     @property
     def own_columns(self) -> tuple[str, ...]:

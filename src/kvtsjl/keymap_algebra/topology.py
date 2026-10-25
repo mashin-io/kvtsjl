@@ -188,7 +188,11 @@ check each one, against the compositions kvtsjl ships and ones it does not.
    absent — a zip's ``None`` slot — *unsets* that part: each target removes
    only what is its own, so a view of a row other views share nulls its own
    columns and leaves the row. Deleting the record deletes, authority first,
-   so the commit point takes the row with it.
+   so the commit point takes the row with it. Every view of a shared entry
+   — a table row, an index entry — follows one rule: ``unset`` removes its
+   own part, and ``delete`` removes the entry only from the view that owns
+   entries (``owns_rows``, an index view with a document); from any other
+   view it removes that view's part too.
 4. **Existence is a read.** ``exists(k)`` holds exactly when ``get(k)``
    returns a record. For an assembled record the authority is necessary, not
    sufficient: ``assemble`` has the last word.

@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from kvtsjl.backends.index.memory_vector import MemoryVectorIndex
-from kvtsjl.exceptions import KvStoreIndexError
+from kvtsjl.exceptions import KvStoreIndexError, KvStoreUnsupported
 from kvtsjl.index.logical.vector import VectorQuery
 from kvtsjl.index.schema.index_set import IndexSet
 from kvtsjl.serde import SerDe
@@ -114,4 +114,6 @@ def test_a_patch_view_that_declares_nothing_refuses_to_delete() -> None:
 
     with pytest.raises(KvStoreIndexError, match="owned_fields"):
         patch.delete("k")
+    with pytest.raises(KvStoreUnsupported, match="owned_fields"):
+        patch.unset("k")
     assert owner.get("k") is not None, "the entry was damaged before refusing"

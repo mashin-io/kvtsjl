@@ -20,7 +20,7 @@ from kvtsjl import (
     VectorQuery,
 )
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.keymap_algebra import DictKeyMap
+from kvtsjl.keymap_algebra import DictKeyMap, ZipPartsBundle
 
 
 def _str_store(name: str = "s") -> MemoryKvStore[str, str, str, bytes]:
@@ -192,7 +192,7 @@ def test_zip_as_bundle() -> None:
         body: str | None
 
     @dataclass
-    class DocParts:
+    class DocParts(ZipPartsBundle[str]):
         meta: MemoryKvStore[str, str, str, bytes]
         body: MemoryKvStore[str, str, str, bytes]
 
@@ -212,7 +212,7 @@ def test_zip_as_keymap_bundle() -> None:
         body: str | None
 
     @dataclass
-    class DocParts:
+    class DocParts(ZipPartsBundle[str]):
         meta: DictKeyMap[str, str]
         body: DictKeyMap[str, str]
 

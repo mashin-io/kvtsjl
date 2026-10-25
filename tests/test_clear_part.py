@@ -142,7 +142,7 @@ def _digest_view(conn: sqlite3.Connection, *, reads_core: bool = False) -> Any:
     )
 
 
-def _column(conn: sqlite3.Connection, name: str) -> Any:
+def _column(conn: sqlite3.Connection, name: str, *, owns_rows: bool = False) -> Any:
     kvset = KvSet.with_str_keys(
         "doc",
         key_serde=SerDe.identity(str),
@@ -153,7 +153,11 @@ def _column(conn: sqlite3.Connection, name: str) -> Any:
         ),
     )
     sql_kvset = SqlDbKvSet.create(
-        kvset, fields=(SqlDbField(name),), key_field="id", shares_table=True
+        kvset,
+        fields=(SqlDbField(name),),
+        key_field="id",
+        shares_table=True,
+        owns_rows=owns_rows,
     )
     return SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(conn))
 
@@ -274,7 +278,11 @@ class Doc:
 
 def _docs(conn: sqlite3.Connection, **kw: Any) -> Any:
     return KeyMap.zip_with(
-        Doc, commit_part="core", core=_column(conn, "core"), digest=_digest_view(conn), **kw
+        Doc,
+        commit_part="core",
+        core=_column(conn, "core", owns_rows=True),
+        digest=_digest_view(conn),
+        **kw,
     )
 
 
@@ -386,3 +394,36 @@ def test_a_batch_write_unsets_a_wrapped_part_through_its_wrapper() -> None:
     docs.batch_set({"d": Doc("C", None)})
 
     assert _doc(conn, "d") == {"core": "C", "text": None, "score": None, "impact": "I"}
+
+
+# --- one rule for every view of a shared entry ------------------------------
+
+
+def test_deleting_through_a_view_that_does_not_own_rows_keeps_the_record() -> None:
+    """Only the row owner deletes; a sibling's delete removes what it wrote."""
+    conn = sqlite3.connect(":memory:")
+    _wide_table(conn)
+    core, digest = _column(conn, "core", owns_rows=True), _digest_view(conn)
+    core.set("d", "C")
+    digest.set("d", Digest("T", "S"))
+
+    assert digest.delete("d") is True
+    assert _doc(conn, "d") == {"core": "C", "text": None, "score": None, "impact": None}
+    assert digest.batch_delete(["d"]) == 0, "a view already clear reported holding a value"
+
+    assert core.delete("d") is True
+    assert _doc(conn, "d") == {}, "the row owner left its row"
+
+
+def test_owns_rows_describes_a_view_of_a_shared_table() -> None:
+    kvset = _digest_kvset().kvset
+    with pytest.raises(ValueError, match="shared table"):
+        SqlDbKvSet.create(kvset, fields=(SqlDbField("text"),), key_field="id", owns_rows=True)
+
+
+def test_an_index_view_refuses_the_same_way_a_table_view_does() -> None:
+    """Both families answer to KvStoreUnsupported; the index one is still an index error."""
+    from kvtsjl.exceptions import KvStoreIndexError, KvStoreIndexUnsupported
+
+    assert issubclass(KvStoreIndexUnsupported, KvStoreUnsupported)
+    assert issubclass(KvStoreIndexUnsupported, KvStoreIndexError)

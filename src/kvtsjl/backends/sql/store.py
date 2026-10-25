@@ -599,16 +599,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
 
     def delete(self, key: K) -> bool:
-        sk = self._sql_kvset
-        key_row = self._full_key_row(key, require_scope=True)
-        return (
-            self._adapter.delete_by_keys(
-                table=self._table,
-                key_fields=sk.key_fields,
-                keys=[key_row],
-            )
-            > 0
-        )
+        return self.batch_delete([key]) > 0
 
     def unset(self, key: K) -> bool:
         """Remove this view's value for ``key``, and nothing its siblings hold.
@@ -620,9 +611,12 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return self.batch_unset([key]) > 0
 
     def batch_unset(self, keys: Sequence[K]) -> int:
+        if not self._sql_kvset.shares_table:
+            return self._delete_rows(keys)
+        return self._clear_own_columns(keys)
+
+    def _clear_own_columns(self, keys: Sequence[K]) -> int:
         sk = self._sql_kvset
-        if not sk.shares_table:
-            return self.batch_delete(keys)
         if not sk.own_columns:
             raise KvStoreUnsupported(
                 f"{sk.table_name}: this view writes no columns of its own, so "
@@ -681,6 +675,17 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             self._write_rows(rows)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
+        """Remove the rows — or, from a view that does not own them, its columns.
+
+        On a shared table only the view that ``owns_rows`` removes a row;
+        deleting through any other view removes what that view wrote, so a
+        sibling's columns and the record survive.
+        """
+        if self._sql_kvset.deletes_rows:
+            return self._delete_rows(keys)
+        return self._clear_own_columns(keys)
+
+    def _delete_rows(self, keys: Sequence[K]) -> int:
         deleted = 0
         sk = self._sql_kvset
         for chunk in chunk_sequence(list(keys), self.batch_size):

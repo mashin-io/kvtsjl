@@ -178,7 +178,7 @@ def test_a_scoped_search_is_not_starved_by_nearer_entries_elsewhere() -> None:
 
 def test_a_backend_that_cannot_filter_inside_the_search_refuses() -> None:
     """Better to raise than to return a trimmed top-k that looks like a result."""
-    from kvtsjl.exceptions import KvStoreIndexError
+    from kvtsjl.exceptions import KvStoreIndexError, KvStoreUnsupported
 
     index = _no_prefix_filter_index()
     # unscoped is fine: there is nothing to filter
@@ -186,6 +186,8 @@ def test_a_backend_that_cannot_filter_inside_the_search_refuses() -> None:
 
     scoped = index.clone_with_scope(Scope.of(user="alice"))
     with pytest.raises(KvStoreIndexError, match="inside the search"):
+        scoped.search(VectorQuery(embedding=[0.0]), limit=5)
+    with pytest.raises(KvStoreUnsupported, match="inside the search"):
         scoped.search(VectorQuery(embedding=[0.0]), limit=5)
 
 

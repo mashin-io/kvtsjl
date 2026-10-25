@@ -316,7 +316,7 @@ Underlying wrapper types (`IndexedKvStore`, `FallbackReadKvStore`, …) exist fo
 
 ### Optional zip
 
-A row exists if **any** part is present (or, with `mandatory=[…]`, every mandatory one); each field is independently `PartV | None`. `set` writes non-`None` parts and *unsets* `None` ones: each part removes only what is its own, so a column-group view of a table its siblings share (`shares_table=True`) nulls just the columns it writes and leaves the row. `delete` removes the record. `scan` lists exactly the keys `get` returns.
+A row exists if **any** part is present (or, with `mandatory=[…]`, every mandatory one); each field is independently `PartV | None`. `set` writes non-`None` parts and *unsets* `None` ones: each part removes only what is its own, so a column-group view of a table its siblings share (`shares_table=True`) nulls just the columns it writes and leaves the row. `delete` removes the record: mark the view the record is committed through `owns_rows=True`, since on a shared table only that view deletes rows — deleting through any sibling view removes only that view's columns. `scan` lists exactly the keys `get` returns.
 
 ```python
 from dataclasses import dataclass
@@ -357,8 +357,10 @@ turns.get("t1").mounts                                               # {} when t
 **Strict typing** — prefer `.zip_as` with a parts bundle (like `.indexed_as` for indexes):
 
 ```python
+from kvtsjl.keymap_algebra import ZipPartsBundle
+
 @dataclass
-class ArticleParts:
+class ArticleParts(ZipPartsBundle[str]):   # names the key type
     meta: KvStore[str, dict]
     body: KvStore[str, str]
 
@@ -479,7 +481,7 @@ Each operation is one of those traversals plus when it stops, how it combines re
 
 1. **Commit before derive** — no dependent is written before the record is committed.
 2. **Referent before reference** — parts are written before the authority that refers to them, and removed after it.
-3. **A part is unset, a record is deleted** — writing a part as absent removes only that part's own data (a shared-table view nulls its own columns); deleting the record removes it all.
+3. **A part is unset, a record is deleted** — writing a part as absent removes only that part's own data (a shared-table view nulls its own columns); deleting the record removes it all. Every view of a shared entry, table row or index entry, follows one rule: only the view that owns entries deletes them.
 4. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
 5. **Scans list only records** — every key a scan yields is one `get` returns.
 6. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept; it carries the write clock so a promoted value keeps its remaining life.

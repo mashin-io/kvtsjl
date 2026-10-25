@@ -282,3 +282,24 @@ def test_after_commit_names_parts_that_come_after_a_commit_part() -> None:
         KvStore.zip_with(
             Turn, commit_part="core", after_commit=("core",), core=core, body=_bodies(), mounts=groups
         )
+
+
+def test_a_group_is_any_store_scoped_one_level_deeper() -> None:
+    """Not a SQL feature: the same over a memory store."""
+    rows = MemoryKvStore(
+        KvSet.with_str_keys(
+            "rows",
+            key_serde=SerDe.identity(str),
+            value_serde=SerDe.identity(str),
+            scope_schema=("user", "parent"),
+        )
+    )
+    groups = rows.scoped(user="u").group_by("parent")
+    groups.set("t", {"a": "1", "b": "2"})
+    groups.set("t", {"b": "3"})
+    groups.set("other", {"a": "x"})
+
+    assert groups.get("t") == {"b": "3"}
+    assert groups.delete("t") is True
+    assert groups.get("t") == {}
+    assert rows.scoped(user="u", parent="other").get("a") == "x"
