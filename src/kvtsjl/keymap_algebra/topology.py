@@ -220,6 +220,9 @@ check each one, against the compositions kvtsjl ships and ones it does not.
    :class:`PartialSyncError` (``committed=True``) after it. A target that is
    itself a composition reports its own outcome, and the parent maps it
    through the role that child plays — so the answer is right at every level.
+   When the caller owns the commit, the commit point is the caller's commit:
+   a part that joins it and fails is before it, ``UncommittedWriteError`` —
+   roll back and the record is as it was.
 9. **Unsupported is never best-effort.** Best-effort tolerates a medium
    *failing*. A :class:`~kvtsjl.exceptions.KvStoreUnsupported` — a
    composition asking a medium for something it cannot do — is raised under
@@ -667,11 +670,17 @@ class DependentSyncs:
         op: Callable[[], object],
         *,
         defer: bool,
+        before_commit: bool = False,
     ) -> None:
+        """Queue ``op`` for the commit, or run it now.
+
+        Run now inside a commit the caller has not made yet — it joins that
+        commit — it is before the commit point, and a failure says so.
+        """
         if defer:
             self._queue.append(_Queued(name, what, policy, op))
             return
-        _settle(name, what, policy, op)
+        _settle(name, what, policy, op, before_commit=before_commit)
 
     @property
     def pending(self) -> int:
@@ -857,8 +866,10 @@ class Topology[K, V]:
             what,
             policy if policy is not None else target.policy,
             run,
-            # One whose own writes are deferred joins the caller's commit.
+            # One whose own writes are deferred joins the caller's commit,
+            # so it runs now, before that commit; any other waits for it.
             defer=self.deferred and not target.writes_are_deferred,
+            before_commit=self.deferred,
         )
 
     # --- writes --------------------------------------------------------------
@@ -1371,14 +1382,23 @@ def _committing[T](name: str, role: Role, run: Callable[[], T]) -> T:
         ) from exc
 
 
-def _settle(name: str, what: str, policy: SyncPolicy, run: Callable[[], object]) -> None:
-    """Run an operation after the commit point under ``policy``.
+def _settle(
+    name: str,
+    what: str,
+    policy: SyncPolicy,
+    run: Callable[[], object],
+    *,
+    before_commit: bool = False,
+) -> None:
+    """Run an operation that follows the authority's write, under ``policy``.
 
-    A failure here is after the commit point, whatever a child composition
-    says about its own record: ``REQUIRED`` raises :class:`PartialSyncError`,
-    ``BEST_EFFORT`` logs and carries on. Best-effort tolerates a medium
-    failing, not one asked for something it cannot do: a
-    :class:`KvStoreUnsupported` is raised under either policy.
+    Usually that is after the commit point, whatever a child composition says
+    about its own record: ``REQUIRED`` raises :class:`PartialSyncError`,
+    ``BEST_EFFORT`` logs and carries on. But one that joins a commit the
+    caller has not made yet runs before it: its failure raises
+    :class:`UncommittedWriteError`, and rolling back leaves the record as it
+    was. Best-effort tolerates a medium failing, not one asked for something
+    it cannot do: a :class:`KvStoreUnsupported` is raised under either policy.
     """
     try:
         run()
@@ -1386,6 +1406,14 @@ def _settle(name: str, what: str, policy: SyncPolicy, run: Callable[[], object])
         if policy is SyncPolicy.BEST_EFFORT and not isinstance(exc, KvStoreUnsupported):
             _log(what, name, exc)
             return
+        if before_commit:
+            if isinstance(exc, UncommittedWriteError):
+                raise
+            raise UncommittedWriteError(
+                f"{name} {what} failed inside a commit the caller has not made; "
+                "roll it back",
+                failures={name: exc},
+            ) from exc
         if isinstance(exc, PartialSyncError):
             raise
         raise PartialSyncError(

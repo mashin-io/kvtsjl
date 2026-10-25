@@ -36,6 +36,15 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     today's behaviour. With ``autocommit=False``, this adapter never commits;
     the client must open a transaction before any write, or the write raises
     instead of vanishing on a connection with nothing to commit later.
+
+    ``begin_on_write=True`` (with ``autocommit=False``) lets the first write
+    open the transaction instead — ``BEGIN IMMEDIATE`` — which the client
+    still commits or rolls back. A composition writes what comes before its
+    commit point first, so a record's body uploads before the transaction,
+    and the write lock is never held across that network call::
+
+        records.set(key, record)   # body, then BEGIN at the row
+        conn.commit(); records.flush_index_syncs()
     """
 
     def __init__(
@@ -44,17 +53,26 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         *,
         db_name: str = "sqlite",
         autocommit: bool = True,
+        begin_on_write: bool = False,
     ) -> None:
+        if autocommit and begin_on_write:
+            raise ValueError(
+                "begin_on_write opens a transaction the client commits; "
+                "autocommit commits each write itself"
+            )
         self._conn = connection
         self._db_name = db_name
         self._autocommit = autocommit
+        self._begin_on_write = begin_on_write
         self._conn.row_factory = sqlite3.Row
 
     def _ensure_write_txn(self) -> None:
-        if not self._autocommit and not self._conn.in_transaction:
-            raise KvStoreError(
-                "no open transaction; write would never commit"
-            )
+        if self._autocommit or self._conn.in_transaction:
+            return
+        if self._begin_on_write:
+            self._conn.execute("BEGIN IMMEDIATE")
+            return
+        raise KvStoreError("no open transaction; write would never commit")
 
     def _after_write(self) -> None:
         if self._autocommit:

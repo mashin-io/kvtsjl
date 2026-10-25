@@ -516,6 +516,24 @@ class WriteThroughCache[K, V](StoreTopologyMixin[K, V], DelegatingKvStore[K, V])
 
 Writes, conditional writes, deletes, cache-first reads that fill on a miss, existence, scans, GC and deferred syncs all follow. The full reference — every operation, the laws and the model's limits — is the docstring of `kvtsjl.keymap_algebra.topology`.
 
+### Writing a record in your transaction
+
+kvtsjl never begins or commits your transaction; it only keeps the record's order inside it. With an adapter whose first write opens the transaction, a record's body (written before the commit point) uploads before `BEGIN`, the row and every part on the same connection join one transaction, and parts on other media wait for your commit:
+
+```python
+adapter = SqliteSqlDbClientAdapter(conn, autocommit=False, begin_on_write=True)
+try:
+    turns.set(turn_id, turn)        # body first, then BEGIN at the row
+    conn.commit()
+    turns.flush_index_syncs()       # copies and indexes on other media
+except Exception:
+    conn.rollback()
+    turns.discard_index_syncs()
+    raise
+```
+
+A part failing inside the transaction raises `UncommittedWriteError` — roll back and the record is as it was; the uploaded body is left for GC. Work that must happen atomically with a delete is yours to put in the same transaction — kvtsjl runs no callbacks of yours. Open the transaction, read what you need, do your work, delete, commit. For expiry, `expired_keys` names the records; they no longer read back as records, so read the parts your work needs from their own stores, then `batch_delete`. A record's body is removed only once you commit.
+
 ### Filling a store from its fallback
 
 A fallback already says where the records a store lacks can be found, so copying them over is an operation of that composition — the same lookup, run over keys:
