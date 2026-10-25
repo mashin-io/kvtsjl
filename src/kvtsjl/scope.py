@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from kvtsjl.exceptions import KvStoreScopeError
+
 
 @dataclass(frozen=True, slots=True)
 class ScopeSegment:
@@ -39,6 +41,22 @@ class Scope:
     @classmethod
     def empty(cls) -> Scope:
         return cls()
+
+    def only(self, *kinds: str) -> Scope:
+        """This scope narrowed to the segments of ``kinds``, in this scope's order.
+
+        Every kind named must be here: a part narrowed to a kind its record's
+        scope lacks — a typo, most often — would otherwise be left unscoped,
+        and so shared across everything that kind should keep apart.
+        """
+        present = {segment.kind for segment in self.segments}
+        missing = [kind for kind in kinds if kind not in present]
+        if missing:
+            raise KvStoreScopeError(
+                f"scope kinds {missing} are not in {[s.kind for s in self.segments]}"
+            )
+        wanted = set(kinds)
+        return Scope(segments=tuple(s for s in self.segments if s.kind in wanted))
 
     def extend(self, kind: str, id: str) -> Scope:
         """Append one kind/id segment."""

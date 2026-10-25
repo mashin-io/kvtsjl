@@ -13,6 +13,7 @@ from kvtsjl.store.compose.mapped import (
 )
 from kvtsjl.store.compose.mirror import MirrorKvStore
 from kvtsjl.store.compose.readonly import ReadonlyKvStore
+from kvtsjl.store.compose.scope_from import ScopeFromKvStore
 from kvtsjl.store.compose.then import ThenKvStore, ThenWithKvStore
 from kvtsjl.store.compose.zipped import ZippedKvStore, ZipWithKvStore
 
@@ -28,6 +29,7 @@ __all__ = [
     "MappedKvStore",
     "MirrorKvStore",
     "ReadonlyKvStore",
+    "ScopeFromKvStore",
     "ThenKvStore",
     "ThenWithKvStore",
     "ZipWithKvStore",

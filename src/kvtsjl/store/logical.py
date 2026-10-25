@@ -314,6 +314,18 @@ class KvStore[K, V](
 
         return cast(KvStore[K, V], build_coalesce(self, secondary, promote=promote))
 
+    def scope_from(self, *kinds: str) -> KvStore[K, V]:
+        """This store, taking only the ``kinds`` of any scope it is given.
+
+        For a part keyed more coarsely than its record: in a zip scoped
+        ``(user, session)``, ``receipts.scope_from("user")`` is scoped by the
+        ``user`` segment alone. A scope without one of ``kinds`` raises. See
+        :class:`~kvtsjl.store.compose.scope_from.ScopeFromKvStore`.
+        """
+        from kvtsjl.store.compose.scope_from import ScopeFromKvStore
+
+        return ScopeFromKvStore(self, tuple(kinds))
+
     def group_by(self, by: str) -> KvStore[str, Mapping[K, V]]:
         """These rows grouped by the scope segment ``by``, each group one value.
 

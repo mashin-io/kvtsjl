@@ -310,6 +310,7 @@ Underlying wrapper types (`IndexedKvStore`, `FallbackReadKvStore`, …) exist fo
 | Values | `.expand` / `.expand_map` | Value → nested collection; **same outer `K`**; caller folds |
 | Keys | `.imap_keys` | Caller ↔ storage key (e.g. hash) |
 | Keys | `.scoped` | Restrict keyspace |
+| Keys | `.scope_from` | Take only some kinds of the scope given (a part keyed more coarsely than its record) |
 | Across | `.then` / `.then_with` | `other[self[k]]` / `other[f(k,v)]` (FK-style) |
 | Merge | `.coalesce` | Left-biased (same as `.fallback_read`) |
 | Policy | `.mirror`, `.indexed`, `.readonly` | Operational |
@@ -348,7 +349,8 @@ records.set_if_absent("doc:1", Record(row=row, body=body))  # True once, then Fa
 turns = KvStore.zip_with(
     Turn, commit_part="core", after_commit=("mounts",),
     core=turn_rows, body=bodies,
-    mounts=mount_rows.group_by("consumer_turn_id"),   # Mapping[card_turn_id, Mount]
+    mounts=mount_rows.group_by("consumer_turn_id")    # Mapping[card_turn_id, Mount]
+                     .scope_from("user"),              # receipts are keyed by user, not session
 )
 turns.set("t1", Turn(core=…, body=…, mounts={"c1": m1, "c2": m2}))  # c3, if stored, is removed
 turns.get("t1").mounts                                               # {} when there are none
