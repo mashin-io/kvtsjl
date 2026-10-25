@@ -158,6 +158,8 @@ class SqlDbClientAdapter(ABC):
         Each row is one conditional statement, so a concurrent writer cannot
         land between a check and the insert. An existing row is left exactly
         as it is, expired or not: the database has no view of kvtsjl's TTL.
+        Only a row with the same ``key_fields`` makes an insert not happen; a
+        violation of any other constraint raises.
         An adapter that can tell which rows one statement inserted
         (``RETURNING``) may send the batch as one.
         """
@@ -198,6 +200,12 @@ class SqlDbClientAdapter(ABC):
         table it refuses a view that does not own one — even when the row
         already exists. Updating first avoids that, while still letting the
         insert fail loudly when a non-owning view would have to create a row.
+
+        Only a conflict on ``key_fields`` is a race — another writer took the
+        key between the update and the insert — and is resolved by updating
+        again. Any other violation, of another unique index or a ``NOT NULL``
+        column, raises: treated as a race, the retried update matches nothing
+        and the write is reported done having written nothing.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement upsert_rows_update_first"

@@ -13,6 +13,9 @@ from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.scan import OrderBy
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Each retry needs another writer to insert the key and delete it again
+# between two statements; a bound turns a pathology into an error, not a hang.
+_KEY_RACE_ATTEMPTS = 8
 
 
 def _quote_ident(name: str) -> str:
@@ -220,22 +223,32 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         update_sql = f"UPDATE {t} SET {assigns} WHERE {where}"
         cols = ", ".join(_quote_ident(c) for c in write_columns)
         placeholders = ", ".join("?" for _ in write_columns)
-        insert_sql = f"INSERT INTO {t} ({cols}) VALUES ({placeholders})"
+        conflict = ", ".join(_quote_ident(f) for f in key_fields)
+        # Only a conflict on the row's own key is a race: any other violation
+        # — another unique index, a NOT NULL column this view does not own —
+        # raises, rather than leaving a write reported done that wrote nothing.
+        insert_sql = (
+            f"INSERT INTO {t} ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT({conflict}) DO NOTHING"
+        )
 
         # Row at a time: executemany cannot report which rows matched.
         for row in rows:
             params = [row.get(c) for c in set_cols] + [row.get(f) for f in key_fields]
-            if self._conn.execute(update_sql, params).rowcount:
-                continue
-            try:
-                self._conn.execute(insert_sql, [row.get(c) for c in write_columns])
-            except sqlite3.IntegrityError as exc:
-                if "UNIQUE" not in str(exc):
-                    # NOT NULL from a view that does not own the column: the
-                    # row genuinely cannot be created from here. Surface it.
-                    raise
-                # Another writer inserted between the update and the insert.
-                self._conn.execute(update_sql, params)
+            values = [row.get(c) for c in write_columns]
+            # Update; else insert; else another writer took the key between
+            # the two, so update again.
+            for _ in range(_KEY_RACE_ATTEMPTS):
+                if (
+                    self._conn.execute(update_sql, params).rowcount
+                    or self._conn.execute(insert_sql, values).rowcount
+                ):
+                    break
+            else:
+                raise KvStoreError(
+                    f"{table}: the row for {[row.get(f) for f in key_fields]!r} was "
+                    f"neither updated nor inserted in {_KEY_RACE_ATTEMPTS} attempts"
+                )
         self._after_write()
 
     def delete_by_keys(
