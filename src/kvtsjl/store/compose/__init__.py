@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kvtsjl.store.compose.expand import ExpandKvStore, ExpandMapKvStore
 from kvtsjl.store.compose.fallback import CoalescedKvStore, FallbackReadKvStore
+from kvtsjl.store.compose.grouped import GroupedKvStore
 from kvtsjl.store.compose.indexed import IndexedKvStore
 from kvtsjl.store.compose.mapped import (
     IMappedKeysKvStore,
@@ -20,6 +21,7 @@ __all__ = [
     "ExpandKvStore",
     "ExpandMapKvStore",
     "FallbackReadKvStore",
+    "GroupedKvStore",
     "IMappedKeysKvStore",
     "IMappedKvStore",
     "IndexedKvStore",

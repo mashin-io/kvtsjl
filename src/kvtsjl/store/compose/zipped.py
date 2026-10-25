@@ -144,13 +144,20 @@ class ZipWithKvStore[K, V](
         parts: Mapping[str, KvStore[K, Any]],
         *,
         commit_part: str | None = None,
+        after_commit: Sequence[str] = (),
         mandatory: Sequence[bool] | None = None,
         created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
         | None = None,
     ) -> None:
         if not parts:
             raise ValueError("zip_with requires at least one part")
-        super().__init__(ctor, parts, commit_part=commit_part, mandatory=mandatory)
+        super().__init__(
+            ctor,
+            parts,
+            commit_part=commit_part,
+            after_commit=after_commit,
+            mandatory=mandatory,
+        )
         first = next(iter(parts.values()))
         self.scope = first.scope
         self.batch_size = first.batch_size
@@ -199,6 +206,7 @@ class ZipWithKvStore[K, V](
             self._ctor,
             clone_parts_mapping(self._store_parts(), scope),
             commit_part=self._commit_part,
+            after_commit=self._after_commit,
             mandatory=self._mandatory,
             created_at_merge=self._created_at_merge,
         )

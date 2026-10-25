@@ -37,9 +37,10 @@ To choose one, ask what the target is to the record:
 - *Part of* it, referred to by the authority? ``COMPONENT``. Written first,
   or a reader could follow the authority to something never written.
 - *Decides* whether it exists? ``AUTHORITY``. At most one per record.
-- *Derived from* it — a copy, an index, a cache? ``DEPENDENT``. Written after
-  the commit point, so a failure there leaves the record present and the
-  dependent stale.
+- *Derived from* it — a copy, an index, a cache — or *referring to* it, like
+  a parent's child rows keyed by the parent? ``DEPENDENT``. Written after the
+  commit point, so a failure there leaves the record present and the
+  dependent stale, and nothing is written for a record that never commits.
 - Consulted only when the authority does not have the key? ``FALLBACK``.
 
 **Lookup** — when a read consults a target that is neither the authority nor
@@ -70,8 +71,12 @@ authority *is* the commit point. But the authority may have either shape:
 Decides existence  ``AUTHORITY`` in          ``AUTHORITY`` in ``parts`` —
                    ``targets`` — ``mirror``  a zip's ``commit_part``
                    's primary
-Does not           ``DEPENDENT`` or          ``COMPONENT`` — a zip's other
-                   ``FALLBACK``              fields
+Before it          —                         ``COMPONENT`` — a zip's other
+                                             fields
+After it           ``DEPENDENT`` — a copy,   ``DEPENDENT`` in ``parts`` — a
+                   an index; or              zip's ``after_commit`` fields,
+                   ``FALLBACK``, never       such as child rows from
+                   written                   ``group_by``
 =================  ========================  ================================
 
 So "a piece that decides existence" is the authority declared in ``parts``:
@@ -81,6 +86,12 @@ for the record to exist, there is no authority: every piece is a component
 and ``assemble`` decides — ``zip_with(..., mandatory=[True, True])``. No
 single piece can then refuse an insert atomically, so ``set_if_absent`` is
 not available.
+
+A dependent in ``parts`` is a piece written after the commit point because it
+refers to the record — a turn's receipts, keyed by the turn. It is read into
+the record like any part, never decides its existence, is written only once
+the record commits (so not at all by a ``set_if_absent`` that loses) and is
+removed after it.
 
 
 2. The traversals
@@ -691,11 +702,11 @@ class Topology[K, V]:
         misplaced = [t.name for t in self.targets if t.role is Role.COMPONENT]
         if misplaced:
             raise ValueError(f"a component holds a part of the record: {misplaced}")
-        not_parts = [
-            t.name for t in self.parts if t.role not in (Role.COMPONENT, Role.AUTHORITY)
-        ]
-        if not_parts:
-            raise ValueError(f"only components and the authority are parts: {not_parts}")
+        fallback_parts = [t.name for t in self.parts if t.role is Role.FALLBACK]
+        if fallback_parts:
+            raise ValueError(f"a fallback is read whole, not as a part: {fallback_parts}")
+        if not authorities and any(t.role is Role.DEPENDENT for t in self.parts):
+            raise ValueError("a dependent part comes after a commit point; there is none")
         if not authorities and not self.parts:
             raise ValueError("a record needs an authority or components")
         if not authorities and any(t.role is Role.FALLBACK for t in self.targets):
@@ -724,6 +735,11 @@ class Topology[K, V]:
     @property
     def components(self) -> list[Target[K, V, object]]:
         return [t for t in self.parts if t.role is Role.COMPONENT]
+
+    @property
+    def _unanchored_parts(self) -> list[Target[K, V, object]]:
+        """The parts other than the authority, which is read first."""
+        return [t for t in self.parts if t.role is not Role.AUTHORITY]
 
     @property
     def assembled(self) -> bool:
@@ -778,27 +794,37 @@ class Topology[K, V]:
         return authority
 
     @property
-    def dependents(self) -> list[Target[K, V, V]]:
-        """Dependents hold the whole record: they are derived from all of it."""
-        return [t for t in self.targets if t.role is Role.DEPENDENT]
+    def dependents(self) -> list[Target[K, V, object]]:
+        """Targets written after the commit point: copies, and parts that refer to it."""
+        return self._by_role(Role.DEPENDENT)
 
     def _to_dependents(
         self,
         what: str,
         syncs: DependentSyncs,
-        op: Callable[[Target[K, V, V]], object],
+        op: Callable[[Target[K, V, object]], object],
         *,
         policy: SyncPolicy | None = None,
     ) -> None:
         for target in self.dependents:
-            syncs.run(
-                target.name,
-                what,
-                policy if policy is not None else target.policy,
-                lambda t=target: op(t),
-                # One whose own writes are deferred joins the caller's commit.
-                defer=self.deferred and not target.writes_are_deferred,
-            )
+            self._sync_one(target, what, syncs, lambda t=target: op(t), policy)
+
+    def _sync_one(
+        self,
+        target: Target[K, V, object],
+        what: str,
+        syncs: DependentSyncs,
+        run: Callable[[], object],
+        policy: SyncPolicy | None = None,
+    ) -> None:
+        syncs.run(
+            target.name,
+            what,
+            policy if policy is not None else target.policy,
+            run,
+            # One whose own writes are deferred joins the caller's commit.
+            defer=self.deferred and not target.writes_are_deferred,
+        )
 
     # --- writes --------------------------------------------------------------
 
@@ -889,7 +915,10 @@ class Topology[K, V]:
             if chunks is not None:
                 target.write_stream(key, chunks, target.receives(options), None)
 
-        self._to_dependents("set_stream", syncs, feed)
+        # A whole record has no parts, so every dependent is a whole target.
+        for target in self.targets:
+            if target.role is Role.DEPENDENT:
+                self._sync_one(target, "set_stream", syncs, lambda t=target: feed(t))
 
     # --- deletes -------------------------------------------------------------
 
@@ -1002,7 +1031,7 @@ class Topology[K, V]:
             if target.expires:
                 own: list[K] = []
 
-                def collect(t: Target[K, V, V] = target, out: list[K] = own) -> None:
+                def collect(t: Target[K, V, object] = target, out: list[K] = own) -> None:
                     out.extend(t.gc(max_entries))
 
                 _settle(target.name, "gc", SyncPolicy.BEST_EFFORT, collect)
@@ -1137,7 +1166,7 @@ class Topology[K, V]:
             if value is None:
                 return None
             held[id(authority)] = value
-        for part in self.components:
+        for part in self._unanchored_parts:
             held[id(part)] = part.read(key)
         return assemble(Parts(held))
 
@@ -1153,7 +1182,7 @@ class Topology[K, V]:
             hits = authority.batch_read(wanted)
             found[id(authority)] = hits
             wanted = [k for k in wanted if k in hits]
-        for part in self.components:
+        for part in self._unanchored_parts:
             found[id(part)] = part.batch_read(wanted) if wanted else {}
         out: dict[K, V] = {}
         for key in wanted:

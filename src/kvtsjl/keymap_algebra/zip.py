@@ -104,6 +104,7 @@ class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
         field_names: Sequence[str] | None = None,
         mandatory: Sequence[bool] | None = None,
         commit_part: str | None = None,
+        after_commit: Sequence[str] = (),
     ) -> None:
         if not parts:
             raise ValueError("zip_with requires at least one part")
@@ -126,27 +127,41 @@ class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
             raise ValueError(
                 f"commit_part {commit_part!r} is not one of {tuple(self._parts)}"
             )
+        unknown = [n for n in after_commit if n not in self._parts]
+        if unknown:
+            raise ValueError(f"after_commit names unknown parts: {unknown}")
+        if after_commit and commit_part is None:
+            raise ValueError("after_commit needs a commit_part to come after")
+        if commit_part in after_commit:
+            raise ValueError(f"{commit_part!r} cannot come after itself")
         self._commit_part = commit_part
+        self._after_commit = tuple(after_commit)
 
     def topology(self) -> Topology[K, V]:
-        """The commit part is the authority; every other part a component.
+        """The commit part is the authority; the rest components or dependents.
 
+        A part named in ``after_commit`` refers to the record — a turn's
+        child rows, keyed by the turn — so it is a dependent: written only
+        once the commit part has, and removed after it. Every other part is
+        a component, referred to by the commit part and written before it.
         Without a commit part no part alone decides the record exists, so
         every part is a component and presence stays with ``mandatory``.
         """
         parts = tuple(
-            self._part(
-                name,
-                Role.AUTHORITY if name == self._commit_part else Role.COMPONENT,
-                self._parts[name],
-                _field(name),
-            )
+            self._part(name, self._role_of(name), self._parts[name], _field(name))
             for name in self.field_names
         )
         return Topology(
             parts=parts,
             assemble=lambda held: self._record(tuple(held[part] for part in parts)),
         )
+
+    def _role_of(self, name: str) -> Role:
+        if name == self._commit_part:
+            return Role.AUTHORITY
+        if name in self._after_commit:
+            return Role.DEPENDENT
+        return Role.COMPONENT
 
     def _record(self, values: tuple[Any, ...]) -> V | None:
         if not row_present(values, self._mandatory):

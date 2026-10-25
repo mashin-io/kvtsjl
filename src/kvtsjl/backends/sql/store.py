@@ -344,6 +344,26 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         self, *, now: datetime | None = None, limit: int
     ) -> list[K]:
         """Oldest-expired keys first, bounded, under the bound scope. Read-only."""
+        return [k for k in map(self._decode_leaf_key, self._expired_rows(now, limit)) if k is not None]
+
+    def gc_expired_keys(self, *, max_entries: int) -> list[K]:
+        """Delete expired rows by the full key each row carries.
+
+        Under a partial scope a leaf key does not name one row — two parents
+        may both hold child ``a`` — so the rows found are deleted by their own
+        keys rather than by leaf keys re-scoped to the store.
+        """
+        rows = self._expired_rows(None, max_entries)
+        if rows:
+            sk = self._sql_kvset
+            self._adapter.delete_by_keys(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=[{f: row[f] for f in sk.key_fields} for row in rows],
+            )
+        return [k for k in map(self._decode_leaf_key, rows) if k is not None]
+
+    def _expired_rows(self, now: datetime | None, limit: int) -> list[SqlDbRow]:
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
         self._ensure_early_binding_safe()
@@ -351,40 +371,35 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         sk = self._sql_kvset
         exact = self._scope_key_row(require_all=False)
         if self._adapter.supports_expiry_scan():
-            rows = self._adapter.scan_expired(
-                table=self._table,
-                columns=sk.select_columns(),
-                key_fields=sk.key_fields,
-                exact=exact,
-                expires_at_field=sk.expires_at_field,
-                updated_at_field=sk.updated_at_field,
-                relative_ttl_seconds=self._relative_ttl_for_expiry_scan(),
-                now=now_epoch,
-                limit=limit,
+            return list(
+                self._adapter.scan_expired(
+                    table=self._table,
+                    columns=sk.select_columns(),
+                    key_fields=sk.key_fields,
+                    exact=exact,
+                    expires_at_field=sk.expires_at_field,
+                    updated_at_field=sk.updated_at_field,
+                    relative_ttl_seconds=self._relative_ttl_for_expiry_scan(),
+                    now=now_epoch,
+                    limit=limit,
+                )
             )
-        else:
-            scored: list[tuple[float, SqlDbRow]] = []
-            for row in self._adapter.scan_by_key_parts(
-                table=self._table,
-                columns=sk.select_columns(),
-                key_fields=sk.key_fields,
-                exact=exact,
-                prefixes=self._leaf_prefix_map(None),
-            ):
-                if not self._row_expired_at(row, now=now_epoch):
-                    continue
-                death = self._death_time(row)
-                if death is None:
-                    continue
-                scored.append((death, row))
-            scored.sort(key=lambda item: item[0])
-            rows = [row for _, row in scored[:limit]]
-        out: list[K] = []
-        for row in rows:
-            decoded = self._decode_leaf_key(row)
-            if decoded is not None:
-                out.append(decoded)
-        return out
+        scored: list[tuple[float, SqlDbRow]] = []
+        for row in self._adapter.scan_by_key_parts(
+            table=self._table,
+            columns=sk.select_columns(),
+            key_fields=sk.key_fields,
+            exact=exact,
+            prefixes=self._leaf_prefix_map(None),
+        ):
+            if not self._row_expired_at(row, now=now_epoch):
+                continue
+            death = self._death_time(row)
+            if death is None:
+                continue
+            scored.append((death, row))
+        scored.sort(key=lambda item: item[0])
+        return [row for _, row in scored[:limit]]
 
     def _live_row(self, row: SqlDbRow | None) -> SqlDbRow | None:
         if row is None:

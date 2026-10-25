@@ -314,6 +314,17 @@ class KvStore[K, V](
 
         return cast(KvStore[K, V], build_coalesce(self, secondary, promote=promote))
 
+    def group_by(self, by: str) -> KvStore[str, Mapping[K, V]]:
+        """These rows grouped by the scope segment ``by``, each group one value.
+
+        ``rows.group_by("turn_id")`` reads and writes the rows under a turn as
+        one mapping: ``set`` makes them equal the given ones, ``delete``
+        removes them all. See :class:`~kvtsjl.store.compose.grouped.GroupedKvStore`.
+        """
+        from kvtsjl.store.compose.grouped import GroupedKvStore
+
+        return GroupedKvStore(self, by)
+
     def mirror(
         self,
         secondary: KvStore[K, V],

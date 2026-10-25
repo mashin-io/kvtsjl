@@ -1256,3 +1256,31 @@ def test_create_carries_shares_table_through_its_validation() -> None:
     # and the validation still runs with it set
     with pytest.raises(ValueError, match="key_field or leaf_key_fields"):
         SqlDbKvSet.create(base, fields=(SqlDbField("a"),), shares_table=True)
+
+
+def test_gc_under_part_of_the_scope_deletes_the_expired_rows_themselves() -> None:
+    """A leaf key does not name one row there; the row's own key does.
+
+    Two parents both hold child ``a``. Bound to the outer segment only, GC
+    used to look the expired leaf key up again under that scope — which
+    cannot name a row — and refuse.
+    """
+    conn = sqlite3.connect(":memory:")
+    sql_kvset = make_sql_kvset(
+        "child",
+        leaf_key_fields=("child",),
+        scope_fields=("user", "parent"),
+        scope_schema=("user", "parent"),
+        ttl_policy=TtlPolicy(ttl_duration=timedelta(seconds=60)),
+    )
+    ensure_sql_table(conn, sql_kvset)
+    store = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(conn))
+    with freeze_time("2024-01-01 12:00:00") as frozen:
+        store.scoped(user="u", parent="p1").set("a", "old")
+        frozen.tick(timedelta(seconds=120))
+        store.scoped(user="u", parent="p2").set("a", "new")
+
+        assert store.scoped(user="u").gc_expired_keys(max_entries=10) == ["a"]
+
+        assert store.scoped(user="u", parent="p1").get("a") is None
+        assert store.scoped(user="u", parent="p2").get("a") == "new", "a live row went"

@@ -510,8 +510,13 @@ def test_components_are_parts_assembled_and_take_no_lookups() -> None:
         Topology((_Spy(log, "primary", Role.AUTHORITY),), assemble=lambda held: None)
     with pytest.raises(ValueError, match="holds a part"):
         Topology((part,))
-    with pytest.raises(ValueError, match="only components and the authority"):
+    with pytest.raises(ValueError, match="comes after a commit point"):
         Topology(parts=(part, _Spy(log, "copy", Role.DEPENDENT)), assemble=lambda held: None)
+    with pytest.raises(ValueError, match="read whole"):
+        Topology(
+            parts=(_Spy(log, "row", Role.AUTHORITY), _Spy(log, "cold", Role.FALLBACK)),
+            assemble=lambda held: None,
+        )
     with pytest.raises(ValueError, match="read from its parts"):
         Topology(
             (_Spy(log, "cache", Role.DEPENDENT, lookup=Lookup.BEFORE_AUTHORITY),),

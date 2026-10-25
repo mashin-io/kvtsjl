@@ -123,6 +123,7 @@ def build_zip_with[ZipK, W](
     created_at_merge: Callable[[Sequence[datetime | None]], datetime | None]
     | None = None,
     commit_part: str | None = None,
+    after_commit: Sequence[str] = (),
     **parts: ReadableKeyMap[ZipK, Any],
 ) -> ReadableKeyMap[ZipK, W]:
     if parts and all(isinstance(p, KvStore) for p in parts.values()):
@@ -132,6 +133,7 @@ def build_zip_with[ZipK, W](
             ctor,
             cast(Mapping[str, KvStore[ZipK, Any]], parts),
             commit_part=commit_part,
+            after_commit=after_commit,
             mandatory=mandatory,
             created_at_merge=created_at_merge,
         )
@@ -142,6 +144,7 @@ def build_zip_with[ZipK, W](
         cast(Mapping[str, KeyMap[ZipK, Any]], parts),
         mandatory=mandatory,
         commit_part=commit_part,
+        after_commit=after_commit,
     )
 
 

@@ -342,6 +342,18 @@ records = KvStore.zip_with(Record, commit_part="row", row=rows, body=bodies)
 records.set_if_absent("doc:1", Record(row=row, body=body))  # True once, then False
 ```
 
+**Child rows as a part** — a parent that owns a set of rows, each keyed under the parent, reads and writes them as one value with `group_by`. They refer to the record, so declare them `after_commit`: written only once the commit part has (never by a `set_if_absent` that loses), removed with the record, and never deciding whether it exists:
+
+```python
+turns = KvStore.zip_with(
+    Turn, commit_part="core", after_commit=("mounts",),
+    core=turn_rows, body=bodies,
+    mounts=mount_rows.group_by("consumer_turn_id"),   # Mapping[card_turn_id, Mount]
+)
+turns.set("t1", Turn(core=…, body=…, mounts={"c1": m1, "c2": m2}))  # c3, if stored, is removed
+turns.get("t1").mounts                                               # {} when there are none
+```
+
 **Strict typing** — prefer `.zip_as` with a parts bundle (like `.indexed_as` for indexes):
 
 ```python
