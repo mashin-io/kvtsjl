@@ -357,6 +357,15 @@ turns.set("t1", Turn(core=…, body=…, mounts={"c1": m1, "c2": m2}))  # c3, if
 turns.get("t1").mounts                                               # {} when there are none
 ```
 
+**Changing one part of an existing record** is an `update` of the record. It writes only if the commit part is unchanged — a record that is absent, or deleted meanwhile, is written nowhere — and only the parts that changed are written. Part names stay typed:
+
+```python
+turns.update("t1", lambda t: Put(replace(t, feedback=fb)) if t is not None else Keep())  # None if absent
+turns.update("t1", lambda t: Put(replace(t, mounts={"c3": m3})) if t else Keep())     # replaces the children
+```
+
+A part before the commit point (a body) cannot be changed this way — it would be rewritten before the record is known to be unchanged — so declare the parts you update `after_commit`. A part on the commit part's own row (a column group) is written only where the row is; in your transaction (see below) the update commits or rolls back as one.
+
 **Strict typing** — prefer `.zip_as` with a parts bundle (like `.indexed_as` for indexes):
 
 ```python
@@ -567,7 +576,7 @@ Under it are two primitives, and both are batches — `batch_read_versioned(keys
 | Memory | the entry | one step, no I/O | one step |
 | Filesystem | inode and mtime | refused — no atomic compare-and-replace | a link that fails if the name is taken |
 
-A batch is one request where the medium allows it (SQL's fetch and one adapter call per kind of write — `insert_each_if_absent`, `replace_each_if`, `delete_each_if`, each reporting per row, which an adapter may send as one statement; Redis's `MGET`, one pipeline of `SET NX` and one `WATCH`…`EXEC`), and `io_concurrency` requests at a time on object stores. A medium refuses what it cannot do atomically rather than read and then write. A version names what is stored, not when: S3's ETag and Redis's version are the bytes, so a concurrent rewrite of identical bytes is not a change — which matters only to a decision taken on an entry that had expired, and Redis removes those itself. Compositions derive `update` from the laws: the authority's version is the record's; a mirror or an index follows only a write that happened; a fallback's value is seen where the authority has none, and a `Put` writes into the authority — the fallback is never written. Each target receives one batch per round. A zip updates through its `commit_part` — parts declared `after_commit` are rewritten once it commits — but refuses to replace a record whose other parts are written before it, since they could not be taken back if the record had changed. A group of child rows has no one version and refuses on its own; as an `after_commit` part it follows its record. A view of a shared row updates its own columns, and only the view that owns rows creates one.
+A batch is one request where the medium allows it (SQL's fetch and one adapter call per kind of write — `insert_each_if_absent`, `replace_each_if`, `delete_each_if`, each reporting per row, which an adapter may send as one statement; Redis's `MGET`, one pipeline of `SET NX` and one `WATCH`…`EXEC`), and `io_concurrency` requests at a time on object stores. A medium refuses what it cannot do atomically rather than read and then write. A version names what is stored, not when: S3's ETag and Redis's version are the bytes, so a concurrent rewrite of identical bytes is not a change — which matters only to a decision taken on an entry that had expired, and Redis removes those itself. Compositions derive `update` from the laws: the authority's version is the record's; a mirror or an index follows only a write that happened; a fallback's value is seen where the authority has none, and a `Put` writes into the authority — the fallback is never written. Each target receives one batch per round. A zip updates through its `commit_part`, and writes only the parts that changed: those declared `after_commit` once it commits; one written before it refuses to change, since it could not be taken back if the record had changed. A group of child rows has no one version and refuses on its own; as an `after_commit` part it follows its record. A view of a shared row updates its own columns, and only the view that owns rows creates one.
 
 ### Filling a store from its fallback
 

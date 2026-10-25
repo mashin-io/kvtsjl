@@ -162,7 +162,10 @@ holds them — a cache may be stale, so it is not asked; a fallback is, where
 the authority misses, and a ``Put`` then writes into the authority — then writes every
 decision in one conditional batch through the commit traversal (the
 removal traversal for ``Remove``), and decides again only the keys the
-authority refused. ``set_if_absent`` and the fills are that conditional
+authority refused. The authority is always written — it is the condition —
+and every other target only where its part changed, so changing one part of
+a record writes that part; a component, written before the condition is
+known, refuses to change. ``set_if_absent`` and the fills are that conditional
 batch against nothing stored. An ordered or paged scan
 of an assembled record asks its authority for the keys in that order, then
 confirms each record, so a ``limit`` counts records; keys merged from
@@ -409,6 +412,14 @@ class Target[K, V, P](ABC):
     ) -> set[K]:
         raise KvStoreUnsupported(f"{self.name} cannot write conditionally")
 
+    def holds_same(self, before: V, after: V) -> bool:
+        """Whether this target holds the same for record ``after`` as for ``before``.
+
+        Then a write of ``after`` over ``before`` leaves it alone. ``False``
+        unless the target can tell, so it is written.
+        """
+        return False
+
     def batch_write(self, items: Mapping[K, V], options: WriteOptions) -> None:
         for key, value in items.items():
             self.write(key, value, options)
@@ -550,6 +561,9 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
             change: Change[P] = w.change if isinstance(w.change, Remove) else self._put(w.change)
             slotted[key] = ConditionalWrite(Versioned(None, w.seen.version), change, w.created_at)
         return self.keymap.batch_write_if_unchanged(slotted, ttl=options.ttl)
+
+    def holds_same(self, before: V, after: V) -> bool:
+        return self._slot(before) == self._slot(after)
 
     def _put(self, put: Put[V]) -> Put[P]:
         item = self._slot(put.value)
@@ -946,25 +960,29 @@ class Topology[K, V]:
     ) -> set[K]:
         """Make each change — ``Put`` or ``Remove`` — only if the record's authority is still ``seen``.
 
+        The authority's conditional write is the condition, so it is always
+        made; every other target is written only where its part changed.
         Against nothing stored this inserts the record: components first,
         then the authority's conditional insert, then dependents for those it
         wrote. Components written for an insert that loses are orphans until
-        GC. Against a version, components cannot be written first — they
-        would replace the live record's parts before knowing it had not
-        changed — so a record with components refuses; update its parts after
-        the commit point instead. Removing goes authority first, the rest
+        GC. Against a version, a component whose part changed cannot be
+        written first — it would replace the live record's part before
+        knowing the record had not changed — so that refuses; one that did
+        not change is left alone. Removing goes authority first, the rest
         after the commit point, as ``delete`` does. One batch per target.
         """
         authority = self._require_authority("write_if_unchanged")
         puts = {k: w.change.value for k, w in writes.items() if isinstance(w.change, Put)}
-        if self.components and any(writes[k].seen.version is not None for k in puts):
+        parts = [(t, _changed(t, puts, writes)) for t in self.components]
+        replaced = [t.name for t, changed in parts if any(writes[k].seen.version is not None for k in changed)]
+        if replaced:
             raise KvStoreUnsupported(
-                f"{[t.name for t in self.components]} are written before the commit "
-                "point and could not be taken back if the record changed; update "
-                "the parts that come after it instead"
+                f"{replaced} are written before the commit point and could not be "
+                "taken back if the record changed; declare them after_commit to "
+                "update them"
             )
-        for target in self.components:
-            for clock, items in _by_clock(puts, writes):
+        for target, changed in parts:
+            for clock, items in _by_clock(changed, writes):
                 o = WriteOptions(ttl=options.ttl, created_at=clock)
                 _committing(
                     target.name,
@@ -983,11 +1001,15 @@ class Topology[K, V]:
                     target, "batch delete", syncs, lambda t=target: t.batch_delete(removed)
                 )
         stored = {k: v for k, v in puts.items() if k in written}
-        for clock, items in _by_clock(stored, writes):
-            o = WriteOptions(ttl=options.ttl, created_at=clock)
-            self._to_dependents(
-                "batch set", syncs, lambda t, i=items, o=o: t.batch_write(i, t.receives(o))
-            )
+        for target in self.dependents:
+            for clock, items in _by_clock(_changed(target, stored, writes), writes):
+                o = WriteOptions(ttl=options.ttl, created_at=clock)
+                self._sync_one(
+                    target,
+                    "batch set",
+                    syncs,
+                    lambda t=target, i=items, o=o: t.batch_write(i, t.receives(o)),
+                )
         return written
 
     def batch_write(
@@ -1440,6 +1462,23 @@ def _by_clock[K, V](
     for k, v in values.items():
         groups.setdefault(writes[k].created_at, {})[k] = v
     return list(groups.items())
+
+
+def _changed[K, V](
+    target: Target[K, V, object], puts: Mapping[K, V], writes: Mapping[K, ConditionalWrite[V]]
+) -> dict[K, V]:
+    """The records whose part in ``target`` a write changes.
+
+    All of an insert — nothing is stored to compare with — and of a replace,
+    those whose part differs from the stored record's.
+    """
+    return {
+        k: v
+        for k, v in puts.items()
+        if (before := writes[k].seen.value) is None
+        or writes[k].seen.version is None
+        or not target.holds_same(before, v)
+    }
 
 
 def _received[K, V](

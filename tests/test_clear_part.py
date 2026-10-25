@@ -163,7 +163,9 @@ def _digest_view(conn: sqlite3.Connection, *, reads_core: bool = False) -> Any:
     )
 
 
-def _column(conn: sqlite3.Connection, name: str, *, owns_rows: bool = False) -> Any:
+def _column(
+    conn: sqlite3.Connection, name: str, *, owns_rows: bool = False, **adapter: Any
+) -> Any:
     kvset = KvSet.with_str_keys(
         "doc",
         key_serde=SerDe.identity(str),
@@ -180,7 +182,7 @@ def _column(conn: sqlite3.Connection, name: str, *, owns_rows: bool = False) -> 
         shares_table=True,
         owns_rows=owns_rows,
     )
-    return SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(conn))
+    return SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(conn, **adapter))
 
 
 def _doc(conn: sqlite3.Connection, key: str) -> dict[str, Any]:

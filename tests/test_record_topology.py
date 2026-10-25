@@ -32,6 +32,7 @@ from kvtsjl.keymap import ConditionalWrite, KeyMap, Put, Remove, Versioned
 from kvtsjl.keymap_algebra.dict_map import DictKeyMap
 from kvtsjl.keymap_algebra.topology import (
     DependentSyncs,
+    KeyMapTarget,
     Lookup,
     Parts,
     RecordTopologyMixin,
@@ -39,6 +40,7 @@ from kvtsjl.keymap_algebra.topology import (
     Target,
     Topology,
     WriteOptions,
+    whole,
 )
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.compose.topology import StoreTopologyMixin
@@ -270,6 +272,22 @@ def test_a_fill_carries_the_clock_only_to_those_that_keep_one() -> None:
     Topology((cache, primary, cold)).read("k")
     assert primary.written[0].created_at == CLOCK
     assert cache.written[0].created_at is None
+
+
+def test_a_record_seen_through_a_fallback_is_copied_in_full() -> None:
+    """Nothing is stored, so the fallback's copy is no measure of what a target holds."""
+    primary, copy = DictKeyMap[str, str](), DictKeyMap[str, str]()
+    cold = DictKeyMap({"k": "v"})
+    topology = Topology((
+        KeyMapTarget("primary", Role.AUTHORITY, primary, whole),
+        KeyMapTarget("copy", Role.DEPENDENT, copy, whole),
+        KeyMapTarget("cold", Role.FALLBACK, cold, whole),
+    ))
+    seen = topology.batch_read_versioned(["k"])["k"]
+    assert seen == Versioned("v", None)
+
+    topology.batch_write_if_unchanged({"k": ConditionalWrite(seen, Put("v"))}, OPTS, _now())
+    assert (primary.get("k"), copy.get("k")) == ("v", "v"), "the copy was skipped"
 
 
 def test_a_record_refuses_a_clock_before_any_part_is_written() -> None:
