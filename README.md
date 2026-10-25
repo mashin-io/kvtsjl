@@ -712,6 +712,21 @@ ruff check --fix src tests    # auto-fix imports
 
 Integration tests use in-process fakes—no Docker required: `s3` → **moto**, `redis` → **fakeredis**, `gcs` → in-memory bucket, `azure` → in-memory container, `sql` → **sqlite3** memory DB, `chroma` → **EphemeralClient**.
 
+The GCS and Azure fakes enforce what the suite believes those services do. To check that against the services' own emulators, run them and point the suite at them; the emulated media then join every test that runs over all media (`tests/media.py`):
+
+```bash
+docker run -d --rm -p 10000:10000 mcr.microsoft.com/azure-storage/azurite \
+  azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --loose
+docker run -d --rm -p 4443:4443 fsouza/fake-gcs-server \
+  -scheme http -port 4443 -external-url http://localhost:4443 -public-host localhost:4443
+
+export KVTSJL_AZURITE="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+export KVTSJL_FAKE_GCS="http://localhost:4443"
+pytest -k "azurite or fake_gcs"
+```
+
+Where an emulator lacks something its service does — fake-gcs-server ignores `ifGenerationMatch` on `DELETE` — the test is marked as an expected failure there (`EMULATOR_GAPS` in `tests/media.py`), strictly, so a fixed emulator is noticed.
+
 ### Release
 
 Package version lives in `src/kvtsjl/__init__.py` (`__version__`). Hatch reads it for builds.

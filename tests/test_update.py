@@ -31,7 +31,7 @@ from kvtsjl.keymap import KeyMap
 from kvtsjl.keymap_algebra.dict_map import DictKeyMap
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.ttl import ExpiryGc
-from tests.media import TTL, VERSIONED_MEDIA, make_medium
+from tests.media import TTL, VERSIONED_MEDIA, expect_emulator_gap, make_medium
 from tests.sql_helpers import ensure_sql_table, make_sql_kvset
 from tests.test_clear_part import Digest, _column, _digest_view, _doc, _wide_table
 
@@ -90,7 +90,8 @@ def test_a_concurrent_write_is_seen_and_the_decision_retaken(store: Any) -> None
     assert store.get("k") == "other-1+mine", "the concurrent write was overwritten"
 
 
-def test_a_removal_that_loses_is_retaken(store: Any) -> None:
+def test_a_removal_that_loses_is_retaken(store: Any, request: pytest.FixtureRequest) -> None:
+    expect_emulator_gap(request, request.node.callspec.params["store"], "conditional delete")
     store.set("k", "10")
     _racing(store, times=1)
 

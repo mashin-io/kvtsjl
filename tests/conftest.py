@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import timedelta
+import os
 import sqlite3
+import uuid
 
 import boto3
 import fakeredis
@@ -122,6 +124,37 @@ def azure_store(
         container=fake_azure_container,  # type: ignore[arg-type]
         key_prefix="app/",
     )
+
+
+@pytest.fixture
+def azurite_container() -> Iterator[object]:
+    """A fresh container on the Azurite emulator named by ``KVTSJL_AZURITE``."""
+    from azure.storage.blob import BlobServiceClient
+
+    service = BlobServiceClient.from_connection_string(os.environ["KVTSJL_AZURITE"])
+    container = service.create_container(f"kvtsjl-{uuid.uuid4().hex}")
+    try:
+        yield container
+    finally:
+        container.delete_container()
+
+
+@pytest.fixture
+def gcs_emulator_bucket() -> Iterator[object]:
+    """A fresh bucket on the fake-gcs-server emulator at ``KVTSJL_FAKE_GCS``."""
+    from google.auth.credentials import AnonymousCredentials
+    from google.cloud import storage
+
+    client = storage.Client(
+        project="kvtsjl",
+        credentials=AnonymousCredentials(),
+        client_options={"api_endpoint": os.environ["KVTSJL_FAKE_GCS"]},
+    )
+    bucket = client.create_bucket(f"kvtsjl-{uuid.uuid4().hex}")
+    try:
+        yield bucket
+    finally:
+        bucket.delete(force=True)
 
 
 @pytest.fixture
