@@ -297,8 +297,9 @@ check each one, against the compositions kvtsjl ships and ones it does not.
 - *Conditional writes ask the medium.* ``set_if_absent`` asks the authority
   whether the key is absent to the medium, which can differ from law 4 — an
   expired entry, or a committed row whose mandatory part is gone, still
-  refuses the insert. Reconciling them would need a read before the write,
-  the race the method exists to avoid.
+  refuses the insert. ``update`` reconciles the two without a race: it reads
+  the version of what is stored — such an entry has one, though it reads as
+  ``None`` — and replaces it in the same conditional step.
 
 For instance, ``mirror`` makes its primary the authority and its secondary a
 dependent; ``fallback_read`` makes its secondary a fallback and fills the
