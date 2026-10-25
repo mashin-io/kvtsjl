@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Never, overload
 
-from kvtsjl.exceptions import KvStoreUnsupported
+from kvtsjl.exceptions import KvStoreConflict, KvStoreUnsupported
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -15,6 +16,64 @@ if TYPE_CHECKING:
     from kvtsjl.keymap_algebra.bundle import ZipPartsBundle
     from kvtsjl.store.logical import KvStore
     from kvtsjl.store.readable import ReadableKvStore
+
+
+@dataclass(frozen=True, slots=True)
+class Versioned[T]:
+    """What a map holds for a key, and a token for exactly that state.
+
+    ``value`` is what a read returns — ``None`` when the key is absent or its
+    entry has expired. ``version`` is ``None`` only when the medium holds
+    nothing for the key: an expired entry still has one, so a write can
+    replace it in one conditional step rather than be refused by it. The
+    token is the medium's own (a row's columns, an ETag, a generation) and
+    means nothing outside ``write_if_unchanged``.
+    """
+
+    value: T | None
+    version: object | None
+
+    @staticmethod
+    def absent() -> Versioned[Never]:
+        """Nothing stored: a write against it inserts, and only if still nothing is."""
+        return Versioned(None, None)
+
+
+@dataclass(frozen=True, slots=True)
+class Keep:
+    """Leave the entry as it is."""
+
+
+@dataclass(frozen=True, slots=True)
+class Put[T]:
+    """Store ``value``."""
+
+    value: T
+
+
+@dataclass(frozen=True, slots=True)
+class Remove:
+    """Remove the entry."""
+
+
+type Change[T] = Put[T] | Remove
+"""A decision that changes the entry."""
+
+type Decision[T] = Keep | Change[T]
+"""What an ``update`` does with the entry it was shown."""
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionalWrite[T]:
+    """A change decided against ``seen``, made only if the entry is still that.
+
+    ``created_at`` is the record's write clock, carried per entry so a batch
+    can copy records that each keep their own.
+    """
+
+    seen: Versioned[T]
+    change: Change[T]
+    created_at: datetime | None = None
 
 
 class ReadableKeyMap[K, T](ABC):
@@ -510,6 +569,56 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
     and plain ``KeyMap`` share one signature; non-store maps ignore them.
     """
 
+    def read_versioned(self, key: K) -> Versioned[T]:
+        """``batch_read_versioned`` of one key."""
+        return self.batch_read_versioned([key])[key]
+
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[T]]:
+        """Each key's value and a version of what the medium holds for it.
+
+        Every key is answered — ``Versioned.absent()`` where nothing is
+        stored. One half of the medium's conditional write;
+        ``batch_write_if_unchanged`` is the other. A map without a
+        conditional primitive refuses rather than hand out a version nothing
+        can honour.
+        """
+        raise KvStoreUnsupported(
+            f"{type(self).__name__} has no version to write against"
+        )
+
+    def write_if_unchanged(
+        self,
+        key: K,
+        seen: Versioned[T],
+        change: Change[T],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """``batch_write_if_unchanged`` of one key: whether it was written."""
+        return key in self.batch_write_if_unchanged(
+            {key: ConditionalWrite(seen, change, created_at)}, ttl=ttl
+        )
+
+    def batch_write_if_unchanged(
+        self,
+        writes: Mapping[K, ConditionalWrite[T]],
+        *,
+        ttl: TtlPolicy | None = None,
+    ) -> set[K]:
+        """Make each change — ``Put`` or ``Remove`` — only if the entry is still ``seen``.
+
+        The medium itself makes each write conditional; returns the keys
+        written. An entry that changed since it was read is passed over and
+        the rest still written; removing what is not there writes nothing.
+        Against ``Versioned.absent()`` a write inserts only where nothing is
+        stored. A map without the primitive refuses; a read followed by a
+        write is the race this exists to remove.
+        """
+        raise KvStoreUnsupported(
+            f"{type(self).__name__} cannot write conditionally"
+        )
+
     def set_if_absent(
         self,
         key: K,
@@ -518,23 +627,102 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
         ttl: TtlPolicy | None = None,
         created_at: datetime | None = None,
     ) -> bool:
-        """Write ``key`` only if it is absent. ``True`` if this call wrote it.
+        """Write ``key`` only if nothing is stored. ``True`` if this call wrote it.
 
-        First of the ``set_if_*`` family: a write the medium performs only when
-        a condition holds, reporting whether it did. Compare-and-set joins it
-        later as ``set_if_matches``, with its own capability — a backend can
-        have one primitive and not the other.
-
-        **"Absent" means absent to the medium.** Where kvtsjl emulates TTL
-        rather than the medium enforcing it, an expired entry is still a row
-        or an object, so the native primitive refuses and this returns
-        ``False`` even though ``get`` returns ``None``. A caller that wants
-        expired entries treated as absent runs ``gc_expired_keys`` first.
-        Reconciling the two silently would mean a read-modify-write, which is
-        the race this method exists to avoid.
+        ``write_if_unchanged`` against nothing stored. **"Absent" means absent
+        to the medium:** an expired entry kvtsjl emulates TTL for is still a
+        row or an object, so this refuses although ``get`` returns ``None``.
+        ``update`` sees such an entry as ``None`` and replaces it.
         """
-        raise KvStoreUnsupported(
-            f"{type(self).__name__} does not support set_if_absent"
+        return self.write_if_unchanged(
+            key, Versioned.absent(), Put(value), ttl=ttl, created_at=created_at
+        )
+
+    def update(
+        self,
+        key: K,
+        decide: Callable[[T | None], Decision[T]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        attempts: int = 8,
+    ) -> T | None:
+        """Decide what to do with the entry from what it holds, atomically.
+
+        ``decide`` is shown the current value — ``None`` when absent or
+        expired — and returns ``Keep()``, ``Put(value)`` or ``Remove()``. The
+        decision is written only if the entry is still what ``decide`` saw;
+        if a concurrent writer got there first, the entry is read again and
+        ``decide`` asked again, so it must be a pure function of what it is
+        shown, and may run more than once. Returns what the entry holds
+        afterwards. Raises :class:`KvStoreConflict` after ``attempts``
+        losses, having written nothing::
+
+            store.update(k, lambda v: Keep() if v is not None else Put(compute()))
+            store.update(k, lambda v: Put(v + 1) if v is not None else Keep())
+            store.update(k, lambda v: Remove() if v is not None and stale(v) else Keep())
+
+        ``batch_update`` of one key.
+        """
+        held = self.batch_update(
+            [key],
+            lambda seen: {key: decide(seen[key])},
+            ttl=ttl,
+            created_at=created_at,
+            attempts=attempts,
+        )
+        return held.get(key)
+
+    def batch_update(
+        self,
+        keys: Sequence[K],
+        decide: Callable[[Mapping[K, T | None]], Mapping[K, Decision[T]]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+        attempts: int = 8,
+    ) -> dict[K, T]:
+        """As ``update``, deciding for many keys at once: one read and one write per round.
+
+        ``decide`` is shown every key's current value and returns a decision
+        for each; a key it leaves out is kept. Only the keys a concurrent
+        writer changed are read and decided again, so ``decide`` may be shown
+        fewer keys the next time. Returns what each key holds afterwards,
+        leaving out those that hold nothing. Raises :class:`KvStoreConflict`
+        with the keys that lost every attempt as ``lost``, and what the
+        others hold as ``held``.
+        """
+        if attempts < 1:
+            raise ValueError(f"attempts must be >= 1, got {attempts}")
+        held: dict[K, T] = {}
+        pending = list(dict.fromkeys(keys))
+        for _ in range(attempts):
+            seen = self.batch_read_versioned(pending)
+            decisions = decide({k: seen[k].value for k in pending})
+            writes: dict[K, ConditionalWrite[T]] = {}
+            for k in pending:
+                decision = decisions.get(k, Keep())
+                current = seen[k]
+                if isinstance(decision, Keep):
+                    if current.value is not None:
+                        held[k] = current.value
+                    continue
+                if isinstance(decision, Remove) and current.version is None:
+                    continue
+                writes[k] = ConditionalWrite(current, decision, created_at)
+            written: set[K] = self.batch_write_if_unchanged(writes, ttl=ttl) if writes else set()
+            for k in written:
+                change = writes[k].change
+                if isinstance(change, Put):
+                    held[k] = change.value
+            pending = [k for k in writes if k not in written]
+            if not pending:
+                return held
+        raise KvStoreConflict(
+            f"{type(self).__name__}: {pending!r} changed under every one of "
+            f"{attempts} attempts to update them",
+            lost=pending,
+            held=held,
         )
 
     @abstractmethod

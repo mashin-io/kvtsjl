@@ -18,6 +18,7 @@ from kvtsjl.bind import (
 )
 from kvtsjl.exceptions import (
     KvStoreComposeError,
+    KvStoreConflict,
     KvStoreError,
     KvStoreIndexError,
     KvStoreIndexUnsupported,
@@ -41,7 +42,17 @@ from kvtsjl.index import (
     VectorQuery,
     VectorRecord,
 )
-from kvtsjl.keymap import KeyMap, ReadableKeyMap
+from kvtsjl.keymap import (
+    Change,
+    ConditionalWrite,
+    Decision,
+    Keep,
+    KeyMap,
+    Put,
+    ReadableKeyMap,
+    Remove,
+    Versioned,
+)
 from kvtsjl.keymap_algebra import DictKeyMap
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
@@ -85,13 +96,21 @@ __all__ = [
     "IndexSet",
     "IndexedKvStore",
     "KeyLayout",
+    "Change",
+    "ConditionalWrite",
+    "Decision",
+    "Keep",
     "KeyMap",
+    "Put",
+    "Remove",
+    "Versioned",
     "KeyPrefix",
     "KeyPrefixBinder",
     "KvBackend",
     "KvSet",
     "KvStore",
     "KvStoreComposeError",
+    "KvStoreConflict",
     "KvStoreError",
     "KvStoreIndexError",
     "KvStoreIndexUnsupported",

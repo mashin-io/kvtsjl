@@ -129,12 +129,12 @@ def test_a_commit_part_that_cannot_do_it_makes_the_zip_refuse() -> None:
     plain = _part("r")
 
     def refuse(*_a: Any, **_kw: Any) -> bool:
-        raise KvStoreError("row store does not support set_if_absent")
+        raise KvStoreError("row store cannot write conditionally")
 
-    plain.set_if_absent = refuse
+    plain.batch_write_if_unchanged = refuse
     with pytest.raises(UncommittedWriteError) as caught:
         _zip(row=plain).set_if_absent("k", Record(row="R", body="B"))
-    assert "set_if_absent" in str(caught.value.failures["row"])
+    assert "conditionally" in str(caught.value.failures["row"])
 
 
 def test_an_unknown_commit_part_is_rejected() -> None:

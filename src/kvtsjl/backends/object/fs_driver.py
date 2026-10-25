@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 import uuid
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
+from kvtsjl.exceptions import KvStoreUnsupported
 from kvtsjl.serde.compress import STREAM_CHUNK
 from kvtsjl.store.schema.ttl import TTL_NONE_EXPIRES_AT
 
@@ -47,6 +48,8 @@ def _stat_for_path(path: Path, *, key: str) -> BlobStat | None:
         modified_at=datetime.fromtimestamp(st.st_mtime, tz=UTC),
         native_expires_at=_native_expires(path),
         size=st.st_size,
+        # Every write links or renames a new file in, so its inode names it.
+        version=f"{st.st_ino}:{st.st_mtime_ns}",
     )
 
 
@@ -90,15 +93,28 @@ class FilesystemBlobDriver(BlobDriver):
         _write_atomic(path, data)
         self._apply_write_headers(path, headers)
 
-    def write_if_absent(
-        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    def write_if_version(
+        self,
+        key: str,
+        data: bytes,
+        version: str | None,
+        *,
+        headers: dict[str, Any] | None = None,
     ) -> bool:
-        """Write the body beside the target, then link it into place.
+        """Insert only where no file is: write the body beside it, then link it in.
+
+        A filesystem has no atomic compare-and-replace, so a write against a
+        version refuses rather than check and then rename.
 
         ``os.link`` fails if the name is taken, so of two writers exactly one
         succeeds, and a reader never sees a partial file. The modification
         time is set on the body before the link, since it is the TTL clock.
         """
+        if version is not None:
+            raise KvStoreUnsupported(
+                "the filesystem has no atomic compare-and-replace; it inserts "
+                "only where no file is"
+            )
         path = Path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")

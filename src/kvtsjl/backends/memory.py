@@ -14,6 +14,7 @@ from kvtsjl.bind import (
     NamespaceBinder,
     NativeStrCollectionBinder,
 )
+from kvtsjl.keymap import ConditionalWrite, Remove, Versioned
 from kvtsjl.scope import Scope
 from kvtsjl.serde import StreamingSerDe
 from kvtsjl.store import KvBackend
@@ -220,21 +221,38 @@ class MemoryKvBackend[K, V, KBLOB, VBLOB](KvBackend[K, V, KBLOB, VBLOB, str]):
             return None
         return iter((value,))
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        # A dict read and write with no await or I/O between them, so no other
-        # caller can interleave: this is the whole operation.
-        pk = self._physical_key_blob(key)
-        if pk in self._bucket():
-            return False
-        self.set(key, value, ttl=ttl, created_at=created_at)
-        return True
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        """The entry object itself is the version: every write stores a new one."""
+        bucket = self._bucket()
+        out: dict[K, Versioned[V]] = {}
+        for key in dict.fromkeys(keys):
+            entry = bucket.get(self._physical_key_blob(key))
+            if entry is None:
+                out[key] = Versioned.absent()
+                continue
+            live = None if self._expired(entry) else entry.value_blob
+            value = None if live is None else self.kvset.value_serde.deserialize(live)
+            out[key] = Versioned(value, entry)
+        return out
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        # Dict reads and writes with no await or I/O between them, so no other
+        # caller can interleave: each compare and write is one step.
+        bucket = self._bucket()
+        written: set[K] = set()
+        for key, w in writes.items():
+            pk = self._physical_key_blob(key)
+            if bucket.get(pk) is not w.seen.version:
+                continue
+            if isinstance(w.change, Remove):
+                if bucket.pop(pk, None) is not None:
+                    written.add(key)
+                continue
+            self.set(key, w.change.value, ttl=ttl, created_at=w.created_at)
+            written.add(key)
+        return written
 
     def delete(self, key: K) -> bool:
         pk = self._physical_key_blob(key)

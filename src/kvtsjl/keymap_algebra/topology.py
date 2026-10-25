@@ -124,6 +124,11 @@ Operation         Traversal   Stops            Combines                Side effe
 ``set``           commit      never            —                       —
 ``set_if_absent`` commit      if the authority whether the authority   —
                               refuses          wrote
+``update``        authority,  when every       what the entry holds    as ``set``
+                  then commit key is           afterwards              or
+                  or removal  written, or                              ``delete``
+                              ``attempts``
+                              run out
 ``delete``        removal     never            the authority's answer  —
 ``unset``         removal     never            the authority's answer  —
 ``gc``            removal     never            union of keys           dependents
@@ -151,7 +156,14 @@ Operation         Traversal   Stops            Combines                Side effe
 ================  ==========  ===============  ======================  ==========
 
 Batch forms take the same traversal, one call per target, and a batch read
-asks each target only for the keys still missing. An ordered or paged scan
+asks each target only for the keys still missing. ``update`` is a
+``batch_update`` of one key; each round reads the records as the authority
+holds them — a cache may be stale, so it is not asked; a fallback is, where
+the authority misses, and a ``Put`` then writes into the authority — then writes every
+decision in one conditional batch through the commit traversal (the
+removal traversal for ``Remove``), and decides again only the keys the
+authority refused. ``set_if_absent`` and the fills are that conditional
+batch against nothing stored. An ordered or paged scan
 of an assembled record asks its authority for the keys in that order, then
 confirms each record, so a ``limit`` counts records; keys merged from
 several parts have no one order, and asking for one refuses. ``unset`` is ``delete``
@@ -310,7 +322,7 @@ from kvtsjl.exceptions import (
     RecordWriteError,
     UncommittedWriteError,
 )
-from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap import Change, ConditionalWrite, KeyMap, Put, Remove, Versioned
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
@@ -389,7 +401,12 @@ class Target[K, V, P](ABC):
     def write(self, key: K, value: V, options: WriteOptions) -> None:
         raise KvStoreError(f"{self.name} cannot be written")
 
-    def write_if_absent(self, key: K, value: V, options: WriteOptions) -> bool:
+    def batch_read_versioned(self, keys: Sequence[K]) -> Mapping[K, Versioned[P]]:
+        raise KvStoreUnsupported(f"{self.name} has no version to write against")
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], options: WriteOptions
+    ) -> set[K]:
         raise KvStoreUnsupported(f"{self.name} cannot write conditionally")
 
     def batch_write(self, items: Mapping[K, V], options: WriteOptions) -> None:
@@ -522,13 +539,23 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
             return
         self.keymap.set(key, item, ttl=options.ttl, created_at=options.created_at)
 
-    def write_if_absent(self, key: K, value: V, options: WriteOptions) -> bool:
-        item = self._slot(value)
+    def batch_read_versioned(self, keys: Sequence[K]) -> Mapping[K, Versioned[P]]:
+        return self.keymap.batch_read_versioned(keys)
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], options: WriteOptions
+    ) -> set[K]:
+        slotted: dict[K, ConditionalWrite[P]] = {}
+        for key, w in writes.items():
+            change: Change[P] = w.change if isinstance(w.change, Remove) else self._put(w.change)
+            slotted[key] = ConditionalWrite(Versioned(None, w.seen.version), change, w.created_at)
+        return self.keymap.batch_write_if_unchanged(slotted, ttl=options.ttl)
+
+    def _put(self, put: Put[V]) -> Put[P]:
+        item = self._slot(put.value)
         if item is None:
             raise KvStoreError(f"{self.name} decides existence and cannot be None")
-        return self.keymap.set_if_absent(
-            key, item, ttl=options.ttl, created_at=options.created_at
-        )
+        return Put(item)
 
     def batch_write(self, items: Mapping[K, V], options: WriteOptions) -> None:
         to_set: dict[K, P] = {}
@@ -886,32 +913,82 @@ class Topology[K, V]:
             )
         self._to_dependents("set", syncs, lambda t: t.write(key, value, t.receives(options)))
 
-    def write_if_absent(
-        self, key: K, value: V, options: WriteOptions, syncs: DependentSyncs
-    ) -> bool:
-        """As ``write``, but the authority writes only if the record is absent.
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        """The records as a read sees them, versioned by their authority.
 
-        Components are already written when the authority refuses — they are
-        orphans until GC. Dependents are not written: the record they would
-        copy is not ours. Returns whether the record was written.
+        The authority decides whether a record exists, so its version is the
+        record's: a conditional write is decided there. Where the authority
+        misses, a fallback's value is the record's value, versioned as
+        nothing stored — so writing it promotes it, once. A cache is not
+        consulted: it may be stale, and an update must see the truth. One
+        batch per target.
         """
-        authority = self._require_authority("write_if_absent")
-        for target in self.components:
-            _committing(
-                target.name,
-                target.role,
-                lambda t=target: t.write(key, value, t.receives(options)),
+        unique = list(dict.fromkeys(keys))
+        if self.assembled:
+            seen = self._require_authority("read_versioned").batch_read_versioned(unique)
+            anchors = {k: v.value for k, v in seen.items() if v.value is not None}
+            records = self._assemble_many(list(anchors), anchors=anchors)
+            return {k: Versioned(records.get(k), seen[k].version) for k in unique}
+        whole = self._require_whole("read_versioned").batch_read_versioned(unique)
+        values = {k: v.value for k, v in whole.items() if v.value is not None}
+        for fallback in (t for t in self.lookups() if t.role is Role.FALLBACK):
+            missing = [k for k in unique if k not in values]
+            if not missing:
+                break
+            values.update(fallback.batch_read(missing))
+        return {k: Versioned(values.get(k), whole[k].version) for k in unique}
+
+    def batch_write_if_unchanged(
+        self,
+        writes: Mapping[K, ConditionalWrite[V]],
+        options: WriteOptions,
+        syncs: DependentSyncs,
+    ) -> set[K]:
+        """Make each change — ``Put`` or ``Remove`` — only if the record's authority is still ``seen``.
+
+        Against nothing stored this inserts the record: components first,
+        then the authority's conditional insert, then dependents for those it
+        wrote. Components written for an insert that loses are orphans until
+        GC. Against a version, components cannot be written first — they
+        would replace the live record's parts before knowing it had not
+        changed — so a record with components refuses; update its parts after
+        the commit point instead. Removing goes authority first, the rest
+        after the commit point, as ``delete`` does. One batch per target.
+        """
+        authority = self._require_authority("write_if_unchanged")
+        puts = {k: w.change.value for k, w in writes.items() if isinstance(w.change, Put)}
+        if self.components and any(writes[k].seen.version is not None for k in puts):
+            raise KvStoreUnsupported(
+                f"{[t.name for t in self.components]} are written before the commit "
+                "point and could not be taken back if the record changed; update "
+                "the parts that come after it instead"
             )
-        wrote = _committing(
+        for target in self.components:
+            for clock, items in _by_clock(puts, writes):
+                o = WriteOptions(ttl=options.ttl, created_at=clock)
+                _committing(
+                    target.name,
+                    target.role,
+                    lambda t=target, i=items, o=o: t.batch_write(i, t.receives(o)),
+                )
+        written = _committing(
             authority.name,
             authority.role,
-            lambda: authority.write_if_absent(key, value, authority.receives(options)),
+            lambda: authority.batch_write_if_unchanged(_received(authority, writes), options),
         )
-        if wrote:
+        removed = [k for k in writes if k in written and k not in puts]
+        if removed:
+            for target in self._removed_after_commit():
+                self._sync_one(
+                    target, "batch delete", syncs, lambda t=target: t.batch_delete(removed)
+                )
+        stored = {k: v for k, v in puts.items() if k in written}
+        for clock, items in _by_clock(stored, writes):
+            o = WriteOptions(ttl=options.ttl, created_at=clock)
             self._to_dependents(
-                "set", syncs, lambda t: t.write(key, value, t.receives(options))
+                "batch set", syncs, lambda t, i=items, o=o: t.batch_write(i, t.receives(o))
             )
-        return wrote
+        return written
 
     def batch_write(
         self, items: Mapping[K, V], options: WriteOptions, syncs: DependentSyncs
@@ -1238,7 +1315,10 @@ class Topology[K, V]:
             held[id(part)] = part.read(key)
         return assemble(Parts(held))
 
-    def _assemble_many(self, keys: Sequence[K]) -> dict[K, V]:
+    def _assemble_many(
+        self, keys: Sequence[K], *, anchors: Mapping[K, object] | None = None
+    ) -> dict[K, V]:
+        """Each record from its parts; ``anchors`` are the authority's values, if read."""
         assemble = self.assemble
         assert assemble is not None
         if not keys:
@@ -1247,7 +1327,7 @@ class Topology[K, V]:
         found: dict[int, Mapping[K, object]] = {}
         authority = self.authority
         if authority is not None:
-            hits = authority.batch_read(wanted)
+            hits = anchors if anchors is not None else authority.batch_read(wanted)
             found[id(authority)] = hits
             wanted = [k for k in wanted if k in hits]
         for part in self._unanchored_parts:
@@ -1264,20 +1344,7 @@ class Topology[K, V]:
     def _fill(
         self, key: K, value: V, source: Target[K, V, V], consulted: list[Target[K, V, V]]
     ) -> None:
-        """Give the value to each target that asked for it, unless it has one now.
-
-        A conditional write, so a value written between the miss and the fill
-        is kept rather than replaced by the copy.
-        """
-        into = _fillable(source, consulted)
-        if not into:
-            return
-        clock = _clock(source.stat(key)) if any(t.supports_write_clock for t in into) else None
-        for target in into:
-            options = target.receives(WriteOptions(created_at=clock))
-            _try_fill(
-                target.name, lambda t=target, o=options: t.write_if_absent(key, value, o)
-            )
+        self._batch_fill({key: value}, source, consulted)
 
     def _batch_fill(
         self,
@@ -1285,19 +1352,25 @@ class Topology[K, V]:
         source: Target[K, V, V],
         consulted: list[Target[K, V, V]],
     ) -> None:
+        """Give each value to every target that asked for it, unless it has one now.
+
+        A conditional write, so a value written between the miss and the fill
+        is kept rather than replaced by the copy; each carries its record's
+        write clock. One batch per target.
+        """
         into = _fillable(source, consulted)
         if not into:
             return
         stats = source.batch_stat(list(hits)) if any(t.supports_write_clock for t in into) else {}
+        writes = {
+            k: ConditionalWrite(Versioned.absent(), Put(v), _clock(stats.get(k)))
+            for k, v in hits.items()
+        }
         for target in into:
-
-            def fill(t: Target[K, V, V] = target) -> None:
-                # A conditional write is one key at a time, as is a clock.
-                for k, v in hits.items():
-                    clock = WriteOptions(created_at=_clock(stats.get(k)))
-                    t.write_if_absent(k, v, t.receives(clock))
-
-            _try_fill(target.name, fill)
+            _try_fill(
+                target.name,
+                lambda t=target: t.batch_write_if_unchanged(_received(t, writes), WriteOptions()),
+            )
 
     # --- the whole tree ------------------------------------------------------
 
@@ -1357,6 +1430,25 @@ def _fillable[K, V](
     """The consulted targets that asked to be filled and lie downstream of ``source``."""
     rank = _STREAM_ORDER[source.role]
     return [t for t in consulted if t.fill and _STREAM_ORDER[t.role] > rank]
+
+
+def _by_clock[K, V](
+    values: Mapping[K, V], writes: Mapping[K, ConditionalWrite[V]]
+) -> list[tuple[datetime | None, dict[K, V]]]:
+    """``values`` grouped by the write clock each carries, so each group is one batch."""
+    groups: dict[datetime | None, dict[K, V]] = {}
+    for k, v in values.items():
+        groups.setdefault(writes[k].created_at, {})[k] = v
+    return list(groups.items())
+
+
+def _received[K, V](
+    target: Target[K, V, object], writes: Mapping[K, ConditionalWrite[V]]
+) -> Mapping[K, ConditionalWrite[V]]:
+    """As ``Target.receives``, per write: without the clocks it cannot keep."""
+    if target.supports_write_clock:
+        return writes
+    return {k: replace(w, created_at=None) for k, w in writes.items()}
 
 
 def _clock(meta: RecordStat | None) -> datetime | None:
@@ -1499,18 +1591,18 @@ class RecordTopologyMixin[K, V](KeyMap[K, V], ABC):
         self._admit(options)
         self.topology().write(key, value, options, self._dependent_syncs())
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        options = WriteOptions(ttl=ttl, created_at=created_at)
-        self._admit(options)
-        return self.topology().write_if_absent(
-            key, value, options, self._dependent_syncs()
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        return self.topology().batch_read_versioned(keys)
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        for w in writes.values():
+            self._admit(WriteOptions(ttl=ttl, created_at=w.created_at))
+        if not writes:
+            return set()
+        return self.topology().batch_write_if_unchanged(
+            writes, WriteOptions(ttl=ttl), self._dependent_syncs()
         )
 
     def batch_set(

@@ -20,6 +20,10 @@ class BlobStat:
     native_expires_at: datetime | None = None
     size: int | None = None
     etag: str | None = None
+    version: str | None = None
+    """The token this medium's own conditional writes compare — S3's ETag as
+    sent, Azure's ETag, GCS's generation. ``None`` where the medium has no
+    conditional replace."""
 
 
 class BlobDriver(ABC):
@@ -42,17 +46,27 @@ class BlobDriver(ABC):
     def write(self, key: str, data: bytes, *, headers: dict[str, Any] | None = None) -> None:
         """Put object; ``headers`` carries medium-specific write options."""
 
-    def write_if_absent(
-        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    def write_if_version(
+        self,
+        key: str,
+        data: bytes,
+        version: str | None,
+        *,
+        headers: dict[str, Any] | None = None,
     ) -> bool:
-        """Put ``key`` only if no object is there; ``True`` if this call did.
+        """Put ``key`` only if it still holds ``version``; ``True`` if this call did.
 
-        One request the medium itself makes conditional — ``If-None-Match: *``,
-        ``ifGenerationMatch=0``, a link that fails if the name is taken. There
-        is no default: a head-then-put is the race this exists to remove, so a
+        ``version=None`` means "only if no object is there". One request the
+        medium itself makes conditional — ``If-None-Match: *`` or ``If-Match``,
+        ``ifGenerationMatch``, a link that fails if the name is taken. There is
+        no default: a head-then-put is the race this exists to remove, so a
         driver without the primitive refuses.
         """
         raise KvStoreUnsupported(f"{type(self).__name__} has no conditional put")
+
+    def delete_if_version(self, key: str, version: str) -> bool:
+        """Delete ``key`` only if it still holds ``version``; ``True`` if this call did."""
+        raise KvStoreUnsupported(f"{type(self).__name__} has no conditional delete")
 
     def write_stream(
         self,

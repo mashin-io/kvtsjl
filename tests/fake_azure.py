@@ -6,8 +6,14 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import BinaryIO
+import uuid
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 
 
 @dataclass
@@ -15,6 +21,15 @@ class _StoredBlob:
     body: bytes
     metadata: dict[str, str]
     last_modified: datetime
+    etag: str = field(default_factory=lambda: f'"0x{uuid.uuid4().hex.upper()}"')
+
+
+def _require_etag(stored: _StoredBlob | None, etag: str | None, condition: object) -> None:
+    """The service's ``If-Match``: a 412 when the blob is gone or has changed."""
+    if etag is None or condition is not MatchConditions.IfNotModified:
+        return
+    if stored is None or stored.etag != etag:
+        raise ResourceModifiedError("the blob has changed since its ETag was read")
 
 
 @dataclass
@@ -66,6 +81,8 @@ class FakeAzureBlobClient:
         overwrite: bool = False,
         metadata: Mapping[str, str] | None = None,
         length: int | None = None,
+        etag: str | None = None,
+        match_condition: object = None,
     ) -> None:
         if not isinstance(data, bytes):
             chunks: list[bytes] = []
@@ -79,6 +96,7 @@ class FakeAzureBlobClient:
             raise ValueError(
                 f"upload_blob length={length} but stream had {len(data)} bytes"
             )
+        _require_etag(self._store.get(self.name), etag, match_condition)
         if not overwrite and self.name in self._store:
             # The service sends overwrite=False as If-None-Match: * and
             # answers 409 BlobAlreadyExists, which the SDK raises as this.
@@ -96,9 +114,10 @@ class FakeAzureBlobClient:
             raise ResourceNotFoundError(self.name)
         return _FakeDownload(stored.body)
 
-    def delete_blob(self) -> None:
+    def delete_blob(self, *, etag: str | None = None, match_condition: object = None) -> None:
         if self.name not in self._store:
             raise ResourceNotFoundError(self.name)
+        _require_etag(self._store.get(self.name), etag, match_condition)
         del self._store[self.name]
 
     def get_blob_properties(self) -> FakeAzureBlobProperties:
@@ -109,6 +128,7 @@ class FakeAzureBlobClient:
             last_modified=stored.last_modified,
             metadata=dict(stored.metadata),
             size=len(stored.body),
+            etag=stored.etag,
             name=self.name,
         )
 

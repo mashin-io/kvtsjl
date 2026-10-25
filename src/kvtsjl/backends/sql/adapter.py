@@ -72,6 +72,9 @@ class SqlDbClientAdapter(ABC):
     ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
     ``supports_clear_columns``   ``unset`` on a shared-table view, which
     ``clear_columns``            raises rather than deleting the row
+    ``supports_compare_and_write``  ``update`` and ``write_if_unchanged`` on
+    ``replace_each_if``          a row that exists, which raise rather
+    ``delete_each_if``           than read and then write
     ``supports_update_rows``     writes through a shared-table view that
     ``update_rows``              does not own rows, which raise rather
                                  than create a row
@@ -139,25 +142,27 @@ class SqlDbClientAdapter(ABC):
         """Delete rows by full key equality; return deleted count."""
 
     def supports_insert_if_absent(self) -> bool:
-        """Whether this adapter implements ``insert_rows_if_absent``."""
+        """Whether this adapter implements ``insert_each_if_absent``."""
         return False
 
-    def insert_rows_if_absent(
+    def insert_each_if_absent(
         self,
         *,
         table: str,
         key_fields: Sequence[str],
         write_columns: Sequence[str],
         rows: Sequence[SqlDbRow],
-    ) -> int:
-        """Insert rows that do not exist; return how many were written.
+    ) -> list[bool]:
+        """Insert each row only where none exists; return, per row, whether it was.
 
-        One statement, so a concurrent writer cannot land between a check and
-        the insert. An existing row is left exactly as it is, expired or not:
-        the database has no view of kvtsjl's TTL.
+        Each row is one conditional statement, so a concurrent writer cannot
+        land between a check and the insert. An existing row is left exactly
+        as it is, expired or not: the database has no view of kvtsjl's TTL.
+        An adapter that can tell which rows one statement inserted
+        (``RETURNING``) may send the batch as one.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not implement insert_rows_if_absent"
+            f"{type(self).__name__} does not implement insert_each_if_absent"
         )
 
     def defers_commit(self) -> bool:
@@ -197,6 +202,37 @@ class SqlDbClientAdapter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement upsert_rows_update_first"
         )
+
+    def supports_compare_and_write(self) -> bool:
+        """Whether this adapter implements ``replace_each_if`` and ``delete_each_if``.
+
+        Needed by ``write_if_unchanged`` against a row that exists, and so by
+        ``update``; the store refuses rather than read and then write.
+        """
+        return False
+
+    def replace_each_if(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        expected: Sequence[SqlDbRow],
+        rows: Sequence[SqlDbRow],
+    ) -> list[bool]:
+        """Update each row only if every column in its ``expected`` still holds its value.
+
+        ``expected[i]`` carries row ``i``'s key fields and the columns
+        compared, with ``NULL`` equal to ``NULL``; each row is one conditional
+        statement. Returns, per row, whether it matched.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement replace_each_if")
+
+    def delete_each_if(
+        self, *, table: str, key_fields: Sequence[str], expected: Sequence[SqlDbRow]
+    ) -> list[bool]:
+        """Delete each row only if every column in its ``expected`` still holds its value."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement delete_each_if")
 
     def supports_update_rows(self) -> bool:
         """Whether this adapter implements ``update_rows``.

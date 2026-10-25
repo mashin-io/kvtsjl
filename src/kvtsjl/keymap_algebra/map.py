@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.keymap import KeyMap, ReadableKeyMap
+from kvtsjl.keymap import ConditionalWrite, KeyMap, Put, ReadableKeyMap, Versioned
 from kvtsjl.store.schema.ttl import TtlPolicy
 
 
@@ -66,16 +66,25 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
     def set(self, key: K, value: U, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(key, self._inverse(value), ttl=ttl, created_at=created_at)
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: U,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        return self._underlying.set_if_absent(
-            key, self._inverse(value), ttl=ttl, created_at=created_at
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[U]]:
+        return {
+            k: Versioned(None if seen.value is None else self._forward(seen.value), seen.version)
+            for k, seen in self._underlying.batch_read_versioned(keys).items()
+        }
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[U]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        return self._underlying.batch_write_if_unchanged(
+            {
+                k: ConditionalWrite(
+                    Versioned(None, w.seen.version),
+                    Put(self._inverse(w.change.value)) if isinstance(w.change, Put) else w.change,
+                    w.created_at,
+                )
+                for k, w in writes.items()
+            },
+            ttl=ttl,
         )
 
     def delete(self, key: K) -> bool:
@@ -120,17 +129,19 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
     def set(self, key: K, value: T, *, ttl: TtlPolicy | None = None, created_at: datetime | None = None) -> None:
         self._underlying.set(self._to_store(key), value, ttl=ttl, created_at=created_at)
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: T,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        return self._underlying.set_if_absent(
-            self._to_store(key), value, ttl=ttl, created_at=created_at
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[T]]:
+        to_sk = {key: self._to_store(key) for key in dict.fromkeys(keys)}
+        found = self._underlying.batch_read_versioned(list(dict.fromkeys(to_sk.values())))
+        return {k: found[sk] for k, sk in to_sk.items()}
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[T]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        to_sk = {key: self._to_store(key) for key in writes}
+        written = self._underlying.batch_write_if_unchanged(
+            {to_sk[k]: w for k, w in writes.items()}, ttl=ttl
         )
+        return {k for k, sk in to_sk.items() if sk in written}
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(self._to_store(key))

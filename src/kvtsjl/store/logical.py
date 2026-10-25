@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
 from kvtsjl.batching import chunk_sequence
-from kvtsjl.exceptions import PartialSyncError
-from kvtsjl.keymap import KeyMap
+from kvtsjl.exceptions import KvStoreError, PartialSyncError
+from kvtsjl.keymap import ConditionalWrite, Decision, Keep, KeyMap, Put, Versioned
 from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
@@ -157,9 +157,10 @@ class KvStore[K, V](
     ) -> FillStats:
         """Copy in what the fallbacks hold and this store lacks; never overwrite.
 
-        Each copy is this store's own ``set_if_absent``, so it is written at
-        the level the fill was asked for: indexes and copies on the way down
-        receive it, and nothing the store holds is ever replaced — a writer
+        Each copy is this store's own conditional insert — a page's copies in
+        one ``batch_write_if_unchanged`` — so it is written at the level the
+        fill was asked for: indexes and copies on the way down receive it,
+        and nothing the store holds is ever replaced — a writer
         that got there first wins and is counted in ``lost_race``. The
         fallback's write clock is carried where the store keeps one, so a
         copy keeps its remaining life. A failure raises: this is an explicit
@@ -179,23 +180,33 @@ class KvStore[K, V](
             clocks: Mapping[K, RecordStat] = (
                 page.stat(list(found)) if found and self.supports_write_clock else {}
             )
-            for key in page.listed:
+            listed = iter(page.listed)
+            while True:
                 if limit is not None and written >= limit:
                     return FillStats(scanned, missing, written, lost_race, source_miss)
-                scanned += 1
-                if key not in wanted:
-                    continue
-                missing += 1
-                value = found.get(key)
-                if value is None:
-                    source_miss += 1
-                    continue
-                meta = clocks.get(key)
-                clock = None if meta is None else meta.write_clock
-                if self.set_if_absent(key, value, created_at=clock):
-                    written += 1
-                else:
-                    lost_race += 1
+                # At most as many copies as the limit still allows, so the
+                # keys scanned are those a copy-at-a-time fill would scan.
+                budget = None if limit is None else limit - written
+                copies: dict[K, ConditionalWrite[V]] = {}
+                for key in listed:
+                    scanned += 1
+                    if key not in wanted:
+                        continue
+                    missing += 1
+                    value = found.get(key)
+                    if value is None:
+                        source_miss += 1
+                        continue
+                    meta = clocks.get(key)
+                    clock = None if meta is None else meta.write_clock
+                    copies[key] = ConditionalWrite(Versioned.absent(), Put(value), clock)
+                    if budget is not None and len(copies) >= budget:
+                        break
+                if not copies:
+                    break
+                won = len(self.batch_write_if_unchanged(copies))
+                written += won
+                lost_race += len(copies) - won
         return FillStats(scanned, missing, written, lost_race, source_miss)
 
     @property
@@ -266,30 +277,49 @@ class KvStore[K, V](
         )
 
     def get_or_set(self, key: K, compute_value_fn: Callable[[], V]) -> V:
-        existing = self.get(key)
-        if existing is not None:
-            return existing
-        value = compute_value_fn()
-        self.set(key, value)
-        return value
+        """The stored value, or ``compute_value_fn()`` stored only if still absent.
+
+        A read, then — on a miss — an ``update``: a writer that gets there
+        first wins, and its value is returned rather than overwritten.
+        ``compute_value_fn`` runs only when the key is absent, and again if a
+        writer then removes it.
+        """
+        found = self.get(key)
+        if found is not None:
+            return found
+
+        def decide(current: V | None) -> Decision[V]:
+            return Keep() if current is not None else Put(compute_value_fn())
+
+        stored = self.update(key, decide)
+        if stored is None:
+            raise KvStoreError(f"compute_value_fn returned None for {key!r}")
+        return stored
 
     def batch_get_or_set(
         self,
         keys: Sequence[K],
         compute_missing_values_fn: Callable[[Sequence[K]], Mapping[K, V]],
     ) -> dict[K, V]:
+        """As ``get_or_set``: per batch one read, and for the misses one ``batch_update``.
+
+        ``compute_missing_values_fn`` is asked once for the keys still absent
+        when the update reads them, and again only for those a concurrent
+        writer then removed; where another writer got there first, its value
+        is returned instead.
+        """
+
+        def decide(current: Mapping[K, V | None]) -> Mapping[K, Decision[V]]:
+            absent = [k for k, v in current.items() if v is None]
+            computed: Mapping[K, V] = compute_missing_values_fn(absent) if absent else {}
+            return {k: Put(computed[k]) for k in absent if k in computed}
+
         result: dict[K, V] = {}
         for chunk in chunk_sequence(keys, self.batch_size):
-            found = self.batch_get(chunk)
-            result.update(found)
-            missing = [k for k in chunk if k not in found]
-            if not missing:
-                continue
-            computed = compute_missing_values_fn(missing)
-            to_set = {k: computed[k] for k in missing if k in computed}
-            if to_set:
-                self.batch_set(to_set)
-                result.update(to_set)
+            result.update(self.batch_get(chunk))
+            missing = [k for k in chunk if k not in result]
+            if missing:
+                result.update(self.batch_update(missing, decide))
         return result
 
     def readonly(self) -> ReadableKvStoreType[K, V]:

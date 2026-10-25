@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 
 class KvStoreError(Exception):
@@ -27,6 +27,28 @@ class KvStoreUnsupported(KvStoreError):
     a medium *failing*, never hides one of these; it is raised where the
     composition is put together, not logged where it runs.
     """
+
+
+class KvStoreConflict[K, V](KvStoreError):
+    """An ``update`` kept finding entries changed under it, and gave up on them.
+
+    Each attempt read the entry, decided, and wrote only if the entry was
+    still what it read; for the keys in ``lost`` every attempt lost to a
+    concurrent writer, and nothing was written for them. ``held`` is what
+    the other keys of the batch hold afterwards, as ``batch_update`` would
+    have returned it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        lost: Sequence[K],
+        held: Mapping[K, V],
+    ) -> None:
+        super().__init__(message)
+        self.lost: tuple[K, ...] = tuple(lost)
+        self.held: dict[K, V] = dict(held)
 
 
 class KvStoreScanUnsupported(KvStoreUnsupported):

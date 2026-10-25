@@ -22,6 +22,7 @@ from kvtsjl.exceptions import (
     KvStoreScopeError,
     KvStoreUnsupported,
 )
+from kvtsjl.keymap import ConditionalWrite, Put, Remove, Versioned
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
@@ -589,34 +590,132 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
         return len(rows)
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        if not self._adapter.supports_insert_if_absent():
-            raise KvStoreUnsupported(
-                f"{type(self._adapter).__name__} does not support "
-                "insert_rows_if_absent, which set_if_absent requires; it will "
-                "not fall back to a get-then-set"
-            )
-        require_write_clock_supported(
-            created_at, allowed=True, backend="SqlDbKvStore"
-        )
+    def _version_columns(self) -> tuple[str, ...]:
+        """What a version compares: the columns this view writes, clock included.
+
+        The clock makes a rewrite of the same value a change all the same.
+        """
+        keys = set(self._sql_kvset.key_fields)
+        return tuple(c for c in self._sql_kvset.write_columns() if c not in keys)
+
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        """One fetch per batch; a row's version is its written columns, clock included."""
         sk = self._sql_kvset
-        row = self._build_write_row(key, value, ttl=ttl, created_at=created_at)
-        return (
-            self._adapter.insert_rows_if_absent(
+        out: dict[K, Versioned[V]] = {}
+        for chunk in chunk_sequence(list(dict.fromkeys(keys)), self.batch_size):
+            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
+            found = self._adapter.fetch_by_keys(
+                table=self._table,
+                columns=sk.select_columns(),
+                key_fields=sk.key_fields,
+                keys=key_rows,
+            )
+            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
+            for key, key_row in zip(chunk, key_rows, strict=True):
+                row = by_tuple.get(_key_tuple(key_row, sk.key_fields))
+                if row is None:
+                    out[key] = Versioned.absent()
+                    continue
+                live = not self._row_expired(row) and self._holds(row)
+                value = self.kvset.value_serde.deserialize(row) if live else None
+                out[key] = Versioned(value, tuple(row.get(c) for c in self._version_columns()))
+        return out
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        """Insert where no row is, or replace or remove rows only if unchanged.
+
+        One adapter call per kind of write: the inserts, the replacements and
+        the removals. A view of a shared table that does not own its rows
+        refuses to insert one — only an owner creates; removing through it
+        clears its own columns, as ``unset`` does.
+        """
+        for w in writes.values():
+            require_write_clock_supported(w.created_at, allowed=True, backend="SqlDbKvStore")
+        sk = self._sql_kvset
+        inserts = {
+            k: w.change.value
+            for k, w in writes.items()
+            if w.seen.version is None and isinstance(w.change, Put)
+        }
+        against = {k: w for k, w in writes.items() if w.seen.version is not None}
+        if inserts and not self.creates_entries:
+            raise KvStoreUnsupported(
+                f"{sk.table_name}: this view does not own its rows, so it cannot "
+                f"create one for {next(iter(inserts))!r}; its owner creates the record"
+            )
+        if against and not self._adapter.supports_compare_and_write():
+            raise KvStoreUnsupported(
+                f"{type(self._adapter).__name__} does not support compare-and-write, "
+                "which writing against a version requires; it will not read and "
+                "then write"
+            )
+        removals = [k for k, w in against.items() if isinstance(w.change, Remove)]
+        if removals and not sk.deletes_rows and not sk.own_columns:
+            raise KvStoreUnsupported(
+                f"{sk.table_name}: this view writes no columns of its own, so "
+                "removing through it could only delete a row its siblings share"
+            )
+        written: set[K] = set()
+        if inserts:
+            if not self._adapter.supports_insert_if_absent():
+                raise KvStoreUnsupported(
+                    f"{type(self._adapter).__name__} does not support "
+                    "insert_each_if_absent, which set_if_absent — inserting only "
+                    "where no row is — requires; it will not fall back to a get-then-set"
+                )
+            keys = list(inserts)
+            flags = self._adapter.insert_each_if_absent(
                 table=self._table,
                 key_fields=sk.key_fields,
                 write_columns=sk.write_columns(),
-                rows=[row],
+                rows=[
+                    self._build_write_row(k, inserts[k], ttl=ttl, created_at=writes[k].created_at)
+                    for k in keys
+                ],
             )
-            > 0
-        )
+            written |= {k for k, won in zip(keys, flags, strict=True) if won}
+        if removals and sk.deletes_rows:
+            flags = self._adapter.delete_each_if(
+                table=self._table,
+                key_fields=sk.key_fields,
+                expected=[self._expected(k, against[k].seen) for k in removals],
+            )
+            written |= {k for k, won in zip(removals, flags, strict=True) if won}
+        elif removals:
+            flags = self._adapter.replace_each_if(
+                table=self._table,
+                key_fields=sk.key_fields,
+                write_columns=sk.own_columns,
+                expected=[self._expected(k, against[k].seen) for k in removals],
+                rows=[dict.fromkeys(sk.own_columns) for _ in removals],
+            )
+            written |= {k for k, won in zip(removals, flags, strict=True) if won}
+        replaces = {k: w.change.value for k, w in against.items() if isinstance(w.change, Put)}
+        if replaces:
+            flags = self._adapter.replace_each_if(
+                table=self._table,
+                key_fields=sk.key_fields,
+                write_columns=sk.write_columns(),
+                expected=[self._expected(k, against[k].seen) for k in replaces],
+                rows=[
+                    self._build_write_row(k, v, ttl=ttl, created_at=against[k].created_at)
+                    for k, v in replaces.items()
+                ],
+            )
+            written |= {k for k, won in zip(replaces, flags, strict=True) if won}
+        return written
+
+    def _expected(self, key: K, seen: Versioned[V]) -> SqlDbRow:
+        """The key and the version's columns, which the row must still hold."""
+        version = seen.version
+        if not isinstance(version, tuple):
+            raise KvStoreError(f"{version!r} is not a version this table gave out")
+        return {
+            **self._full_key_row(key, require_scope=True),
+            **dict(zip(self._version_columns(), version, strict=True)),
+        }
 
     def delete(self, key: K) -> bool:
         return self.batch_delete([key]) > 0

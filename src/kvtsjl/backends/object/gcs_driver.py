@@ -31,12 +31,14 @@ def _stat_from_blob(blob: Blob) -> BlobStat:
     custom = blob.custom_time
     size = blob.size
     etag = blob.etag
+    generation = blob.generation
     return BlobStat(
         key=name,
         modified_at=_ref_time(blob),
         native_expires_at=custom if isinstance(custom, datetime) else None,
         size=int(size) if isinstance(size, int) else None,
         etag=etag if isinstance(etag, str) else None,
+        version=str(generation) if isinstance(generation, int) else None,
     )
 
 
@@ -68,18 +70,32 @@ class GcsBlobDriver(BlobDriver):
             blob.custom_time = headers["custom_time"]
         blob.upload_from_string(data)
 
-    def write_if_absent(
-        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    def write_if_version(
+        self,
+        key: str,
+        data: bytes,
+        version: str | None,
+        *,
+        headers: dict[str, Any] | None = None,
     ) -> bool:
-        """Upload with ``ifGenerationMatch=0``, which only an absent object meets."""
+        """Upload with ``ifGenerationMatch``; generation 0 is the one no object has."""
         from google.api_core.exceptions import PreconditionFailed
 
         blob = self._bucket.blob(key)
         if headers is not None and "custom_time" in headers:
             blob.custom_time = headers["custom_time"]
         try:
-            blob.upload_from_string(data, if_generation_match=0)
+            blob.upload_from_string(data, if_generation_match=int(version or 0))
         except PreconditionFailed:
+            return False
+        return True
+
+    def delete_if_version(self, key: str, version: str) -> bool:
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        try:
+            self._bucket.delete_blob(key, if_generation_match=int(version))
+        except (PreconditionFailed, NotFound):
             return False
         return True
 

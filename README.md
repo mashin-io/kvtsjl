@@ -41,6 +41,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 ## Features
 
 - **Typed CRUD** — `get` / `set` / `delete` + batch variants, `scan`, `get_or_set`
+- **Atomic update** — `update(key, decide)` / `batch_update(keys, decide)`: keep, put or remove entries, decided from what they hold, on one compare-and-write per medium — a batch is one read and one write per round
 - **Footprint-free medium** — default writes do not stamp library identity (`x-amz-meta-kvtsjl-*`, tags, sidecars)
 - **Wire schema** — `KvSet` describes key/value serdes, layout, TTL; leaf backends own I/O
 - **Scope views** — prefix namespaces without copying data
@@ -474,8 +475,8 @@ Plus, per target: its **lookup** (read before the authority — a cache; after i
 
 From that declaration come the only orders any operation uses:
 
-- **Commit** — components → authority → dependents (`set`, `batch_set`, `set_if_absent`, `set_stream`)
-- **Removal** — authority → components → dependents (`delete`, `batch_delete`, `delete_where`, GC)
+- **Commit** — components → authority → dependents (`set`, `batch_set`, `set_if_absent`, `update`, `set_stream`)
+- **Removal** — authority → components → dependents (`delete`, `batch_delete`, `delete_where`, an `update` that removes, GC)
 - **Lookup** — caches → authority → fallbacks (`get`, `exists`, `stat`, `read_stream`)
 - **Assembly** — authority, then the other parts (records split across a zip)
 
@@ -534,6 +535,40 @@ except Exception:
 
 A part failing inside the transaction raises `UncommittedWriteError` — roll back and the record is as it was; the uploaded body is left for GC. Work that must happen atomically with a delete is yours to put in the same transaction — kvtsjl runs no callbacks of yours. Open the transaction, read what you need, do your work, delete, commit. For expiry, `expired_keys` names the records; they no longer read back as records, so read the parts your work needs from their own stores, then `batch_delete`. A record's body is removed only once you commit.
 
+### Deciding from what is stored: `update`
+
+Read, decide, write is a race: another writer can land between the read and the write, and one of the two writes is lost. `update` closes it. `decide` is shown what the entry holds — `None` when it is absent or expired — and returns what to do with it:
+
+```python
+from kvtsjl import Keep, Put, Remove
+
+store.update(k, lambda v: Keep() if v is not None else Put(compute()))       # get-or-set
+store.update(k, lambda v: Put(v + 1) if v is not None else Put(1))           # a counter
+store.update(k, lambda v: Remove() if v is not None and stale(v) else Keep())
+```
+
+The decision is written only if the entry is still what `decide` saw. If another writer got there first, the entry is read again and `decide` asked again — so `decide` must depend only on what it is shown, and may run more than once. `update` returns what the entry holds afterwards, and raises `KvStoreConflict` if it loses every one of its `attempts`, having written nothing. An expired entry reads as `None` and is replaced in the same conditional step, so it never blocks an update.
+
+`batch_update` decides for many keys at once — `decide` sees every current value and returns a decision per key (one it leaves out is kept) — and costs one read and one conditional write per round; only the keys a concurrent writer changed are read and decided again. `update` is `batch_update` of one key. `get_or_set` and `batch_get_or_set` are a read, then an update of the misses: hits cost what a `get` costs, `compute` is asked once per batch, and a value another writer stored first is returned, not overwritten.
+
+```python
+store.batch_update(keys, lambda current: {k: Put((v or 0) + 1) for k, v in current.items()})
+```
+
+Under it are two primitives, and both are batches — `batch_read_versioned(keys)`, the values and a token for exactly what is stored, and `batch_write_if_unchanged({k: ConditionalWrite(seen, change)})`, which makes each change — the same `Put(v)` or `Remove()` a `decide` returns — only where the entry is still `seen`, and returns the keys it wrote. A medium or composition implements only these; `read_versioned`, `write_if_unchanged` and `set_if_absent` are batches of one:
+
+| Medium | Version | Conditional replace / remove | Conditional insert |
+|--------|---------|------------------------------|--------------------|
+| SQL | the row's written columns | `UPDATE`/`DELETE … WHERE` they are unchanged | `ON CONFLICT DO NOTHING` |
+| Redis | the stored bytes | `WATCH` … `MULTI` | `SET NX` / `HSETNX` |
+| S3 | ETag | `If-Match` | `If-None-Match: *` |
+| GCS | generation | `ifGenerationMatch` | `ifGenerationMatch=0` |
+| Azure Blob | ETag | `If-Match` | `If-None-Match: *` |
+| Memory | the entry | one step, no I/O | one step |
+| Filesystem | inode and mtime | refused — no atomic compare-and-replace | a link that fails if the name is taken |
+
+A batch is one request where the medium allows it (SQL's fetch and one adapter call per kind of write — `insert_each_if_absent`, `replace_each_if`, `delete_each_if`, each reporting per row, which an adapter may send as one statement; Redis's `MGET`, one pipeline of `SET NX` and one `WATCH`…`EXEC`), and `io_concurrency` requests at a time on object stores. A medium refuses what it cannot do atomically rather than read and then write. A version names what is stored, not when: S3's ETag and Redis's version are the bytes, so a concurrent rewrite of identical bytes is not a change — which matters only to a decision taken on an entry that had expired, and Redis removes those itself. Compositions derive `update` from the laws: the authority's version is the record's; a mirror or an index follows only a write that happened; a fallback's value is seen where the authority has none, and a `Put` writes into the authority — the fallback is never written. Each target receives one batch per round. A zip updates through its `commit_part` — parts declared `after_commit` are rewritten once it commits — but refuses to replace a record whose other parts are written before it, since they could not be taken back if the record had changed. A group of child rows has no one version and refuses on its own; as an `after_commit` part it follows its record. A view of a shared row updates its own columns, and only the view that owns rows creates one.
+
 ### Filling a store from its fallback
 
 A fallback already says where the records a store lacks can be found, so copying them over is an operation of that composition — the same lookup, run over keys:
@@ -546,7 +581,7 @@ stats = filling.fill_missing(limit=500)
 # FillStats(scanned=…, missing=…, written=…, lost_race=…, source_miss=…)
 ```
 
-Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. It works at any depth: ask `records.fallback_read(src).indexed(index)` and the fallback inside is found and the copies are indexed; `imap` and `imap_keys` views translate what the store behind them lacks. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional write in one request: SQL `ON CONFLICT DO NOTHING`, Redis `SET NX`, S3 `If-None-Match`, GCS `ifGenerationMatch=0`, Azure `If-None-Match`, and a filesystem link that fails if the name is taken.
+Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. It works at any depth: ask `records.fallback_read(src).indexed(index)` and the fallback inside is found and the copies are indexed; `imap` and `imap_keys` views translate what the store behind them lacks. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional insert in one request (the table above).
 
 ---
 

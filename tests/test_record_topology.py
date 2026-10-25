@@ -28,7 +28,7 @@ from kvtsjl.exceptions import (
     RecordWriteError,
     UncommittedWriteError,
 )
-from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap import ConditionalWrite, KeyMap, Put, Remove, Versioned
 from kvtsjl.keymap_algebra.dict_map import DictKeyMap
 from kvtsjl.keymap_algebra.topology import (
     DependentSyncs,
@@ -42,6 +42,7 @@ from kvtsjl.keymap_algebra.topology import (
 )
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.compose.topology import StoreTopologyMixin
+from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import KeyPrefix
@@ -115,17 +116,30 @@ class _Spy(Target[str, str, str]):
         self.held[key] = value
         self.written.append(options)
 
-    def write_if_absent(self, key: str, value: str, options: WriteOptions) -> bool:
+    def batch_read_versioned(self, keys: Sequence[str]) -> dict[str, Versioned[str]]:
+        """The held value is the version, as Redis's bytes are."""
+        return {k: Versioned(self.held.get(k), self.held.get(k)) for k in keys}
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[str, ConditionalWrite[str]], options: WriteOptions
+    ) -> set[str]:
         self._note("cond")
-        if not self.wrote or key in self.held:
-            return False
-        self.held[key] = value
-        self.written.append(options)
-        return True
+        written: set[str] = set()
+        for key, w in writes.items():
+            if not self.wrote or self.held.get(key) != w.seen.version:
+                continue
+            if isinstance(w.change, Remove):
+                self.held.pop(key, None)
+            else:
+                self.held[key] = w.change.value
+                self.written.append(WriteOptions(ttl=options.ttl, created_at=w.created_at))
+            written.add(key)
+        return written
 
     def batch_write(self, items: Mapping[str, str], options: WriteOptions) -> None:
         self._note("batch_write")
         self.held.update(items)
+        self.written.append(options)
 
     def delete(self, key: str) -> bool:
         self._note("delete")
@@ -217,9 +231,11 @@ def test_batch_writes_take_the_same_order() -> None:
 
 def test_a_refused_authority_writes_no_dependent() -> None:
     log: list[str] = []
-    wrote = _sealed(log, wrote=False).write_if_absent("k", "v", OPTS, _now())
-    assert wrote is False
-    assert log == ["write:body", "cond:row"], "a dependent of someone else's record ran"
+    written = _sealed(log, wrote=False).batch_write_if_unchanged(
+        {"k": ConditionalWrite(Versioned.absent(), Put("v"))}, OPTS, _now()
+    )
+    assert written == set()
+    assert log == ["batch_write:body", "cond:row"], "a dependent of someone else's record ran"
 
 
 def test_the_write_clock_reaches_only_targets_that_keep_one() -> None:
@@ -230,6 +246,45 @@ def test_the_write_clock_reaches_only_targets_that_keep_one() -> None:
     Topology((primary, plain)).write("k", "v", WriteOptions(created_at=CLOCK), _now())
     assert primary.written[0].created_at == CLOCK
     assert plain.written[0].created_at is None
+
+
+def test_a_conditional_write_carries_the_clock_to_those_that_keep_one() -> None:
+    log: list[str] = []
+    primary = _Spy(log, "primary", Role.AUTHORITY, clock=False)
+    kept = _Spy(log, "kept", Role.DEPENDENT, clock=True)
+    plain = _Spy(log, "plain", Role.DEPENDENT, clock=False)
+    written = Topology((primary, kept, plain)).batch_write_if_unchanged(
+        {"k": ConditionalWrite(Versioned.absent(), Put("v"), CLOCK)}, OPTS, _now()
+    )
+    assert written == {"k"}
+    assert primary.written[0].created_at is None
+    assert kept.written[0].created_at == CLOCK
+    assert plain.written[0].created_at is None
+
+
+def test_a_fill_carries_the_clock_only_to_those_that_keep_one() -> None:
+    log: list[str] = []
+    cache = _Spy(log, "cache", Role.DEPENDENT, clock=False, lookup=Lookup.BEFORE_AUTHORITY, fill=True)
+    primary = _Spy(log, "primary", Role.AUTHORITY, clock=True, fill=True)
+    cold = _Spy(log, "cold", Role.FALLBACK, held={"k": "v"})
+    Topology((cache, primary, cold)).read("k")
+    assert primary.written[0].created_at == CLOCK
+    assert cache.written[0].created_at is None
+
+
+def test_a_record_refuses_a_clock_before_any_part_is_written() -> None:
+    class NoClock(MemoryKvStore[Any, Any, Any, Any]):
+        @property
+        def supports_write_clock(self) -> bool:
+            return False
+
+    body = _leaf("body")
+    records: Any = KvStore.zip_with(
+        Seal, commit_part="row", row=NoClock(_leaf("row").kvset), body=body
+    )
+    with pytest.raises(Exception, match="created_at"):
+        records.set_if_absent("k", Seal(row="R", body="B"), created_at=CLOCK)
+    assert body.get("k") is None, "a part was written before the clock was refused"
 
 
 def test_a_store_refuses_a_clock_its_authority_cannot_keep() -> None:
@@ -376,8 +431,8 @@ def test_a_fill_the_target_cannot_do_is_raised_not_logged() -> None:
     """Best-effort tolerates a failing medium, not a composition that cannot work."""
 
     class NoConditionalWrite(DictKeyMap[str, str]):
-        def set_if_absent(self, key: str, value: str, **_kw: Any) -> bool:
-            return KeyMap.set_if_absent(self, key, value)
+        def batch_write_if_unchanged(self, *a: Any, **kw: Any) -> set[str]:
+            return KeyMap.batch_write_if_unchanged(self, *a, **kw)
 
     hot = NoConditionalWrite({})
     with pytest.raises(KvStoreUnsupported):

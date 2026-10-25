@@ -152,7 +152,9 @@ class _SpyIndex:
     def sync(self, key: str, value: Any) -> None:
         self._synced.append(key)
 
-    def batch_sync(self, items: Any) -> None: ...
+    def batch_sync(self, items: Any) -> None:
+        self._synced.extend(items)
+
     def delete(self, key: str) -> None: ...
     def batch_delete(self, keys: Any) -> None: ...
     def clone_with_scope(self, scope: Any) -> Any:
@@ -171,7 +173,7 @@ def test_a_failed_copy_raises_rather_than_being_logged() -> None:
     """A read's fill is best-effort; an explicit fill is a write, and says so."""
 
     class Down(MemoryKvStore[Any, Any, Any, Any]):
-        def set_if_absent(self, *_a: Any, **_kw: Any) -> bool:
+        def batch_write_if_unchanged(self, *_a: Any, **_kw: Any) -> set[Any]:
             raise RuntimeError("primary down")
 
     primary = Down(_leaf("primary").kvset)

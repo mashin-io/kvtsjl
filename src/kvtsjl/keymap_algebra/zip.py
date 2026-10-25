@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from kvtsjl.exceptions import KvStoreUnsupported
-from kvtsjl.keymap import KeyMap
+from kvtsjl.keymap import ConditionalWrite, KeyMap
 from kvtsjl.keymap_algebra.topology import RecordTopologyMixin, Role, Topology
 from kvtsjl.store.schema.ttl import TtlPolicy
 
@@ -169,27 +169,22 @@ class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
             return None
         return self._ctor(**dict(zip(self.field_names, values, strict=True)))
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        """Write the other parts, then commit only if the record is absent.
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        """Write the other parts, then commit only if the commit part is unchanged.
 
-        Two writers may both write the non-commit parts — nothing can see them
-        while the commit part is absent — and only one commits. Where those
-        parts are keyed by the record key, the winner's commit can end up
-        beside the loser's body; key them by content to rule that out.
+        Inserting, two writers may both write the non-commit parts — nothing
+        can see them while the commit part is absent — and only one commits.
+        Where those parts are keyed by the record key, the winner's commit can
+        end up beside the loser's body; key them by content to rule that out.
         """
         if self._commit_part is None:
             raise KvStoreUnsupported(
-                "set_if_absent on a zip needs a commit_part: without one no "
-                "part decides whether the record exists"
+                "a conditional write — set_if_absent, update — on a zip needs a "
+                "commit_part: without one no part decides whether the record exists"
             )
-        return super().set_if_absent(key, value, ttl=ttl, created_at=created_at)
+        return super().batch_write_if_unchanged(writes, ttl=ttl)
 
 
 def _slot(index: int) -> Callable[[tuple[Any, ...]], Any]:

@@ -129,18 +129,6 @@ class IMappedKvStore[K, V, U](
     def child_stores(self) -> tuple[object, ...]:
         return (self._src(),)
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: U,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        return self._src().set_if_absent(
-            key, self._inverse(value), ttl=ttl, created_at=created_at
-        )
-
     def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, U]]:
         return (page.map_values(self._forward) for page in self._src().missing_pages(page_size))
 
@@ -234,18 +222,6 @@ class IMappedKeysKvStore[K, SK, V](
 
     def child_stores(self) -> tuple[object, ...]:
         return (self._src(),)
-
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        return self._src().set_if_absent(
-            self._to_store(key), value, ttl=ttl, created_at=created_at
-        )
 
     def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
         """What the store behind lacks, under the caller's keys.

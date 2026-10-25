@@ -6,7 +6,12 @@ from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import (
+    ResourceExistsError,
+    ResourceModifiedError,
+    ResourceNotFoundError,
+)
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.batching import AZURE_DELETE_BLOBS_MAX
@@ -35,11 +40,8 @@ def _native_expires(metadata: Mapping[str, str] | None) -> datetime | None:
 def _stat_from_props(props: BlobProperties, *, key: str) -> BlobStat:
     name = props.name if isinstance(props.name, str) else key
     size = props.size
-    etag = props.etag
-    if isinstance(etag, str):
-        etag = etag.strip('"')
-    else:
-        etag = None
+    sent = props.etag if isinstance(props.etag, str) else None
+    etag = sent.strip('"') if sent is not None else None
     return BlobStat(
         key=name,
         modified_at=(
@@ -48,6 +50,7 @@ def _stat_from_props(props: BlobProperties, *, key: str) -> BlobStat:
         native_expires_at=_native_expires(props.metadata),
         size=int(size) if isinstance(size, int) else None,
         etag=etag,
+        version=sent,
     )
 
 
@@ -91,14 +94,36 @@ class AzureBlobDriver(BlobDriver):
         blob = self._container.get_blob_client(key)
         blob.upload_blob(data, overwrite=True, metadata=_metadata(headers))
 
-    def write_if_absent(
-        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    def write_if_version(
+        self,
+        key: str,
+        data: bytes,
+        version: str | None,
+        *,
+        headers: dict[str, Any] | None = None,
     ) -> bool:
-        """Upload without ``overwrite``, which the service sends as ``If-None-Match: *``."""
+        """Upload without ``overwrite`` (``If-None-Match: *``), or against the ETag seen."""
         blob = self._container.get_blob_client(key)
         try:
-            blob.upload_blob(data, overwrite=False, metadata=_metadata(headers))
-        except ResourceExistsError:
+            if version is None:
+                blob.upload_blob(data, overwrite=False, metadata=_metadata(headers))
+            else:
+                blob.upload_blob(
+                    data,
+                    overwrite=True,
+                    metadata=_metadata(headers),
+                    etag=version,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+        except (ResourceExistsError, ResourceModifiedError, ResourceNotFoundError):
+            return False
+        return True
+
+    def delete_if_version(self, key: str, version: str) -> bool:
+        blob = self._container.get_blob_client(key)
+        try:
+            blob.delete_blob(etag=version, match_condition=MatchConditions.IfNotModified)
+        except (ResourceModifiedError, ResourceNotFoundError):
             return False
         return True
 

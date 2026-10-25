@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime
 import time
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -74,25 +74,39 @@ class S3BlobDriver(BlobDriver):
             kwargs.update(headers)
         self._client.put_object(**cast(Any, kwargs))
 
-    def write_if_absent(
-        self, key: str, data: bytes, *, headers: dict[str, Any] | None = None
+    def write_if_version(
+        self,
+        key: str,
+        data: bytes,
+        version: str | None,
+        *,
+        headers: dict[str, Any] | None = None,
     ) -> bool:
-        """``PutObject`` with ``If-None-Match: *``: a 412 means the key is taken."""
-        kwargs: dict[str, object] = {
-            "Bucket": self._bucket,
-            "Key": key,
-            "Body": data,
-            "IfNoneMatch": "*",
-        }
+        """``PutObject`` with ``If-None-Match: *`` or ``If-Match``: a 412 means it changed."""
+        kwargs: dict[str, object] = {"Bucket": self._bucket, "Key": key, "Body": data}
+        if version is None:
+            kwargs["IfNoneMatch"] = "*"
+        else:
+            kwargs["IfMatch"] = version
         if headers:
             kwargs.update(headers)
+        return self._conditionally(lambda: self._client.put_object(**cast(Any, kwargs)))
+
+    def delete_if_version(self, key: str, version: str) -> bool:
+        """``DeleteObject`` with ``If-Match``."""
+        return self._conditionally(
+            lambda: self._client.delete_object(Bucket=self._bucket, Key=key, IfMatch=version)
+        )
+
+    def _conditionally(self, request: Callable[[], object]) -> bool:
+        """Send a conditional request; ``False`` when its precondition fails."""
         for attempt in range(1, _CONFLICT_ATTEMPTS + 1):
             try:
-                self._client.put_object(**cast(Any, kwargs))
+                request()
                 return True
             except ClientError as exc:
                 code = _error_code(exc)
-                if code == "PreconditionFailed":
+                if code in {"PreconditionFailed", "404", "NoSuchKey", "NotFound"}:
                     return False
                 if code != "ConditionalRequestConflict" or attempt == _CONFLICT_ATTEMPTS:
                     raise
@@ -202,15 +216,13 @@ class S3BlobDriver(BlobDriver):
         last_modified = resp.get("LastModified")
         expires = resp.get("Expires")
         size = resp.get("ContentLength")
-        etag = resp.get("ETag")
-        if isinstance(etag, str):
-            etag = etag.strip('"')
-        else:
-            etag = None
+        raw = resp.get("ETag")
+        sent = raw if isinstance(raw, str) else None
         return BlobStat(
             key=key,
             modified_at=last_modified if isinstance(last_modified, datetime) else None,
             native_expires_at=expires if isinstance(expires, datetime) else None,
             size=int(size) if isinstance(size, int) else None,
-            etag=etag,
+            etag=sent.strip('"') if sent is not None else None,
+            version=sent,
         )

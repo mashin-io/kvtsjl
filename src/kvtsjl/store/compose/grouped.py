@@ -6,6 +6,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
 
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreUnsupported
+from kvtsjl.keymap import ConditionalWrite, Versioned
 from kvtsjl.keymap_algebra.topology import MissingPage
 from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
@@ -88,19 +89,18 @@ class GroupedKvStore[K, V](KvStore[str, Mapping[K, V]]):
         if stale:
             group.batch_delete(stale)
 
-    def set_if_absent(
+    def batch_read_versioned(
+        self, keys: Sequence[str]
+    ) -> dict[str, Versioned[Mapping[K, V]]]:
+        raise _no_version()
+
+    def batch_write_if_unchanged(
         self,
-        key: str,
-        value: Mapping[K, V],
+        writes: Mapping[str, ConditionalWrite[Mapping[K, V]]],
         *,
         ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        raise KvStoreUnsupported(
-            "a group is many rows, and no one conditional write covers them; as "
-            "a part of a record, declare it after_commit so it is written only "
-            "once the record commits"
-        )
+    ) -> set[str]:
+        raise _no_version()
 
     def delete(self, key: str) -> bool:
         held = self._members(key)
@@ -133,3 +133,11 @@ class GroupedKvStore[K, V](KvStore[str, Mapping[K, V]]):
         from kvtsjl.store.repr_util import compose_repr
 
         return compose_repr("GroupedKvStore", rows=self._rows, by=self._by)
+
+
+def _no_version() -> KvStoreUnsupported:
+    return KvStoreUnsupported(
+        "a group is many rows, and no one version covers them; as a part of a "
+        "record, declare it after_commit so it is written only once the record "
+        "commits"
+    )

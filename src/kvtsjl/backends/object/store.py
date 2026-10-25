@@ -12,7 +12,8 @@ from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.backends.object.ttl import TtlSource
 from kvtsjl.batching import chunk_sequence, map_concurrent
 from kvtsjl.bind import CollectionBinding, NamespaceBinder
-from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreUnsupported
+from kvtsjl.keymap import ConditionalWrite, Remove, Versioned
 from kvtsjl.scope import Scope
 from kvtsjl.serde import StreamingSerDe
 from kvtsjl.serde.compress import ChunkReader
@@ -198,24 +199,56 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
             headers=self._write_headers(ttl, created_at),
         )
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        """The driver's conditional put: the medium decides, in one request.
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        """One request per object, ``io_concurrency`` at a time; expired reads as ``None``."""
+        out: dict[K, Versioned[V]] = {}
+        for chunk in chunk_sequence(list(dict.fromkeys(keys)), self.batch_size):
+            seen = map_concurrent(chunk, self._read_versioned, max_workers=self.io_concurrency)
+            out.update(zip(chunk, seen, strict=True))
+        return out
 
-        "Absent" is absent to the medium: an object kvtsjl considers expired
-        is still an object until GC removes it, so it refuses the write.
+    def _read_versioned(self, key: K) -> Versioned[V]:
+        got = self._driver.read(self._key_codec.encode_physical(key))
+        if got is None:
+            return Versioned.absent()
+        data, stat = got
+        if stat.version is None:
+            raise KvStoreUnsupported(
+                f"{type(self._driver).__name__} keeps no version to write against"
+            )
+        expired = self._ttl_source.is_expired(stat, collection_ttl_seconds=self.ttl_seconds())
+        value = None if expired else self.kvset.value_serde.deserialize(data)
+        return Versioned(value, stat.version)
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        """The driver's conditional put or delete, one request per object, concurrently.
+
+        Against nothing stored it inserts only where no object is — and an
+        object kvtsjl considers expired is still an object until GC removes
+        it, so that refuses; ``update`` reads the expired object's version and
+        replaces it instead.
         """
-        return self._driver.write_if_absent(
-            self._key_codec.encode_physical(key),
-            self.kvset.value_serde.serialize(value),
-            headers=self._write_headers(ttl, created_at),
-        )
+
+        def write(pair: tuple[K, ConditionalWrite[V]]) -> bool:
+            key, w = pair
+            physical = self._key_codec.encode_physical(key)
+            version = None if w.seen.version is None else str(w.seen.version)
+            if isinstance(w.change, Remove):
+                return version is not None and self._driver.delete_if_version(physical, version)
+            return self._driver.write_if_version(
+                physical,
+                self.kvset.value_serde.serialize(w.change.value),
+                version,
+                headers=self._write_headers(ttl, w.created_at),
+            )
+
+        written: set[K] = set()
+        for chunk in chunk_sequence(list(writes.items()), self.batch_size):
+            wins = map_concurrent(chunk, write, max_workers=self.io_concurrency)
+            written |= {key for (key, _), won in zip(chunk, wins, strict=True) if won}
+        return written
 
     def _write_headers(
         self, ttl: TtlPolicy | None, created_at: datetime | None

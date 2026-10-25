@@ -22,6 +22,7 @@ from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
 
 sys.path.insert(0, "tests")
+from tests.media import HEADER_MODES, MEDIA, TTL, make_medium
 from tests.sql_helpers import ensure_sql_table, make_sql_kvset
 
 
@@ -115,11 +116,20 @@ def test_a_backend_without_the_capability_raises_rather_than_racing() -> None:
 
 
 def test_the_default_is_to_refuse() -> None:
-    """A store that never implements it must raise, not silently race."""
+    """A map that never implements it must raise, not silently race."""
     from kvtsjl.keymap import KeyMap
 
-    with pytest.raises(KvStoreError, match="set_if_absent"):
-        KeyMap.set_if_absent(object(), "k", "v")  # type: ignore[arg-type]
+    class Plain(KeyMap[str, str]):
+        def get(self, key: str) -> str | None:
+            return None
+
+        def set(self, key: str, value: str, **_kw: Any) -> None: ...
+
+        def delete(self, key: str) -> bool:
+            return False
+
+    with pytest.raises(KvStoreError, match="conditionally"):
+        Plain().set_if_absent("k", "v")
 
 
 def test_it_respects_the_bound_scope() -> None:
@@ -203,7 +213,9 @@ def test_an_indexed_store_indexes_only_a_write_that_happened() -> None:
         def sync(self, key: str, value: str) -> None:
             synced.append((key, value))
 
-        def batch_sync(self, items: Any) -> None: ...
+        def batch_sync(self, items: Any) -> None:
+            synced.extend(items.items())
+
         def delete(self, key: str) -> None: ...
         def batch_delete(self, keys: Any) -> None: ...
         def clone_with_scope(self, scope: Any) -> Any:
@@ -224,74 +236,11 @@ def test_an_indexed_store_indexes_only_a_write_that_happened() -> None:
 # read followed by a write. Each leaf is checked on its own medium (or the
 # fake that enforces the medium's precondition) — the same three facts.
 
-_MEDIA = ["memory", "sql", "redis", "redis_hash", "s3", "gcs", "azure", "filesystem"]
-# The modes that keep expiry in a header, sidecar or metadata of their own: a
-# conditional write that dropped its headers would pass in the default modes.
-_HEADER_MODES = ["s3_expires", "gcs_custom_time", "azure_metadata", "filesystem_sidecar"]
-_TTL = TtlPolicy(ttl_duration=timedelta(hours=1))
-
-
-def _kvset(ttl: TtlPolicy | None) -> Any:
-    return KvSet.with_str_keys(
-        "media",
-        key_serde=SerDe.identity(str),
-        value_serde=SerDe.utf8_bytes(),
-        ttl_policy=ttl,
-    )
-
-
-def _medium(name: str, request: pytest.FixtureRequest, ttl: TtlPolicy | None) -> Any:
-    import fakeredis
-
-    from kvtsjl.backends.azure import AzureBlobKvStore, AzureTtlMode
-    from kvtsjl.backends.filesystem import FilesystemKvStore, FilesystemTtlMode
-    from kvtsjl.backends.gcs import GcsKvStore, GcsTtlMode
-    from kvtsjl.backends.redis import RedisKvStore
-    from kvtsjl.backends.s3 import S3KvStore, S3TtlMode
-    from tests.fake_azure import FakeAzureContainer
-    from tests.fake_gcs import FakeGcsBucket
-
-    kvset = _kvset(ttl)
-    if name == "memory":
-        return MemoryKvStore(kvset)
-    if name == "sql":
-        return _sql(request.getfixturevalue("sqlite_conn"), ttl)
-    if name == "redis":
-        return RedisKvStore.flat(kvset, fakeredis.FakeRedis())
-    if name == "redis_hash":
-        return RedisKvStore.hash_collection(kvset, fakeredis.FakeRedis())
-    if name in ("s3", "s3_expires"):
-        client = request.getfixturevalue("s3_client")
-        bucket = request.getfixturevalue("s3_bucket")
-        mode = S3TtlMode.EXPIRES if name == "s3_expires" else S3TtlMode.OBJECT_TIME
-        return S3KvStore(
-            kvset, client=client, bucket=bucket, key_prefix="app/", ttl_mode=mode
-        )
-    if name in ("gcs", "gcs_custom_time"):
-        mode = GcsTtlMode.CUSTOM_TIME if name == "gcs_custom_time" else GcsTtlMode.OBJECT_TIME
-        return GcsKvStore(kvset, bucket=FakeGcsBucket(), key_prefix="app/", ttl_mode=mode)  # type: ignore[arg-type]
-    if name in ("azure", "azure_metadata"):
-        mode = AzureTtlMode.METADATA if name == "azure_metadata" else AzureTtlMode.OBJECT_TIME
-        return AzureBlobKvStore(
-            kvset, container=FakeAzureContainer(), key_prefix="app/", ttl_mode=mode  # type: ignore[arg-type]
-        )
-    if name in ("filesystem", "filesystem_sidecar"):
-        mode = (
-            FilesystemTtlMode.SIDECAR
-            if name == "filesystem_sidecar"
-            else FilesystemTtlMode.MTIME
-        )
-        return FilesystemKvStore(
-            kvset, root=request.getfixturevalue("tmp_path"), ttl_mode=mode
-        )
-    raise AssertionError(name)
-
-
-@pytest.mark.parametrize("medium", _MEDIA)
+@pytest.mark.parametrize("medium", MEDIA)
 def test_every_medium_inserts_once_and_never_replaces(
     medium: str, request: pytest.FixtureRequest
 ) -> None:
-    store = _medium(medium, request, None)
+    store = make_medium(medium, request, None)
     assert store.set_if_absent("k", "first") is True
     assert store.set_if_absent("k", "second") is False
     assert store.get("k") == "first", "the refused write replaced the value"
@@ -299,7 +248,7 @@ def test_every_medium_inserts_once_and_never_replaces(
     assert sorted(store.list()) == ["j", "k"]
 
 
-@pytest.mark.parametrize("medium", [m for m in _MEDIA if m != "redis_hash"] + _HEADER_MODES)
+@pytest.mark.parametrize("medium", [m for m in MEDIA if m != "redis_hash"] + HEADER_MODES)
 def test_every_medium_expires_a_conditional_write_like_a_plain_one(
     medium: str, request: pytest.FixtureRequest
 ) -> None:
@@ -308,7 +257,7 @@ def test_every_medium_expires_a_conditional_write_like_a_plain_one(
     A hash collection expires as a whole and cannot take a TTL policy, so it
     is left out, as everywhere else.
     """
-    store = _medium(medium, request, _TTL)
+    store = make_medium(medium, request, TTL)
     store.set("plain", "v")
     assert store.set_if_absent("conditional", "v") is True
     plain, conditional = store.stat("plain"), store.stat("conditional")
@@ -319,12 +268,12 @@ def test_every_medium_expires_a_conditional_write_like_a_plain_one(
     assert abs((conditional.expires_at - plain.expires_at).total_seconds()) < 5
 
 
-@pytest.mark.parametrize("medium", [m for m in _MEDIA if m != "redis_hash"] + _HEADER_MODES)
+@pytest.mark.parametrize("medium", [m for m in MEDIA if m != "redis_hash"] + HEADER_MODES)
 def test_every_medium_with_a_write_clock_keeps_it_on_a_conditional_write(
     medium: str, request: pytest.FixtureRequest
 ) -> None:
     """A copied value keeps its remaining life only if the clock survives."""
-    store = _medium(medium, request, _TTL)
+    store = make_medium(medium, request, TTL)
     if not store.supports_write_clock:
         pytest.skip(f"{medium} has no write clock in this mode")
     clock = datetime.now(UTC) - timedelta(minutes=30)
@@ -339,14 +288,14 @@ def test_every_medium_with_a_write_clock_keeps_it_on_a_conditional_write(
     assert drift < 1, "the clock was dropped"
 
 
-@pytest.mark.parametrize("medium", [m for m in _MEDIA if m != "redis_hash"] + _HEADER_MODES)
+@pytest.mark.parametrize("medium", [m for m in MEDIA if m != "redis_hash"] + HEADER_MODES)
 def test_every_medium_applies_a_per_write_ttl_to_a_conditional_write(
     medium: str, request: pytest.FixtureRequest
 ) -> None:
     """Header modes write their own expiry only for a per-write ``ttl=``."""
     from kvtsjl.exceptions import KvStoreTtlUnsupported
 
-    store = _medium(medium, request, _TTL)
+    store = make_medium(medium, request, TTL)
     longer = TtlPolicy(ttl_duration=timedelta(hours=5))
     try:
         store.set("plain", "v", ttl=longer)
@@ -384,15 +333,15 @@ def test_s3_asks_again_while_another_conditional_put_is_in_flight() -> None:
                 raise answer
 
     lost = Conflicted([error("ConditionalRequestConflict", 409), error("PreconditionFailed", 412)])
-    assert S3BlobDriver(lost, "b").write_if_absent("k", b"v") is False  # type: ignore[arg-type]
+    assert S3BlobDriver(lost, "b").write_if_version("k", b"v", None) is False  # type: ignore[arg-type]
     assert lost.calls == 2
 
     won = Conflicted([error("ConditionalRequestConflict", 409), None])
-    assert S3BlobDriver(won, "b").write_if_absent("k", b"v") is True  # type: ignore[arg-type]
+    assert S3BlobDriver(won, "b").write_if_version("k", b"v", None) is True  # type: ignore[arg-type]
 
     stuck = Conflicted([error("ConditionalRequestConflict", 409)] * 3)
     with pytest.raises(ClientError, match="ConditionalRequestConflict"):
-        S3BlobDriver(stuck, "b").write_if_absent("k", b"v")  # type: ignore[arg-type]
+        S3BlobDriver(stuck, "b").write_if_version("k", b"v", None)  # type: ignore[arg-type]
     assert stuck.calls == 3, "gave up before the attempts ran out"
 
 

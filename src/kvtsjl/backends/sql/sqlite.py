@@ -84,35 +84,6 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     def supports_insert_if_absent(self) -> bool:
         return True
 
-    def insert_rows_if_absent(
-        self,
-        *,
-        table: str,
-        key_fields: Sequence[str],
-        write_columns: Sequence[str],
-        rows: Sequence[SqlDbRow],
-    ) -> int:
-        if not rows:
-            return 0
-        missing = [f for f in key_fields if f not in write_columns]
-        if missing:
-            raise ValueError(f"key_fields missing from write_columns: {missing}")
-        self._ensure_write_txn()
-        t = _quote_ident(table)
-        cols = ", ".join(_quote_ident(c) for c in write_columns)
-        placeholders = ", ".join("?" for _ in write_columns)
-        conflict = ", ".join(_quote_ident(f) for f in key_fields)
-        sql = (
-            f"INSERT INTO {t} ({cols}) VALUES ({placeholders}) "
-            f"ON CONFLICT({conflict}) DO NOTHING"
-        )
-        written = 0
-        for row in rows:
-            cur = self._conn.execute(sql, [row.get(c) for c in write_columns])
-            written += cur.rowcount
-        self._after_write()
-        return written
-
     def defers_commit(self) -> bool:
         return not self._autocommit
 
@@ -284,6 +255,84 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             params = [key[f] for f in key_fields]
             cur = self._conn.execute(f"DELETE FROM {t} WHERE {preds}", params)
             deleted += int(cur.rowcount)
+        self._after_write()
+        return deleted
+
+    def supports_compare_and_write(self) -> bool:
+        return True
+
+    def _matches(self, key_fields: Sequence[str], expected: SqlDbRow) -> tuple[str, list[Any]]:
+        """``WHERE`` for the key and every expected column, ``NULL`` equal to ``NULL``."""
+        compared = [c for c in expected if c not in key_fields]
+        preds = [f"{_quote_ident(f)}=?" for f in key_fields] + [
+            f"{_quote_ident(c)} IS ?" for c in compared
+        ]
+        return " AND ".join(preds), [expected[f] for f in key_fields] + [expected[c] for c in compared]
+
+    def insert_each_if_absent(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> list[bool]:
+        if not rows:
+            return []
+        missing = [f for f in key_fields if f not in write_columns]
+        if missing:
+            raise ValueError(f"key_fields missing from write_columns: {missing}")
+        self._ensure_write_txn()
+        cols = ", ".join(_quote_ident(c) for c in write_columns)
+        placeholders = ", ".join("?" for _ in write_columns)
+        conflict = ", ".join(_quote_ident(f) for f in key_fields)
+        sql = (
+            f"INSERT INTO {_quote_ident(table)} ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT({conflict}) DO NOTHING"
+        )
+        inserted = [
+            self._conn.execute(sql, [row.get(c) for c in write_columns]).rowcount > 0
+            for row in rows
+        ]
+        self._after_write()
+        return inserted
+
+    def replace_each_if(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        expected: Sequence[SqlDbRow],
+        rows: Sequence[SqlDbRow],
+    ) -> list[bool]:
+        if not rows:
+            return []
+        self._ensure_write_txn()
+        set_cols = [c for c in write_columns if c not in key_fields]
+        assigns = ", ".join(f"{_quote_ident(c)}=?" for c in set_cols)
+        replaced = []
+        for want, row in zip(expected, rows, strict=True):
+            where, params = self._matches(key_fields, want)
+            cur = self._conn.execute(
+                f"UPDATE {_quote_ident(table)} SET {assigns} WHERE {where}",
+                [row.get(c) for c in set_cols] + params,
+            )
+            replaced.append(cur.rowcount > 0)
+        self._after_write()
+        return replaced
+
+    def delete_each_if(
+        self, *, table: str, key_fields: Sequence[str], expected: Sequence[SqlDbRow]
+    ) -> list[bool]:
+        if not expected:
+            return []
+        self._ensure_write_txn()
+        deleted = []
+        for want in expected:
+            where, params = self._matches(key_fields, want)
+            cur = self._conn.execute(f"DELETE FROM {_quote_ident(table)} WHERE {where}", params)
+            deleted.append(cur.rowcount > 0)
         self._after_write()
         return deleted
 

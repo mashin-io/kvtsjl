@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Self, cast
 
 from kvtsjl.bind.namespace import CollectionBinding
+from kvtsjl.keymap import ConditionalWrite, Versioned
 from kvtsjl.keymap_algebra.topology import MissingPage
 from kvtsjl.scope import Scope
 from kvtsjl.store.backend import KvBackend
@@ -195,16 +196,6 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        return self._backend.set_if_absent(key, value, ttl=ttl, created_at=created_at)
-
     @property
     def creates_entries(self) -> bool:
         return self._backend.creates_entries
@@ -218,6 +209,14 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
         """A leaf has no fallback, so it lacks nothing a read through it finds."""
         return iter(())
+
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        return self._backend.batch_read_versioned(keys)
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        return self._backend.batch_write_if_unchanged(writes, ttl=ttl)
 
     @property
     def writes_are_deferred(self) -> bool:

@@ -7,9 +7,12 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import io
+import itertools
 from types import TracebackType
 
-from google.api_core.exceptions import PreconditionFailed
+from google.api_core.exceptions import NotFound, PreconditionFailed
+
+_generations = itertools.count(1)
 
 
 @dataclass
@@ -18,6 +21,17 @@ class _StoredObject:
     custom_time: datetime | None
     updated: datetime
     time_created: datetime
+    generation: int = field(default_factory=lambda: next(_generations))
+
+
+def _require_generation(store: dict[str, _StoredObject], name: str, wanted: int | None) -> None:
+    """The service's ``ifGenerationMatch``: 0 means absent, else the generation held."""
+    if wanted is None:
+        return
+    stored = store.get(name)
+    held = stored.generation if stored is not None else 0
+    if held != wanted:
+        raise PreconditionFailed(f"{name}: generation {held}, not {wanted}")
 
 
 @dataclass
@@ -28,6 +42,7 @@ class FakeGcsBlob:
     updated: datetime | None = None
     time_created: datetime | None = None
     etag: str | None = None
+    generation: int | None = None
 
     @property
     def size(self) -> int | None:
@@ -69,8 +84,7 @@ class FakeGcsBlob:
     ) -> None:
         # Generation 0 is the one no existing object has: the precondition
         # holds only while the name is free, else the service answers 412.
-        if if_generation_match == 0 and self.name in self._store:
-            raise PreconditionFailed(f"object already exists: {self.name}")
+        _require_generation(self._store, self.name, if_generation_match)
         body = data if isinstance(data, bytes) else data.encode("utf-8")
         now = datetime.now(timezone.utc)
         prev = self._store.get(self.name)
@@ -123,9 +137,13 @@ class FakeGcsBucket:
             custom_time=stored.custom_time,
             updated=stored.updated,
             time_created=stored.time_created,
+            generation=stored.generation,
         )
 
-    def delete_blob(self, blob_name: str) -> None:
+    def delete_blob(self, blob_name: str, *, if_generation_match: int | None = None) -> None:
+        if if_generation_match is not None and blob_name not in self._objects:
+            raise NotFound(blob_name)
+        _require_generation(self._objects, blob_name, if_generation_match)
         self._objects.pop(blob_name, None)
 
     def list_blobs(self, *, prefix: str | None = None) -> Iterator[FakeGcsBlob]:

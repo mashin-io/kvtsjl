@@ -24,6 +24,7 @@ from kvtsjl.bind import (
     NativeStrCollectionBinder,
 )
 from kvtsjl.exceptions import KvStoreScanUnsupported, KvStoreTtlUnsupported
+from kvtsjl.keymap import ConditionalWrite, Put, Versioned
 from kvtsjl.scope import Scope
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
@@ -39,7 +40,7 @@ from kvtsjl.store.schema.ttl import (
 if TYPE_CHECKING:
     # Prefer redis.client: under backends' reportUnknownMemberType=none,
     # ``from redis import Redis`` resolves to the module, not the client class.
-    from redis.client import Redis
+    from redis.client import Pipeline, Redis
 
 RedisWire = str | bytes
 # Matches redis-py ``EncodableT`` for ``hset(..., mapping=)`` (Mapping is invariant).
@@ -215,39 +216,137 @@ class RedisKvBackend[K, V, KBLOB, VBLOB, COLL](KvBackend[K, V, KBLOB, VBLOB, COL
         else:
             self._client.set(pk, raw, ex=ttl_secs)
 
-    def set_if_absent(
-        self,
-        key: K,
-        value: V,
-        *,
-        ttl: TtlPolicy | None = None,
-        created_at: datetime | None = None,
-    ) -> bool:
-        """``SET NX`` — or ``HSETNX`` for a hash collection — in one command.
+    def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        """One ``MGET`` (``HMGET``) per batch; the stored bytes are the version.
 
-        The expiry rides on the same ``SET``, so a key never exists without
-        it. A hash collection expires as a whole, as ``set`` already does.
+        Redis removes expired keys itself, so there is never an expired entry
+        to read.
         """
-        pk = self._pk(key)
-        raw = self._serialize_value(value)
+        out: dict[K, Versioned[V]] = {}
+        for chunk in chunk_sequence(list(dict.fromkeys(keys)), self.batch_size):
+            for key, raw in zip(chunk, self._read_raw(self._client, chunk), strict=True):
+                out[key] = (
+                    Versioned.absent()
+                    if raw is None
+                    else Versioned(self._deserialize_value(raw), raw)
+                )
+        return out
+
+    def _read_raw(self, client: Redis | Pipeline, keys: Sequence[K]) -> list[RedisWire | None]:
+        physical = [self._pk(k) for k in keys]
+        if self._use_hash:
+            return client.hmget(self._collection_key(), physical)
+        return client.mget(physical)
+
+    def batch_write_if_unchanged(
+        self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
+    ) -> set[K]:
+        """Per batch, inserts as one pipeline of ``SET NX``; the rest as one ``WATCH`` … ``EXEC``.
+
+        Against nothing stored, ``SET NX`` — or ``HSETNX`` for a hash
+        collection — the expiry riding on the same ``SET``. Against a version,
+        the keys (or the whole hash) are watched, compared with the bytes
+        seen, and those unchanged replaced or removed in one ``MULTI`` that
+        Redis discards if anything touched them since the watch — so then
+        none of them was written.
+        """
         require_explicit_ttl_supported(
             ttl, allowed=not self._use_hash, backend="RedisKvStore.hash_collection"
         )
-        require_write_clock_supported(
-            created_at,
-            allowed=self.supports_write_clock,
-            backend="RedisKvStore",
-        )
+        for w in writes.values():
+            require_write_clock_supported(
+                w.created_at, allowed=self.supports_write_clock, backend="RedisKvStore"
+            )
         ttl_secs = self.resolve_ttl_seconds(ttl)
+        inserts = {
+            k: (w.change.value, w.created_at)
+            for k, w in writes.items()
+            if w.seen.version is None and isinstance(w.change, Put)
+        }
+        against = {k: w for k, w in writes.items() if w.seen.version is not None}
+        written: set[K] = set()
+        for chunk in chunk_sequence(list(inserts), self.batch_size):
+            written |= self._insert_if_absent({k: inserts[k] for k in chunk}, ttl_secs)
+        for chunk in chunk_sequence(list(against), self.batch_size):
+            written |= self._swap_if_unchanged({k: against[k] for k in chunk}, ttl_secs)
+        return written
+
+    def _insert_if_absent(
+        self, inserts: Mapping[K, tuple[V, datetime | None]], ttl_secs: int | None
+    ) -> set[K]:
+        if not inserts:
+            return set()
+        keys = list(inserts)
+        pipe = self._client.pipeline(transaction=False)
+        for k in keys:
+            value, created_at = inserts[k]
+            pk, raw = self._pk(k), self._serialize_value(value)
+            if self._use_hash:
+                pipe.hsetnx(self._collection_key(), pk, raw)
+            elif created_at is not None and ttl_secs is not None:
+                pipe.set(pk, raw, nx=True, exat=int(_clock_base(created_at) + ttl_secs))
+            else:
+                pipe.set(pk, raw, nx=True, ex=ttl_secs)
+        written = {k for k, wrote in zip(keys, pipe.execute(), strict=True) if wrote}
+        if self._use_hash and written and ttl_secs is not None:
+            self._client.expire(self._collection_key(), ttl_secs)
+        return written
+
+    def _swap_if_unchanged(
+        self, against: Mapping[K, ConditionalWrite[V]], ttl_secs: int | None
+    ) -> set[K]:
+        if not against:
+            return set()
+        from redis.exceptions import WatchError
+
+        keys = list(against)
+        watched = [self._collection_key()] if self._use_hash else [self._pk(k) for k in keys]
+        with self._client.pipeline() as pipe:
+            try:
+                pipe.watch(*watched)
+                current = self._read_raw(pipe, keys)
+                unchanged = [
+                    k for k, raw in zip(keys, current, strict=True) if raw == against[k].seen.version
+                ]
+                if not unchanged:
+                    return set()
+                pipe.multi()
+                for k in unchanged:
+                    w = against[k]
+                    raw = (
+                        self._serialize_value(w.change.value)
+                        if isinstance(w.change, Put)
+                        else None
+                    )
+                    self._queue_write(pipe, self._pk(k), raw, ttl_secs, w.created_at)
+                pipe.execute()
+            except WatchError:
+                return set()
+        return set(unchanged)
+
+    def _queue_write(
+        self,
+        pipe: Pipeline,
+        pk: RedisWire,
+        raw: RedisWire | None,
+        ttl_secs: int | None,
+        created_at: datetime | None,
+    ) -> None:
+        """The replace or removal, queued inside the ``MULTI``."""
         if self._use_hash:
-            wrote = bool(self._client.hsetnx(self._collection_key(), pk, raw))
-            if wrote and ttl_secs is not None:
-                self._client.expire(self._collection_key(), ttl_secs)
-            return wrote
-        if created_at is not None and ttl_secs is not None:
-            expire_at = int(_clock_base(created_at) + ttl_secs)
-            return bool(self._client.set(pk, raw, nx=True, exat=expire_at))
-        return bool(self._client.set(pk, raw, nx=True, ex=ttl_secs))
+            if raw is None:
+                pipe.hdel(self._collection_key(), pk)
+            else:
+                pipe.hset(self._collection_key(), pk, raw)
+                if ttl_secs is not None:
+                    pipe.expire(self._collection_key(), ttl_secs)
+            return
+        if raw is None:
+            pipe.delete(pk)
+        elif created_at is not None and ttl_secs is not None:
+            pipe.set(pk, raw, exat=int(_clock_base(created_at) + ttl_secs))
+        else:
+            pipe.set(pk, raw, ex=ttl_secs)
 
     def delete(self, key: K) -> bool:
         pk = self._pk(key)
