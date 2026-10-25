@@ -631,7 +631,11 @@ def apply_cascade[K, V](
     limit: int | None = None,
     project: Projection = Projection.KEYS,
 ) -> Iterator[ScanRow[K, V]]:
-    """Client-side cascade: KEY → STAT → VALUE (batch_get survivors) → refine → limit."""
+    """Client-side cascade: KEY → STAT → VALUE → refine → limit.
+
+    A value predicate reads the value a row carries; only rows the scan
+    brought without one are read, a page at a time, with ``batch_get``.
+    """
     key_p, stat_p, value_p = partition_by_needs(residual)
     yielded = 0
     pending_keys: list[K] = []
@@ -668,7 +672,7 @@ def apply_cascade[K, V](
             continue
         if not _all_pass(stat_p, row):
             continue
-        if value_p:
+        if value_p and row.value is None:
             if store is None:
                 raise KvStoreScanUnsupported(
                     "VALUE residual requires a store for batch_get cascade"
@@ -680,6 +684,14 @@ def apply_cascade[K, V](
                 if limit is not None and yielded >= limit:
                     break
             continue
+        if value_p:
+            # The scan brought the value: filter on it, after the rows still
+            # waiting for theirs, so the order holds.
+            yield from flush()
+            if limit is not None and yielded >= limit:
+                break
+            if not _all_pass(value_p, row):
+                continue
         if refine is not None and not refine(row):
             continue
         out = _project_row(row, project)

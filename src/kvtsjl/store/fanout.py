@@ -11,7 +11,7 @@ inheritance graph so a missing method is a type error, not a silent mismatch.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, Self
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
@@ -20,6 +20,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, ScannableMixin, ScopedMixin
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.scan import (
+    AlwaysTrue,
     Needs,
     Projection,
     ScanOrder,
@@ -174,6 +175,46 @@ def needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
     if residual.needs() & Needs.VALUE:
         return True
     return False
+
+
+def scan_values_through[K, V, U](
+    view: ReadableKeyMap[K, U],
+    src: ScannableMixin[K, V],
+    spec: ScanSpec[K],
+    forward: Callable[[V], U],
+) -> Iterator[ScanRow[K, U]]:
+    """A view of ``src`` with its values mapped: ``src``'s rows, in the order asked.
+
+    What concerns keys travels to ``src`` — key predicates, the order, the
+    page size, the cursor — and ``src`` refuses an order it cannot give;
+    ``order_by`` names ``src``'s own columns. What reads a value runs on the
+    view's values. ``limit`` travels only when nothing is left to filter:
+    pushed under a filter, it would count rows the filter then drops.
+    """
+    key_where, residual = split_key_predicates(spec.where)
+    unfiltered = isinstance(residual, AlwaysTrue) and spec.refine is None
+    down = ScanSpec[K](
+        where=key_where,
+        project=Projection.ENTRIES if needs_values(spec, residual) else spec.project,
+        order=spec.order,
+        order_by=spec.order_by,
+        limit=spec.limit if unfiltered else None,
+        page_size=spec.page_size,
+        cursor=spec.cursor,
+        on_unsupported=spec.on_unsupported,
+    )
+    rows = (
+        ScanRow(key=r.key, value=None if r.value is None else forward(r.value), stat=r.stat)
+        for r in src.scan_rows(down)
+    )
+    yield from apply_cascade(
+        rows,
+        residual=residual,
+        store=view,
+        refine=spec.refine,
+        limit=spec.limit,
+        project=spec.project,
+    )
 
 
 def require_unordered[K](spec: ScanSpec[K], op: str) -> None:
