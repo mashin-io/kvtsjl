@@ -38,7 +38,10 @@ def _table(conn: sqlite3.Connection) -> None:
 
 
 def _view(conn: sqlite3.Connection, column: str) -> Any:
-    """A view owning one value column of the shared ``turn`` table."""
+    """A view owning one value column of the shared ``turn`` table.
+
+    The ``core`` view owns the rows: only it creates and deletes them.
+    """
     kvset = KvSet.with_str_keys(
         "turn",
         key_serde=SerDe.identity(str),
@@ -49,7 +52,11 @@ def _view(conn: sqlite3.Connection, column: str) -> Any:
         ),
     )
     sql_kvset = SqlDbKvSet.create(
-        kvset, fields=(SqlDbField(column),), key_field="id", shares_table=True
+        kvset,
+        fields=(SqlDbField(column),),
+        key_field="id",
+        shares_table=True,
+        owns_rows=column == "core",
     )
     return SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(conn))
 
@@ -63,7 +70,11 @@ def test_writing_a_record_with_one_part_empty_keeps_the_row() -> None:
     conn = sqlite3.connect(":memory:")
     _table(conn)
     turns = KeyMap.zip_with(
-        Turn, commit_part="core", core=_view(conn, "core"), digest=_view(conn, "digest")
+        Turn,
+        commit_part="core",
+        after_commit=("digest",),
+        core=_view(conn, "core"),
+        digest=_view(conn, "digest"),
     )
     turns.set("t", Turn(core="C", digest="D"))
     assert _rows(conn) == [("t", "C", "D")]
@@ -80,7 +91,11 @@ def test_clearing_a_part_keeps_columns_no_part_of_the_record_owns() -> None:
     _table(conn)
     impact = _view(conn, "impact")
     turns = KeyMap.zip_with(
-        Turn, commit_part="core", core=_view(conn, "core"), digest=_view(conn, "digest")
+        Turn,
+        commit_part="core",
+        after_commit=("digest",),
+        core=_view(conn, "core"),
+        digest=_view(conn, "digest"),
     )
     turns.set("t", Turn(core="C", digest="D"))
     impact.set("t", "I")
@@ -90,16 +105,22 @@ def test_clearing_a_part_keeps_columns_no_part_of_the_record_owns() -> None:
     assert impact.get("t") == "I", "clearing the digest wiped a sibling view"
 
 
-def test_clearing_a_part_after_another_was_written_keeps_the_row() -> None:
-    """Without a commit part the parts go in field order: core, then the clear."""
+def test_a_record_cannot_be_created_through_a_view_that_only_updates() -> None:
+    """The hazard's second form is refused before any write.
+
+    Without a commit part the parts go in field order, so a view that only
+    updates rows would be written beside the one creating them — and on a
+    new record find no row. A view of a row it does not own belongs after
+    the commit point.
+    """
     conn = sqlite3.connect(":memory:")
     _table(conn)
-    turns = KeyMap.zip_with(Turn, core=_view(conn, "core"), digest=_view(conn, "digest"))
-    turns.set("t", Turn(core="C", digest="D"))
-
-    turns.set("t", Turn(core="C2", digest=None))
-
-    assert _rows(conn) == [("t", "C2", None)], "the clear deleted the core just written"
+    with pytest.raises(ValueError, match="after the commit point"):
+        KeyMap.zip_with(Turn, core=_view(conn, "core"), digest=_view(conn, "digest"))
+    with pytest.raises(ValueError, match="after_commit"):
+        KeyMap.zip_with(
+            Turn, commit_part="core", core=_view(conn, "core"), digest=_view(conn, "digest")
+        )
 
 
 # --- the rule, one fact at a time -------------------------------------------
@@ -171,7 +192,7 @@ def test_unsetting_nulls_exactly_the_view_s_own_columns() -> None:
     """Its read-only column is a sibling's, so it stays."""
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core, impact = _column(conn, "core"), _column(conn, "impact")
+    core, impact = _column(conn, "core", owns_rows=True), _column(conn, "impact")
     digest = _digest_view(conn, reads_core=True)
     core.set("d", "C")
     impact.set("d", "I")
@@ -186,7 +207,7 @@ def test_a_cleared_view_no_longer_holds_the_key() -> None:
     """Otherwise it reads back as a value made of NULLs, not as absent."""
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core, digest = _column(conn, "core"), _digest_view(conn)
+    core, digest = _column(conn, "core", owns_rows=True), _digest_view(conn)
     core.set("d", "C")
     digest.set("d", Digest("T", "S"))
     assert digest.exists("d") is True, "a view holding its columns reported absent"
@@ -208,7 +229,7 @@ def test_an_ordered_scan_with_a_limit_skips_cleared_rows_in_sql() -> None:
 
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core, digest = _column(conn, "core"), _digest_view(conn, reads_core=True)
+    core, digest = _column(conn, "core", owns_rows=True), _digest_view(conn, reads_core=True)
     for key, order in (("a", "1"), ("b", "2"), ("c", "3")):
         core.set(key, order)
         digest.set(key, Digest(f"t{key}", None))
@@ -222,7 +243,7 @@ def test_a_view_with_no_columns_of_its_own_refuses_to_clear() -> None:
     """Its only way to clear would be deleting a row its siblings share."""
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core = _column(conn, "core")
+    core = _column(conn, "core", owns_rows=True)
     reader = SqlDbKvStore(
         SqlDbKvSet.create(
             core.kvset,
@@ -246,7 +267,7 @@ def test_an_adapter_that_cannot_clear_columns_refuses_rather_than_deletes() -> N
 
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core = _column(conn, "core")
+    core = _column(conn, "core", owns_rows=True)
     digest = _digest_view(conn)
     core.set("d", "C")
     digest.set("d", Digest("T", "S"))
@@ -260,7 +281,7 @@ def test_an_adapter_that_cannot_clear_columns_refuses_rather_than_deletes() -> N
 def test_a_view_that_owns_its_table_unsets_by_deleting() -> None:
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    kvset = _column(conn, "core").kvset
+    kvset = _column(conn, "core", owns_rows=True).kvset
     owner = SqlDbKvStore(
         SqlDbKvSet.create(kvset, fields=(SqlDbField("core"),), key_field="id"),
         adapter=SqliteSqlDbClientAdapter(conn),
@@ -280,6 +301,7 @@ def _docs(conn: sqlite3.Connection, **kw: Any) -> Any:
     return KeyMap.zip_with(
         Doc,
         commit_part="core",
+        after_commit=("digest",),
         core=_column(conn, "core", owns_rows=True),
         digest=_digest_view(conn),
         **kw,
@@ -343,7 +365,7 @@ def test_a_wrapped_view_is_unset_through_its_wrapper() -> None:
 
     impact = _column(conn, "impact")
     digest = _digest_view(conn).indexed(SpyIndex())
-    docs = KeyMap.zip_with(Doc, commit_part="core", core=_column(conn, "core"), digest=digest)
+    docs = KeyMap.zip_with(Doc, commit_part="core", after_commit=("digest",), core=_column(conn, "core", owns_rows=True), digest=digest)
     docs.set("d", Doc("C", Digest("T", "S")))
     impact.set("d", "I")
 
@@ -357,7 +379,7 @@ def test_a_wrapped_view_is_unset_through_its_wrapper() -> None:
     assert mapped.unset("d") is True
     assert _doc(conn, "d")["impact"] == "I", "the value view deleted the row"
     keyed = _digest_view(conn).imap_keys(lambda k: f"k:{k}", lambda sk: sk[2:])
-    core = _column(conn, "core")
+    core = _column(conn, "core", owns_rows=True)
     core.set("k:e", "C")
     keyed.set("e", Digest("T", "S"))
     assert keyed.unset("e") is True
@@ -372,7 +394,7 @@ def test_a_scan_without_keyset_paging_skips_cleared_rows_too() -> None:
 
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
-    core = _column(conn, "core")
+    core = _column(conn, "core", owns_rows=True)
     digest = SqlDbKvStore(_digest_kvset(), adapter=Streaming(conn))
     for key in ("a", "b"):
         core.set(key, "C")
@@ -387,7 +409,7 @@ def test_a_batch_write_unsets_a_wrapped_part_through_its_wrapper() -> None:
     _wide_table(conn)
     impact = _column(conn, "impact")
     mirrored = _digest_view(conn).mirror(_digest_view(conn))
-    docs = KeyMap.zip_with(Doc, commit_part="core", core=_column(conn, "core"), digest=mirrored)
+    docs = KeyMap.zip_with(Doc, commit_part="core", after_commit=("digest",), core=_column(conn, "core", owns_rows=True), digest=mirrored)
     docs.batch_set({"d": Doc("C", Digest("T", "S"))})
     impact.set("d", "I")
 
@@ -427,3 +449,32 @@ def test_an_index_view_refuses_the_same_way_a_table_view_does() -> None:
 
     assert issubclass(KvStoreIndexUnsupported, KvStoreUnsupported)
     assert issubclass(KvStoreIndexUnsupported, KvStoreIndexError)
+
+
+# --- only the owner creates -------------------------------------------------
+
+
+def test_a_composition_of_a_view_that_only_updates_is_such_a_view_too() -> None:
+    """Wrapping a sibling view keeps it usable after the commit point, and only there."""
+    conn = sqlite3.connect(":memory:")
+    _wide_table(conn)
+    indexed_digest = _digest_view(conn).mirror(_digest_view(conn))
+    assert indexed_digest.creates_entries is False
+    assert _digest_view(conn).imap(lambda d: d, lambda d: d).creates_entries is False
+    assert _digest_view(conn).group_by("id").creates_entries is False
+
+    docs = KeyMap.zip_with(
+        Doc,
+        commit_part="core",
+        after_commit=("digest",),
+        core=_column(conn, "core", owns_rows=True),
+        digest=indexed_digest,
+    )
+    docs.set("d", Doc("C", Digest("T", "S")))
+    assert docs.get("d") == Doc("C", Digest("T", "S"))
+    assert docs.creates_entries is True
+
+    with pytest.raises(ValueError, match="after_commit"):
+        KeyMap.zip_with(
+            Doc, commit_part="core", core=_column(conn, "core", owns_rows=True), digest=indexed_digest
+        )

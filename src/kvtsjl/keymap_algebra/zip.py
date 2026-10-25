@@ -136,6 +136,7 @@ class ZipWithKeyMap[K, V](RecordTopologyMixin[K, V], KeyMap[K, V]):
             raise ValueError(f"{commit_part!r} cannot come after itself")
         self._commit_part = commit_part
         self._after_commit = tuple(after_commit)
+        self.topology()  # check the declaration now, not at the first write
 
     def topology(self) -> Topology[K, V]:
         """The commit part is the authority; the rest components or dependents.

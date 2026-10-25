@@ -571,6 +571,18 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
                 n += 1
         return n
 
+    @property
+    def creates_entries(self) -> bool:
+        """Whether a write can create an entry, not only update one another made.
+
+        ``True`` for almost every map. A view of an entry it shares but does
+        not own — a sibling column group of a table row, a patch view of an
+        index entry — only writes into entries their owner created, so it can
+        play no part a record is created through: a composition refuses it as
+        an authority or a component, and it belongs after the commit point.
+        """
+        return True
+
     def unset(self, key: K) -> bool:
         """Remove this map's value for ``key``, and nothing it shares with another.
 

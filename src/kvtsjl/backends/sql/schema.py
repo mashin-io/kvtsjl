@@ -130,6 +130,11 @@ class SqlDbKvSet[K, V]:
     own columns, as ``unset`` does. Deleting a record through a zip whose
     commit part owns rows therefore removes the row, and deleting from a
     sibling view never takes the record with it.
+
+    Only the owner creates rows, too. Every other view updates rows that
+    exist and passes over a key with no row, so it never makes a row for a
+    record that does not exist; a composition places it after its commit
+    point (``creates_entries`` is ``False``).
     """
 
     def __post_init__(self) -> None:

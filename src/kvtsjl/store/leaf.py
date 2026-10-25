@@ -205,6 +205,10 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     ) -> bool:
         return self._backend.set_if_absent(key, value, ttl=ttl, created_at=created_at)
 
+    @property
+    def creates_entries(self) -> bool:
+        return self._backend.creates_entries
+
     def unset(self, key: K) -> bool:
         return self._backend.unset(key)
 

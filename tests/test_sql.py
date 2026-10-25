@@ -1145,7 +1145,7 @@ def test_autocommit_is_readable_on_the_reference_adapter() -> None:
     assert SqliteSqlDbClientAdapter(conn, autocommit=False).autocommit is False
 
 
-def _shared_view(field: str, *, shares_table: bool) -> Any:
+def _shared_view(field: str, *, shares_table: bool, owns_rows: bool = False) -> Any:
     from kvtsjl.backends.sql.schema import SqlDbField, SqlDbKvSet
 
     return SqlDbKvSet.create(
@@ -1153,6 +1153,7 @@ def _shared_view(field: str, *, shares_table: bool) -> Any:
         fields=(SqlDbField(field),),
         key_field="id",
         shares_table=shares_table,
+        owns_rows=owns_rows,
     )
 
 
@@ -1170,7 +1171,8 @@ def test_shares_table_lets_a_non_owning_view_update_a_not_null_row() -> None:
     conn = sqlite3.connect(":memory:")
     _shared_table(conn, not_null=True)
     owner = SqlDbKvStore(
-        _shared_view("a", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+        _shared_view("a", shares_table=True, owns_rows=True),
+        adapter=SqliteSqlDbClientAdapter(conn),
     )
     other = SqlDbKvStore(
         _shared_view("b", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
@@ -1183,23 +1185,41 @@ def test_shares_table_lets_a_non_owning_view_update_a_not_null_row() -> None:
     assert len(conn.execute('SELECT id FROM "shared_1"').fetchall()) == 1
 
 
-def test_shares_table_still_refuses_creation_by_a_non_owning_view() -> None:
-    """Update-first must not quietly start creating hollow rows."""
+def test_a_view_that_does_not_own_rows_never_creates_one() -> None:
+    """A row for a record its owner never made would be a ghost record.
+
+    The write is passed over, as a patch index view's is: there is no entry
+    to write into, and the view owns none to create.
+    """
     conn = sqlite3.connect(":memory:")
-    _shared_table(conn, not_null=True)
+    _shared_table(conn, not_null=False)
     other = SqlDbKvStore(
         _shared_view("b", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
     )
-    with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
-        other.set("missing", "from-B")
+    other.set("missing", "from-B")
+    other.batch_set({"also-missing": "from-B"})
     assert conn.execute('SELECT id FROM "shared_1"').fetchall() == []
+    assert other.creates_entries is False
+
+
+def test_a_view_that_does_not_own_rows_refuses_an_adapter_that_cannot_update() -> None:
+    class NoUpdate(SqliteSqlDbClientAdapter):
+        def supports_update_rows(self) -> bool:
+            return False
+
+    conn = sqlite3.connect(":memory:")
+    _shared_table(conn, not_null=False)
+    view = SqlDbKvStore(_shared_view("b", shares_table=True), adapter=NoUpdate(conn))
+    with pytest.raises(KvStoreError, match="update_rows"):
+        view.set("k", "v")
 
 
 def test_shares_table_batch_set_updates_and_inserts_in_one_call() -> None:
     conn = sqlite3.connect(":memory:")
     _shared_table(conn, not_null=False)
     view = SqlDbKvStore(
-        _shared_view("a", shares_table=True), adapter=SqliteSqlDbClientAdapter(conn)
+        _shared_view("a", shares_table=True, owns_rows=True),
+        adapter=SqliteSqlDbClientAdapter(conn),
     )
     view.set("existing", "old")
     view.batch_set({"existing": "new", "fresh": "made"})
@@ -1215,7 +1235,9 @@ def test_shares_table_refuses_an_adapter_that_cannot_update_first() -> None:
 
     conn = sqlite3.connect(":memory:")
     _shared_table(conn, not_null=False)
-    view = SqlDbKvStore(_shared_view("a", shares_table=True), adapter=NoUpdateFirst(conn))
+    view = SqlDbKvStore(
+        _shared_view("a", shares_table=True, owns_rows=True), adapter=NoUpdateFirst(conn)
+    )
     with pytest.raises(KvStoreError, match="upsert_rows_update_first"):
         view.set("k", "v")
 

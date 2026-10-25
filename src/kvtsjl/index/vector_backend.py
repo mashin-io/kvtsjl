@@ -26,6 +26,11 @@ class VectorIndexBackend[Q, K, V, D, ID, META, COLL](
         """Whether this index isolates entries by the scope it is bound to."""
         return True
 
+    @property
+    def creates_entries(self) -> bool:
+        """A patch view writes only into entries the owning view created."""
+        return not self.is_patch_view()
+
     def is_patch_view(self) -> bool:
         """Whether this view owns part of an entry rather than the whole.
 

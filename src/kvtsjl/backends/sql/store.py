@@ -543,9 +543,28 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def writes_are_deferred(self) -> bool:
         return self._adapter.defers_commit()
 
-    def _write_rows(self, rows: Sequence[SqlDbRow]) -> None:
-        """One write path, choosing the shape the kvset's sharing demands."""
+    def _write_rows(self, rows: Sequence[SqlDbRow]) -> int:
+        """One write path, choosing the shape the kvset's sharing demands.
+
+        A view that does not own its shared table's rows only updates rows
+        that exist: creating one would make a record its owner never made.
+        Its write to a missing record is passed over, as a patch index view's
+        is. Returns how many rows were written.
+        """
         sk = self._sql_kvset
+        if sk.shares_table and not sk.owns_rows:
+            if not self._adapter.supports_update_rows():
+                raise KvStoreUnsupported(
+                    f"{type(self._adapter).__name__} does not support update_rows, "
+                    "which a view of a shared table that does not own its rows "
+                    "requires"
+                )
+            return self._adapter.update_rows(
+                table=self._table,
+                key_fields=sk.key_fields,
+                write_columns=sk.write_columns(),
+                rows=rows,
+            )
         if not sk.shares_table:
             self._adapter.upsert_rows(
                 table=self._table,
@@ -553,7 +572,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 write_columns=sk.write_columns(),
                 rows=rows,
             )
-            return
+            return len(rows)
         if not self._adapter.supports_update_first():
             # Falling back to upsert is the write that cannot succeed on a
             # shared table, so name the adapter instead of failing later with
@@ -568,6 +587,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             write_columns=sk.write_columns(),
             rows=rows,
         )
+        return len(rows)
 
     def set_if_absent(
         self,
@@ -600,6 +620,10 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
 
     def delete(self, key: K) -> bool:
         return self.batch_delete([key]) > 0
+
+    @property
+    def creates_entries(self) -> bool:
+        return self._sql_kvset.owns_rows or not self._sql_kvset.shares_table
 
     def unset(self, key: K) -> bool:
         """Remove this view's value for ``key``, and nothing its siblings hold.

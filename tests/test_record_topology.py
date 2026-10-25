@@ -584,6 +584,73 @@ def test_a_dependent_durable_at_once_waits_for_the_commit() -> None:
     assert syncs.pending == 0
 
 
+def test_a_removal_after_a_deferred_commit_point_waits_for_the_commit() -> None:
+    """A component deleted before a rollback would leave the record pointing at nothing."""
+    log: list[str] = []
+    syncs = _now()
+    row = _Spy(log, "row", Role.AUTHORITY, deferred=True, held={"k": "r"})
+    body = _Spy(log, "body", Role.COMPONENT, held={"k": "b"})
+    same_txn = _Spy(log, "same_txn", Role.COMPONENT, deferred=True, held={"k": "s"})
+    topology = Topology(parts=(row, body, same_txn), assemble=lambda held: held[row])
+
+    assert topology.delete("k", syncs) is True
+    assert log == ["delete:row", "delete:same_txn"], "a removal outran the caller's commit"
+    assert syncs.pending == 1
+
+    syncs.flush()
+    assert log[-1] == "delete:body"
+
+
+def test_a_part_left_behind_by_a_delete_reports_the_record_gone() -> None:
+    """The authority went first, so the record is removed; the part is stale."""
+    log: list[str] = []
+    row = _Spy(log, "row", Role.AUTHORITY, held={"k": "r"})
+    body = _Spy(log, "body", Role.COMPONENT, fail=True)
+    topology = Topology(parts=(row, body), assemble=lambda held: held[row])
+    with pytest.raises(PartialSyncError) as caught:
+        topology.delete("k", _now())
+    assert caught.value.committed is True
+    assert "k" not in row.held
+
+
+def test_with_no_commit_point_every_part_is_removed_at_once() -> None:
+    log: list[str] = []
+    syncs = _now()
+    a = _Spy(log, "a", Role.COMPONENT, deferred=True, held={"k": "1"})
+    b = _Spy(log, "b", Role.COMPONENT, held={"k": "2"})
+    Topology(parts=(a, b), assemble=lambda held: held[a]).delete("k", syncs)
+    assert log == ["delete:a", "delete:b"]
+    assert syncs.pending == 0
+
+
+def test_a_record_deleted_in_a_rolled_back_transaction_keeps_its_body(
+    sqlite_conn: sqlite3.Connection,
+) -> None:
+    sql_kvset = make_sql_kvset("rows")
+    ensure_sql_table(sqlite_conn, sql_kvset)
+    base = SqlDbKvStore(sql_kvset, adapter=SqliteSqlDbClientAdapter(sqlite_conn))
+    rows = base.rebind(SqliteSqlDbClientAdapter(sqlite_conn, autocommit=False))
+    bodies = _leaf("bodies")
+    records = KeyMap.zip_with(Seal, commit_part="row", row=rows, body=bodies)
+    sqlite_conn.execute("BEGIN IMMEDIATE")
+    records.set("t", Seal(row="R", body="B"))
+    sqlite_conn.commit()
+
+    sqlite_conn.execute("BEGIN IMMEDIATE")
+    records.delete("t")
+    assert bodies.get("t") == "B", "the body went before the commit"
+    sqlite_conn.rollback()
+    records.discard_index_syncs()
+    assert records.get("t") == Seal(row="R", body="B")
+
+    sqlite_conn.execute("BEGIN IMMEDIATE")
+    records.delete("t")
+    sqlite_conn.commit()
+    records.flush_index_syncs()
+    assert records.get("t") is None
+    assert bodies.get("t") is None, "the body outlived its committed delete"
+
+
 # --- garbage collection ---------------------------------------------------
 
 

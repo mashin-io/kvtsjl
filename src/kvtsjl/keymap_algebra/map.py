@@ -81,6 +81,10 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
     def delete(self, key: K) -> bool:
         return self._underlying.delete(key)
 
+    @property
+    def creates_entries(self) -> bool:
+        return self._underlying.creates_entries
+
     def unset(self, key: K) -> bool:
         return self._underlying.unset(key)
 
@@ -130,6 +134,10 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(self._to_store(key))
+
+    @property
+    def creates_entries(self) -> bool:
+        return self._underlying.creates_entries
 
     def unset(self, key: K) -> bool:
         return self._underlying.unset(self._to_store(key))

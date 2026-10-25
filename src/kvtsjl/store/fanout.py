@@ -132,10 +132,18 @@ def iter_union_keys_spec[K](
 
 
 def part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
+    """What the store whose keys are listed is asked: its keys, in the order asked.
+
+    The order — ``order`` or ``order_by`` — travels with the keys, so a view
+    that lists another store's keys returns them in that store's order, and a
+    store that cannot honour it refuses. Dropping it silently returned key
+    order to a caller who asked for something else.
+    """
     return ScanSpec(
         where=key_where,
         project=Projection.KEYS,
         order=spec.order,
+        order_by=spec.order_by,
         page_size=spec.page_size,
         cursor=spec.cursor,
         on_unsupported=spec.on_unsupported,
@@ -169,10 +177,16 @@ def needs_values[K](spec: ScanSpec[K], residual: Any) -> bool:
 
 
 def require_unordered[K](spec: ScanSpec[K], op: str) -> None:
+    """Refuse an order over keys merged from several stores: no one order holds."""
     if spec.order is not ScanOrder.UNORDERED:
         raise KvStoreScanUnsupported(
             f"{op} scan supports ScanOrder.UNORDERED only "
             f"(got ScanOrder.{spec.order.name})"
+        )
+    if spec.order_by:
+        raise KvStoreScanUnsupported(
+            f"{op} scan merges keys from several stores, so no one store's "
+            "columns order it; give the record a commit part to order by"
         )
 
 

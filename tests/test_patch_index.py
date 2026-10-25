@@ -107,6 +107,11 @@ def test_the_owning_view_still_deletes_the_whole_entry() -> None:
     assert owner.search(VectorQuery(embedding=[1.0]), limit=5) == []
 
 
+def test_a_patch_view_creates_no_entries_and_the_owner_does() -> None:
+    assert _patch(owned_fields=["feedback"]).creates_entries is False
+    assert _owner().creates_entries is True
+
+
 def test_a_patch_view_that_declares_nothing_refuses_to_delete() -> None:
     """kvtsjl will not guess which fields are someone else's."""
     owner, patch = _owner(), _patch()

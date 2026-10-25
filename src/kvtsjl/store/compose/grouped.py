@@ -51,6 +51,10 @@ class GroupedKvStore[K, V](KvStore[str, Mapping[K, V]]):
         return self._rows.supports_write_clock
 
     @property
+    def creates_entries(self) -> bool:
+        return self._rows.creates_entries
+
+    @property
     def writes_are_deferred(self) -> bool:
         return self._rows.writes_are_deferred
 

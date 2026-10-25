@@ -269,6 +269,33 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         self._after_write()
         return deleted
 
+    def supports_update_rows(self) -> bool:
+        return True
+
+    def update_rows(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> int:
+        if not rows:
+            return 0
+        self._ensure_write_txn()
+        t = _quote_ident(table)
+        key_set = set(key_fields)
+        set_cols = [c for c in write_columns if c not in key_set]
+        assigns = ", ".join(f"{_quote_ident(c)}=?" for c in set_cols)
+        where = " AND ".join(f"{_quote_ident(f)}=?" for f in key_fields)
+        sql = f"UPDATE {t} SET {assigns} WHERE {where}"
+        matched = 0
+        for row in rows:
+            params = [row.get(c) for c in set_cols] + [row.get(f) for f in key_fields]
+            matched += int(self._conn.execute(sql, params).rowcount)
+        self._after_write()
+        return matched
+
     def supports_clear_columns(self) -> bool:
         return True
 

@@ -135,8 +135,9 @@ Operation         Traversal   Stops            Combines                Side effe
                   assembly    hit              return a record
 ``stat``          lookup      at the first     the hit's metadata      —
                               hit
-``scan``          —           —                the authority's keys,   —
-                                               or the parts' keys
+``scan``          —           at ``limit``     the authority's keys    —
+                                               in the order asked, or
+                                               the parts' keys, each
                                                confirmed by ``get``
 ``missing_keys``  lookup,     never            the authority's own     —
                   over keys                    gaps, then each
@@ -150,7 +151,10 @@ Operation         Traversal   Stops            Combines                Side effe
 ================  ==========  ===============  ======================  ==========
 
 Batch forms take the same traversal, one call per target, and a batch read
-asks each target only for the keys still missing. ``unset`` is ``delete``
+asks each target only for the keys still missing. An ordered or paged scan
+of an assembled record asks its authority for the keys in that order, then
+confirms each record, so a ``limit`` counts records; keys merged from
+several parts have no one order, and asking for one refuses. ``unset`` is ``delete``
 with each target removing only its own part — the same traversal, a
 narrower step. ``delete_where`` removes
 the records a scan selects, along the removal traversal. ``delete`` without
@@ -192,7 +196,10 @@ check each one, against the compositions kvtsjl ships and ones it does not.
    — a table row, an index entry — follows one rule: ``unset`` removes its
    own part, and ``delete`` removes the entry only from the view that owns
    entries (``owns_rows``, an index view with a document); from any other
-   view it removes that view's part too.
+   view it removes that view's part too. Creating is the owner's alone as
+   well: a view that does not own entries writes only into ones that exist
+   (``creates_entries`` is ``False``), so it can only come after the commit
+   point, and a record whose committing parts disagree is refused.
 4. **Existence is a read.** ``exists(k)`` holds exactly when ``get(k)``
    returns a record. For an assembled record the authority is necessary, not
    sufficient: ``assemble`` has the last word.
@@ -223,10 +230,12 @@ check each one, against the compositions kvtsjl ships and ones it does not.
 11. **Budgets do not couple targets.** GC gives every target it collects the
     full budget; targets expire independently, and a shared budget starved the
     later ones. The union may therefore exceed the budget.
-12. **Dependents wait for a deferred commit.** When the caller owns the
-    commit, a dependent durable at once waits for ``flush_index_syncs``, and
-    ``discard_index_syncs`` drops it; one whose writes are deferred too joins
-    the caller's commit and runs at once.
+12. **After-commit work waits for a deferred commit.** When the caller owns
+    the commit, what comes after the commit point — a dependent's write, and
+    every removal after the authority's — waits for ``flush_index_syncs`` if
+    it is durable at once, and ``discard_index_syncs`` drops it; one whose
+    writes are deferred too joins the caller's commit and runs at once. A
+    rollback therefore never leaves a record whose body is already gone.
 13. **Composition is closed.** A composition is a target to its parent. The
     laws hold for the parent whatever the child is, and the tree walk —
     flushing, discarding, counting deferred syncs — reaches every node.
@@ -465,6 +474,11 @@ class Target[K, V, P](ABC):
     def writes_are_deferred(self) -> bool:
         return False
 
+    @property
+    def creates_entries(self) -> bool:
+        """Whether a write here can create the entry, not only update it."""
+        return True
+
     def children(self) -> tuple[object, ...]:
         """What lies beneath this target, for operations over the whole tree."""
         return ()
@@ -556,6 +570,10 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
 
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
         return self.keymap.batch_stat(keys)
+
+    @property
+    def creates_entries(self) -> bool:
+        return self.keymap.creates_entries
 
     def children(self) -> tuple[object, ...]:
         return (self.keymap,)
@@ -715,6 +733,14 @@ class Topology[K, V]:
             raise ValueError("a record needs an authority or components")
         if not authorities and any(t.role is Role.FALLBACK for t in self.targets):
             raise ValueError("a fallback is consulted when the authority misses")
+        committing = self._by_role(Role.COMPONENT, Role.AUTHORITY)
+        uncreating = [t.name for t in committing if not t.creates_entries]
+        if uncreating and len(uncreating) < len(committing):
+            raise ValueError(
+                f"{uncreating} only write into entries another part creates, so "
+                "a new record would be written without them; put them after the "
+                "commit point (a zip's after_commit)"
+            )
         if bool(self.parts) != (self.assemble is not None):
             raise ValueError("parts and assemble go together")
         looked_up = [t.name for t in self.targets if t.lookup not in (None, Lookup.NEVER)]
@@ -759,6 +785,11 @@ class Topology[K, V]:
     def anchor(self) -> Target[K, V, object]:
         """The authority, or the first component; it speaks for the record's medium."""
         return self.authority or self.components[0]
+
+    @property
+    def creates_entries(self) -> bool:
+        """Whether a record can be created here; the committing targets agree."""
+        return all(t.creates_entries for t in self.committing)
 
     @property
     def supports_write_clock(self) -> bool:
@@ -973,8 +1004,9 @@ class Topology[K, V]:
         what: str,
         op: Callable[[Target[K, V, object], K], bool],
     ) -> bool:
-        removed = [op(t, key) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)]
-        self._to_dependents(what, syncs, lambda t: op(t, key))
+        removed = [op(t, key) for t in self._removed_now()]
+        for target in self._removed_after_commit():
+            self._sync_one(target, what, syncs, lambda t=target: op(t, key))
         return removed[0] if self.authority is not None else any(removed)
 
     def _batch_remove(
@@ -993,9 +1025,30 @@ class Topology[K, V]:
         if authority is None:
             for target in self.components:
                 held |= target.batch_exists(unique)
-        counts = [op(t, unique) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)]
-        self._to_dependents(what, syncs, lambda t: op(t, unique), policy=policy)
+        counts = [op(t, unique) for t in self._removed_now()]
+        for target in self._removed_after_commit():
+            self._sync_one(target, what, syncs, lambda t=target: op(t, unique), policy)
         return counts[0] if authority is not None else len(held)
+
+    def _removed_now(self) -> list[Target[K, V, object]]:
+        """The authority alone — or, with no commit point, every component."""
+        authority = self.authority
+        return [authority] if authority is not None else self.components
+
+    def _removed_after_commit(self) -> list[Target[K, V, object]]:
+        """Everything removed after the commit point, in removal order.
+
+        Once the authority is removed the record is gone, so the rest is
+        after-commit work, as a dependent's write is: it joins a deferred
+        commit if its own writes are deferred, waits for the commit if it is
+        durable at once — a component deleted before a rollback would leave
+        the record pointing at nothing — and a failure leaves the record
+        removed and the part stale. With no authority there is no commit
+        point, and every part is removed at once.
+        """
+        if self.authority is None:
+            return self.dependents
+        return [*self.components, *self.dependents]
 
     def gc(
         self,
@@ -1466,6 +1519,11 @@ class RecordTopologyMixin[K, V](KeyMap[K, V], ABC):
 
     def batch_exists(self, keys: Sequence[K]) -> set[K]:
         return self.topology().batch_exists(keys)
+
+    @property
+    def creates_entries(self) -> bool:
+        """A composition of views that only update shared entries is such a view too."""
+        return self.topology().creates_entries
 
     def child_stores(self) -> tuple[object, ...]:
         """Everything directly beneath this composition."""

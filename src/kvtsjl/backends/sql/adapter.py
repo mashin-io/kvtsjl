@@ -72,6 +72,9 @@ class SqlDbClientAdapter(ABC):
     ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
     ``supports_clear_columns``   ``unset`` on a shared-table view, which
     ``clear_columns``            raises rather than deleting the row
+    ``supports_update_rows``     writes through a shared-table view that
+    ``update_rows``              does not own rows, which raise rather
+                                 than create a row
     ``supports_paged_scan``      keyset paging; scans materialise in full
     ``scan_page_by_key_parts``
     ===========================  =========================================
@@ -194,6 +197,26 @@ class SqlDbClientAdapter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement upsert_rows_update_first"
         )
+
+    def supports_update_rows(self) -> bool:
+        """Whether this adapter implements ``update_rows``.
+
+        Needed to write through a view of a shared table that does not own its
+        rows; the store refuses rather than fall back to an insert, which would
+        create a row for a record that does not exist.
+        """
+        return False
+
+    def update_rows(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        write_columns: Sequence[str],
+        rows: Sequence[SqlDbRow],
+    ) -> int:
+        """Update the rows that exist, by key; never insert. Return how many matched."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement update_rows")
 
     def supports_clear_columns(self) -> bool:
         """Whether this adapter implements ``clear_columns``.
