@@ -564,3 +564,18 @@ class KeyMap[K, T](ReadableKeyMap[K, T], ABC):
             if self.delete(key):
                 n += 1
         return n
+
+    def unset(self, key: K) -> bool:
+        """Remove this map's value for ``key``, and nothing it shares with another.
+
+        For a map that owns its entries — almost every one — that is
+        ``delete``. It differs where an entry is shared: a view of a row that
+        other views also write clears only its own part of it. So a
+        composition removing *one part* of a record — a zip writing a ``None``
+        slot — unsets that part, and removing the record deletes.
+        """
+        return self.delete(key)
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        """``unset`` many keys. Return how many held a value."""
+        return sum(1 for key in keys if self.unset(key))

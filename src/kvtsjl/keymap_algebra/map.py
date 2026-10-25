@@ -81,6 +81,12 @@ class IMappedKeyMap[K, T, U](KeyMap[K, U]):
     def delete(self, key: K) -> bool:
         return self._underlying.delete(key)
 
+    def unset(self, key: K) -> bool:
+        return self._underlying.unset(key)
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return self._underlying.batch_unset(keys)
+
 
 class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
     """Caller keys ``K`` mapped to storage keys ``SK`` via ``to_store``."""
@@ -124,6 +130,12 @@ class IMappedKeysKeyMap[K, SK, T](KeyMap[K, T]):
 
     def delete(self, key: K) -> bool:
         return self._underlying.delete(self._to_store(key))
+
+    def unset(self, key: K) -> bool:
+        return self._underlying.unset(self._to_store(key))
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return self._underlying.batch_unset([self._to_store(k) for k in keys])
 
     def require_from_store(self) -> Callable[[SK], K]:
         if self._from_store is None:

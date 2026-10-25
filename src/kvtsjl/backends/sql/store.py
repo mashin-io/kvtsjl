@@ -153,7 +153,21 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
 
     def _presence_columns(self) -> tuple[str, ...]:
         sk = self._sql_kvset
-        return (*sk.key_fields, sk.updated_at_field, sk.expires_at_field)
+        return (*sk.key_fields, sk.updated_at_field, sk.expires_at_field, *self._held_by())
+
+    def _held_by(self) -> tuple[str, ...]:
+        """The columns whose being set means this view holds a row.
+
+        Only on a shared table: there the row is its siblings' too, and the
+        view holds it while one of its own columns is set. A view that owns
+        its table holds every row in it.
+        """
+        sk = self._sql_kvset
+        return sk.own_columns if sk.shares_table else ()
+
+    def _holds(self, row: SqlDbRow) -> bool:
+        held_by = self._held_by()
+        return not held_by or any(row.get(c) is not None for c in held_by)
 
     def _expires_at_column(
         self,
@@ -376,7 +390,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         if row is None:
             return None
         if not self._row_expired(row):
-            return row
+            return row if self._holds(row) else None
         if self._expiry_gc is ExpiryGc.LAZY_DELETE:
             sk = self._sql_kvset
             key_row = {f: row[f] for f in sk.key_fields}
@@ -580,6 +594,39 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             )
             > 0
         )
+
+    def unset(self, key: K) -> bool:
+        """Remove this view's value for ``key``, and nothing its siblings hold.
+
+        A view that owns its table deletes the row. A view of a shared table
+        nulls its own columns and leaves the row; with no columns of its own it
+        refuses, since the only thing left to remove is a row it shares.
+        """
+        return self.batch_unset([key]) > 0
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        sk = self._sql_kvset
+        if not sk.shares_table:
+            return self.batch_delete(keys)
+        if not sk.own_columns:
+            raise KvStoreUnsupported(
+                f"{sk.table_name}: this view writes no columns of its own, so "
+                "clearing it could only delete a row its siblings share"
+            )
+        if not self._adapter.supports_clear_columns():
+            raise KvStoreUnsupported(
+                f"{type(self._adapter).__name__} does not support clear_columns, "
+                "which unsetting a view of a shared table requires"
+            )
+        cleared = 0
+        for chunk in chunk_sequence(list(keys), self.batch_size):
+            cleared += self._adapter.clear_columns(
+                table=self._table,
+                key_fields=sk.key_fields,
+                keys=[self._full_key_row(k, require_scope=True) for k in chunk],
+                columns=sk.own_columns,
+            )
+        return cleared
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
         out: dict[K, V] = {}
@@ -815,6 +862,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                     if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                         expired_keys.append({f: row[f] for f in sk.key_fields})
                     continue
+                if not self._holds(row):
+                    continue
                 decoded = self._decode_leaf_key(row)
                 if decoded is None:
                     continue
@@ -868,6 +917,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             ttl_seconds=self.ttl_seconds(),
             updated_at_field=sk.updated_at_field,
             expires_at_field=sk.expires_at_field,
+            held_columns=self._held_by(),
         )
         for row in self._adapter.scan_ordered(
             table=self._table,
@@ -880,7 +930,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             live=live,
         ):
             # Defence in depth: SQL already excluded these.
-            if self._row_expired(row):
+            if self._row_expired(row) or not self._holds(row):
                 continue
             decoded = self._decode_leaf_key(row)
             if decoded is None:
@@ -926,6 +976,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             if self._row_expired(row):
                 if self._expiry_gc is ExpiryGc.LAZY_DELETE:
                     expired_keys.append({f: row[f] for f in sk.key_fields})
+                continue
+            if not self._holds(row):
                 continue
             decoded = self._decode_leaf_key(row)
             if decoded is None:

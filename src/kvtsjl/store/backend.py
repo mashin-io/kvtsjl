@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from typing import Self
 
@@ -33,6 +33,13 @@ class KvBackend[K, V, KBLOB, VBLOB, COLL](
 
     def key_layout(self) -> KeyLayout:
         return self.kvset.key_layout
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        """A leaf owns its entries, so unsetting is its native bulk delete.
+
+        A backend whose entries are shared overrides ``unset`` and this together.
+        """
+        return self.batch_delete(keys)
 
     @property
     def physical(self) -> KvSet[K, V, KBLOB, VBLOB]:

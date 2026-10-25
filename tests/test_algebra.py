@@ -52,6 +52,7 @@ class _StoreProbe(KvStore[str, str]):
         self.m_batch_get = MagicMock(wraps=underlying.batch_get)
         self.m_batch_set = MagicMock(wraps=underlying.batch_set)
         self.m_batch_delete = MagicMock(wraps=underlying.batch_delete)
+        self.m_batch_unset = MagicMock(wraps=underlying.batch_unset)
 
     @property
     def supports_write_clock(self) -> bool:
@@ -87,6 +88,9 @@ class _StoreProbe(KvStore[str, str]):
 
     def batch_delete(self, keys):  # type: ignore[no-untyped-def]
         return self.m_batch_delete(keys)
+
+    def batch_unset(self, keys):  # type: ignore[no-untyped-def]
+        return self.m_batch_unset(keys)
 
     def scan_entries(self, query):  # type: ignore[no-untyped-def]
         yield from self._u.scan_entries(query)
@@ -289,8 +293,8 @@ def test_zip_with_batch_set_fans_out_once() -> None:
     body.m_batch_set.assert_called_once_with(
         {"a": "b1", "c": "b3"}, ttl=None, created_at=None
     )
-    meta.m_batch_delete.assert_called_once_with(["c"])
-    body.m_batch_delete.assert_called_once_with(["b"])
+    meta.m_batch_unset.assert_called_once_with(["c"])
+    body.m_batch_unset.assert_called_once_with(["b"])
     assert meta.m_set.call_count == 0
     assert body.m_set.call_count == 0
     assert articles.batch_get(["a", "b", "c"]) == {
@@ -342,8 +346,8 @@ def test_zip_tuple_batch_set_fans_out_once() -> None:
     zipped.batch_set({"k1": ("1", None), "k2": (None, "2")})
     a.m_batch_set.assert_called_once_with({"k1": "1"}, ttl=None, created_at=None)
     b.m_batch_set.assert_called_once_with({"k2": "2"}, ttl=None, created_at=None)
-    a.m_batch_delete.assert_called_once_with(["k2"])
-    b.m_batch_delete.assert_called_once_with(["k1"])
+    a.m_batch_unset.assert_called_once_with(["k2"])
+    b.m_batch_unset.assert_called_once_with(["k1"])
     assert zipped.batch_get(["k1", "k2"]) == {
         "k1": ("1", None),
         "k2": (None, "2"),
@@ -374,8 +378,9 @@ def test_zip_keymap_batch_set_fans_out_once() -> None:
         {"a": "m1", "b": "m2"}, ttl=None, created_at=None
     )
     body.batch_set.assert_called_once_with({"a": "b1"}, ttl=None, created_at=None)
-    body.batch_delete.assert_called_once_with(["b"])
-    assert meta.batch_delete.call_count == 0
+    body.batch_unset.assert_called_once_with(["b"])
+    assert meta.batch_unset.call_count == 0
+    assert body.batch_delete.call_count == 0, "a cleared part was deleted"
 
 
 def test_zip_with_batch_get_mixed_presence() -> None:

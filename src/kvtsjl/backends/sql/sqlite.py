@@ -269,6 +269,31 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         self._after_write()
         return deleted
 
+    def supports_clear_columns(self) -> bool:
+        return True
+
+    def clear_columns(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        keys: Sequence[SqlDbRow],
+        columns: Sequence[str],
+    ) -> int:
+        if not keys or not columns:
+            return 0
+        self._ensure_write_txn()
+        t = _quote_ident(table)
+        assigns = ", ".join(f"{_quote_ident(c)}=NULL" for c in columns)
+        held = " OR ".join(f"{_quote_ident(c)} IS NOT NULL" for c in columns)
+        where = " AND ".join(f"{_quote_ident(f)}=?" for f in key_fields)
+        sql = f"UPDATE {t} SET {assigns} WHERE {where} AND ({held})"
+        cleared = 0
+        for key in keys:
+            cleared += int(self._conn.execute(sql, [key[f] for f in key_fields]).rowcount)
+        self._after_write()
+        return cleared
+
     def _key_parts_filters(
         self,
         *,
@@ -461,6 +486,11 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
                     f"ELSE ({updated} IS NULL OR {updated} + ? > ?) END)"
                 )
                 params.extend([live.now, float(live.ttl_seconds), live.now])
+            if live.held_columns:
+                held = " OR ".join(
+                    f"{_quote_ident(c)} IS NOT NULL" for c in live.held_columns
+                )
+                clauses.append(f"({held})")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         order = ", ".join(
             f"{_quote_ident(item.column)}{' DESC' if item.descending else ''}"

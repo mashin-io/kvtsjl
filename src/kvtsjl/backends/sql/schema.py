@@ -115,6 +115,12 @@ class SqlDbKvSet[K, V]:
     Declaring it switches writes to update-first, so a view that does not own
     a ``NOT NULL`` column can still update a row that already exists. Left
     ``False``, writes stay a single batched upsert.
+
+    It also makes the row not the view's own. The view holds a key while one
+    of its ``own_columns`` is set, and ``unset`` nulls those columns instead
+    of deleting the row, which its siblings still hold. ``delete`` still
+    removes the row the key names: it is how a record is removed, through the
+    view that decides the record exists.
     """
 
     def __post_init__(self) -> None:
@@ -157,6 +163,17 @@ class SqlDbKvSet[K, V]:
             expiry_binding=expiry_binding,
             shares_table=shares_table,
         )
+
+    @property
+    def own_columns(self) -> tuple[str, ...]:
+        """The value columns this view writes, and so owns on a shared table.
+
+        Declared already, by the fields that are not ``read_only``; a view
+        reads its siblings' columns through ``read_only`` fields without
+        owning them.
+        """
+        keys = set(self.key_fields)
+        return tuple(f.name for f in self.fields if not f.read_only and f.name not in keys)
 
     @property
     def key_fields(self) -> tuple[str, ...]:

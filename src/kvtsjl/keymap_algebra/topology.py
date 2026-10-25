@@ -114,6 +114,7 @@ Operation         Traversal   Stops            Combines                Side effe
 ``set_if_absent`` commit      if the authority whether the authority   —
                               refuses          wrote
 ``delete``        removal     never            the authority's answer  —
+``unset``         removal     never            the authority's answer  —
 ``gc``            removal     never            union of keys           dependents
                                                                        forget the
                                                                        authority's
@@ -138,7 +139,9 @@ Operation         Traversal   Stops            Combines                Side effe
 ================  ==========  ===============  ======================  ==========
 
 Batch forms take the same traversal, one call per target, and a batch read
-asks each target only for the keys still missing. ``delete_where`` removes
+asks each target only for the keys still missing. ``unset`` is ``delete``
+with each target removing only its own part — the same traversal, a
+narrower step. ``delete_where`` removes
 the records a scan selects, along the removal traversal. ``delete`` without
 an authority answers whether any target held the key. Streams take the same
 traversals as their point forms: the authority takes the stream and each
@@ -170,41 +173,46 @@ check each one, against the compositions kvtsjl ships and ones it does not.
 2. **Referent before reference.** Components are written before the authority
    that refers to them and removed after it, so a reader following the
    authority never finds a part missing.
-3. **Existence is a read.** ``exists(k)`` holds exactly when ``get(k)``
+3. **A part is unset; a record is deleted.** A write that leaves a part
+   absent — a zip's ``None`` slot — *unsets* that part: each target removes
+   only what is its own, so a view of a row other views share nulls its own
+   columns and leaves the row. Deleting the record deletes, authority first,
+   so the commit point takes the row with it.
+4. **Existence is a read.** ``exists(k)`` holds exactly when ``get(k)``
    returns a record. For an assembled record the authority is necessary, not
    sufficient: ``assemble`` has the last word.
-4. **Scans list only records.** Every key a scan yields is one ``get``
+5. **Scans list only records.** Every key a scan yields is one ``get``
    returns. A scan enumerates what decides existence — the authority — so a
    key held only by a fallback or a cache is readable but not listed.
-5. **Reads write only fills, and a fill never replaces.** A read changes a
+6. **Reads write only fills, and a fill never replaces.** A read changes a
    target only to fill one marked ``fill``, with a conditional write: a value
    written since the miss is kept, not overwritten by the copy. A fill is
    best-effort — the read already succeeded — and carries the write clock, so
    a filled value keeps its remaining life.
-6. **Values flow downstream only.** Fallback → authority → dependents. A copy
+7. **Values flow downstream only.** Fallback → authority → dependents. A copy
    never feeds what it was copied from, so neither a read nor
    ``fill_missing`` can write a stale cache or a lagging replica back into
    the authority.
-7. **Failures carry their side of the commit point.**
+8. **Failures carry their side of the commit point.**
    :class:`UncommittedWriteError` (``committed=False``) before it,
    :class:`PartialSyncError` (``committed=True``) after it. A target that is
    itself a composition reports its own outcome, and the parent maps it
    through the role that child plays — so the answer is right at every level.
-8. **Unsupported is never best-effort.** Best-effort tolerates a medium
+9. **Unsupported is never best-effort.** Best-effort tolerates a medium
    *failing*. A :class:`~kvtsjl.exceptions.KvStoreUnsupported` — a
    composition asking a medium for something it cannot do — is raised under
    every policy, by a fill as much as by a sync.
-9. **The clock is all or nothing where it counts.** A write clock the
-   authority or a component cannot keep is refused before any target is
-   written; a dependent that cannot keep one receives the write without it.
-10. **Budgets do not couple targets.** GC gives every target it collects the
+10. **The clock is all or nothing where it counts.** A write clock the
+    authority or a component cannot keep is refused before any target is
+    written; a dependent that cannot keep one receives the write without it.
+11. **Budgets do not couple targets.** GC gives every target it collects the
     full budget; targets expire independently, and a shared budget starved the
     later ones. The union may therefore exceed the budget.
-11. **Dependents wait for a deferred commit.** When the caller owns the
+12. **Dependents wait for a deferred commit.** When the caller owns the
     commit, a dependent durable at once waits for ``flush_index_syncs``, and
     ``discard_index_syncs`` drops it; one whose writes are deferred too joins
     the caller's commit and runs at once.
-12. **Composition is closed.** A composition is a target to its parent. The
+13. **Composition is closed.** A composition is a target to its parent. The
     laws hold for the parent whatever the child is, and the tree walk —
     flushing, discarding, counting deferred syncs — reaches every node.
 
@@ -240,12 +248,12 @@ check each one, against the compositions kvtsjl ships and ones it does not.
   write, writes the whole record and does.
 - *A streamed fill replaces.* Media share no conditional streaming write —
   S3's managed upload takes no precondition — so a fill during
-  ``read_stream`` overwrites; law 5 holds for ``get`` and ``batch_get``.
+  ``read_stream`` overwrites; law 6 holds for ``get`` and ``batch_get``.
 - *An assembled record is filled at its parts.* No fallback holds a whole
   record made of parts, so a zip lists nothing missing; a part that is
   itself a ``fallback_read`` is filled by asking that part.
 - *Conditional writes ask the medium.* ``set_if_absent`` asks the authority
-  whether the key is absent to the medium, which can differ from law 3 — an
+  whether the key is absent to the medium, which can differ from law 4 — an
   expired entry, or a committed row whose mandatory part is gone, still
   refuses the insert. Reconciling them would need a read before the write,
   the race the method exists to avoid.
@@ -376,6 +384,13 @@ class Target[K, V, P](ABC):
     def batch_delete(self, keys: Sequence[K]) -> int:
         return sum(1 for key in keys if self.delete(key))
 
+    def unset(self, key: K) -> bool:
+        """Remove only this target's part of the record; for most, ``delete``."""
+        return self.delete(key)
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return sum(1 for key in keys if self.unset(key))
+
     # --- reads ---------------------------------------------------------------
 
     def read(self, key: K) -> P | None:
@@ -449,7 +464,7 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
     """A target that is a keymap, holding ``slot(record)``.
 
     ``slot`` is :func:`whole` for a target holding the record itself. A
-    ``None`` slot clears the entry — a record whose optional part is absent
+    ``None`` slot unsets the entry — a record whose optional part is absent
     has no entry there.
     """
 
@@ -471,7 +486,7 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
     def write(self, key: K, value: V, options: WriteOptions) -> None:
         item = self._slot(value)
         if item is None:
-            self.keymap.delete(key)
+            self.keymap.unset(key)
             return
         self.keymap.set(key, item, ttl=options.ttl, created_at=options.created_at)
 
@@ -495,13 +510,19 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
         if to_set:
             self.keymap.batch_set(to_set, ttl=options.ttl, created_at=options.created_at)
         if to_clear:
-            self.keymap.batch_delete(to_clear)
+            self.keymap.batch_unset(to_clear)
 
     def delete(self, key: K) -> bool:
         return self.keymap.delete(key)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self.keymap.batch_delete(keys)
+
+    def unset(self, key: K) -> bool:
+        return self.keymap.unset(key)
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return self.keymap.batch_unset(keys)
 
     def read(self, key: K) -> P | None:
         return self.keymap.get(key)
@@ -879,9 +900,16 @@ class Topology[K, V]:
         target held the key. Every target is visited either way: stopping at
         the first one that held the key leaves the rest behind.
         """
-        removed = [t.delete(key) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)]
-        self._to_dependents("delete", syncs, lambda t: t.delete(key))
-        return removed[0] if self.authority is not None else any(removed)
+        return self._remove(key, syncs, "delete", lambda t, k: t.delete(k))
+
+    def unset(self, key: K, syncs: DependentSyncs) -> bool:
+        """As ``delete``, but each target removes only its own part.
+
+        What a part of a record written as absent means when that part is a
+        composition: its targets unset — a view of a shared row nulls its own
+        columns — and its dependents forget the key.
+        """
+        return self._remove(key, syncs, "unset", lambda t, k: t.unset(k))
 
     def batch_delete(
         self,
@@ -895,6 +923,35 @@ class Topology[K, V]:
         Counts what the authority removed; with no authority, the distinct
         keys any target held, probed before deleting.
         """
+        return self._batch_remove(
+            keys, syncs, "batch delete", lambda t, ks: t.batch_delete(ks), policy
+        )
+
+    def batch_unset(self, keys: Sequence[K], syncs: DependentSyncs) -> int:
+        """As ``unset``, one batch per target."""
+        return self._batch_remove(
+            keys, syncs, "batch unset", lambda t, ks: t.batch_unset(ks), None
+        )
+
+    def _remove(
+        self,
+        key: K,
+        syncs: DependentSyncs,
+        what: str,
+        op: Callable[[Target[K, V, object], K], bool],
+    ) -> bool:
+        removed = [op(t, key) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)]
+        self._to_dependents(what, syncs, lambda t: op(t, key))
+        return removed[0] if self.authority is not None else any(removed)
+
+    def _batch_remove(
+        self,
+        keys: Sequence[K],
+        syncs: DependentSyncs,
+        what: str,
+        op: Callable[[Target[K, V, object], Sequence[K]], int],
+        policy: SyncPolicy | None,
+    ) -> int:
         if not keys:
             return 0
         unique = list(dict.fromkeys(keys))
@@ -903,12 +960,8 @@ class Topology[K, V]:
         if authority is None:
             for target in self.components:
                 held |= target.batch_exists(unique)
-        counts = [
-            t.batch_delete(unique) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)
-        ]
-        self._to_dependents(
-            "batch delete", syncs, lambda t: t.batch_delete(unique), policy=policy
-        )
+        counts = [op(t, unique) for t in self._by_role(Role.AUTHORITY, Role.COMPONENT)]
+        self._to_dependents(what, syncs, lambda t: op(t, unique), policy=policy)
         return counts[0] if authority is not None else len(held)
 
     def gc(
@@ -1362,6 +1415,12 @@ class RecordTopologyMixin[K, V](KeyMap[K, V], ABC):
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         return self.topology().batch_delete(keys, self._dependent_syncs())
+
+    def unset(self, key: K) -> bool:
+        return self.topology().unset(key, self._dependent_syncs())
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return self.topology().batch_unset(keys, self._dependent_syncs())
 
     def get(self, key: K) -> V | None:
         return self.topology().read(key)

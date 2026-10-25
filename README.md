@@ -316,7 +316,7 @@ Underlying wrapper types (`IndexedKvStore`, `FallbackReadKvStore`, …) exist fo
 
 ### Optional zip
 
-A row exists if **any** part is present (or, with `mandatory=[…]`, every mandatory one); each field is independently `PartV | None`. `set` writes non-`None` parts and clears `None` ones. `scan` lists exactly the keys `get` returns.
+A row exists if **any** part is present (or, with `mandatory=[…]`, every mandatory one); each field is independently `PartV | None`. `set` writes non-`None` parts and *unsets* `None` ones: each part removes only what is its own, so a column-group view of a table its siblings share (`shares_table=True`) nulls just the columns it writes and leaves the row. `delete` removes the record. `scan` lists exactly the keys `get` returns.
 
 ```python
 from dataclasses import dataclass
@@ -467,15 +467,16 @@ Each operation is one of those traversals plus when it stops, how it combines re
 
 1. **Commit before derive** — no dependent is written before the record is committed.
 2. **Referent before reference** — parts are written before the authority that refers to them, and removed after it.
-3. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
-4. **Scans list only records** — every key a scan yields is one `get` returns.
-5. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept; it carries the write clock so a promoted value keeps its remaining life.
-6. **Values flow downstream only** — fallback → authority → copies; a stale cache or a lagging replica is never written back.
-7. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
-8. **Unsupported is never best-effort** — a `KvStoreUnsupported` (asking a medium for something it cannot do) is raised under every sync policy, never logged away.
-9. **Budgets don't couple targets** — GC gives each target the full budget.
-10. **Dependents wait for your commit** — over a store in your transaction, index and copy syncs queue until `flush_index_syncs()` (or `discard_index_syncs()` on rollback).
-11. **Composition is closed** — a composition is a target to its parent, and the laws hold for the parent whatever the child is.
+3. **A part is unset, a record is deleted** — writing a part as absent removes only that part's own data (a shared-table view nulls its own columns); deleting the record removes it all.
+4. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
+5. **Scans list only records** — every key a scan yields is one `get` returns.
+6. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept; it carries the write clock so a promoted value keeps its remaining life.
+7. **Values flow downstream only** — fallback → authority → copies; a stale cache or a lagging replica is never written back.
+8. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
+9. **Unsupported is never best-effort** — a `KvStoreUnsupported` (asking a medium for something it cannot do) is raised under every sync policy, never logged away.
+10. **Budgets don't couple targets** — GC gives each target the full budget.
+11. **Dependents wait for your commit** — over a store in your transaction, index and copy syncs queue until `flush_index_syncs()` (or `discard_index_syncs()` on rollback).
+12. **Composition is closed** — a composition is a target to its parent, and the laws hold for the parent whatever the child is.
 
 Writing your own composition means declaring roles — no ordering code:
 

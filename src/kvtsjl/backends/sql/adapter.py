@@ -36,6 +36,13 @@ class SqlLiveness:
     ttl_seconds: int | None
     updated_at_field: str
     expires_at_field: str
+    held_columns: Sequence[str] = ()
+    """A row is live only if one of these is not NULL; empty means no condition.
+
+    A view over a shared table holds a row only while one of its own columns
+    is set. Like expiry, this must be pushed with ``LIMIT``: a row a sibling
+    still holds but this view has cleared would otherwise use up the limit.
+    """
 
 
 class SqlDbClientAdapter(ABC):
@@ -58,10 +65,13 @@ class SqlDbClientAdapter(ABC):
     ===========================  =========================================
     ``supports_scan_ordering``   ``order_by`` entirely — it raises
     ``scan_ordered``             (forward ``live`` too, or a pushed ``LIMIT``
-                                 counts rows that have already expired)
+                                 counts rows that have expired or that a
+                                 shared-table view has cleared)
     ``supports_expiry_scan``     expiry pushdown; GC reads every row
     ``scan_expired``
     ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
+    ``supports_clear_columns``   ``unset`` on a shared-table view, which
+    ``clear_columns``            raises rather than deleting the row
     ``supports_paged_scan``      keyset paging; scans materialise in full
     ``scan_page_by_key_parts``
     ===========================  =========================================
@@ -184,6 +194,29 @@ class SqlDbClientAdapter(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement upsert_rows_update_first"
         )
+
+    def supports_clear_columns(self) -> bool:
+        """Whether this adapter implements ``clear_columns``.
+
+        Needed only to ``unset`` a view of a shared table; the store refuses
+        rather than fall back to deleting the row its siblings still hold.
+        """
+        return False
+
+    def clear_columns(
+        self,
+        *,
+        table: str,
+        key_fields: Sequence[str],
+        keys: Sequence[SqlDbRow],
+        columns: Sequence[str],
+    ) -> int:
+        """Set ``columns`` to NULL on the keyed rows; never insert or delete.
+
+        Returns how many rows had one of ``columns`` set — the rows this view
+        held — so a row already clear is not counted.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement clear_columns")
 
     def supports_scan_ordering(self) -> bool:
         """Whether this adapter implements ``scan_ordered``.

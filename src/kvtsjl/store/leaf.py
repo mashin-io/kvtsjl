@@ -205,6 +205,12 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
     ) -> bool:
         return self._backend.set_if_absent(key, value, ttl=ttl, created_at=created_at)
 
+    def unset(self, key: K) -> bool:
+        return self._backend.unset(key)
+
+    def batch_unset(self, keys: Sequence[K]) -> int:
+        return self._backend.batch_unset(keys)
+
     def missing_pages(self, page_size: int) -> Iterator[MissingPage[K, V]]:
         """A leaf has no fallback, so it lacks nothing a read through it finds."""
         return iter(())
