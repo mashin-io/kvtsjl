@@ -10,6 +10,10 @@ from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.batching import GCS_BATCH_OPS_MAX
 from kvtsjl.serde.compress import STREAM_CHUNK
 
+# google-cloud-storage uploads a known size up to this in one multipart
+# request; above it, or with no size, it takes a resumable upload that seeks.
+_ONE_REQUEST_UPLOAD = 8 * 1024 * 1024
+
 if TYPE_CHECKING:
     from google.cloud.storage import Blob, Bucket  # google-cloud-storage is not py.typed
 
@@ -107,10 +111,31 @@ class GcsBlobDriver(BlobDriver):
         size: int | None = None,
         headers: dict[str, Any] | None = None,
     ) -> None:
+        """Upload ``src``, reading it once, front to back.
+
+        A known size up to the client's multipart limit goes in one request,
+        which only reads. Anything larger, or of unknown size — every
+        compressed value — would take the client's resumable upload, which
+        seeks the stream, and a stream kvtsjl encodes as it goes cannot seek;
+        it is written through the blob's own writer instead, which buffers its
+        chunks itself. The properties set on the blob first, ``custom_time``
+        among them, start the writer's session, and a failure inside it
+        cancels the session, so nothing is committed — including a ``size``
+        the stream does not have.
+        """
         blob = self._bucket.blob(key)
         if headers is not None and "custom_time" in headers:
             blob.custom_time = headers["custom_time"]
-        blob.upload_from_file(src, size=size)
+        if size is not None and size <= _ONE_REQUEST_UPLOAD:
+            blob.upload_from_file(src, size=size)
+            return
+        written = 0
+        with cast(BinaryIO, blob.open("wb")) as sink:
+            while chunk := src.read(STREAM_CHUNK):
+                sink.write(chunk)
+                written += len(chunk)
+            if size is not None and size != written:
+                raise ValueError(f"write_stream size={size} but stream had {written} bytes")
 
     def read_chunks(self, key: str) -> tuple[Iterator[bytes], BlobStat] | None:
         blob = self._bucket.get_blob(key)

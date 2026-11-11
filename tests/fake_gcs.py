@@ -13,6 +13,9 @@ from types import TracebackType
 from google.api_core.exceptions import NotFound, PreconditionFailed
 
 _generations = itertools.count(1)
+# The client uploads a known size up to this in one multipart request, which
+# only reads; anything else takes the resumable upload, which seeks.
+_MAX_MULTIPART_SIZE = 8 * 1024 * 1024
 
 
 @dataclass
@@ -32,6 +35,27 @@ def _require_generation(store: dict[str, _StoredObject], name: str, wanted: int 
     held = stored.generation if stored is not None else 0
     if held != wanted:
         raise PreconditionFailed(f"{name}: generation {held}, not {wanted}")
+
+
+class _FakeBlobWriter(io.BytesIO):
+    """Mirror ``BlobWriter``: commits on close, and an exception cancels it."""
+
+    def __init__(self, blob: FakeGcsBlob, custom_time: datetime | None) -> None:
+        super().__init__()
+        self._blob, self._custom_time = blob, custom_time
+
+    def close(self) -> None:
+        if not self.closed:
+            body = self.getvalue()
+            self._blob.custom_time = self._custom_time
+            self._blob.upload_from_string(body)
+        super().close()
+
+    def __exit__(self, exc_type: object, *_rest: object) -> None:
+        if exc_type is not None:
+            super().close()  # terminate: the session is dropped, nothing stored
+            return
+        self.close()
 
 
 @dataclass
@@ -55,7 +79,14 @@ class FakeGcsBlob:
         return self._store[self.name].body
 
     def upload_from_file(self, file_obj: BinaryIO, *, size: int | None = None) -> None:
-        """Mirror ``Blob.upload_from_file``; reads in chunks."""
+        """Mirror ``Blob.upload_from_file``; reads in chunks.
+
+        As the client does, the resumable path — size unknown or above the
+        multipart limit — asks the stream where it is, which a stream that
+        cannot seek refuses.
+        """
+        if (size is None or size > _MAX_MULTIPART_SIZE) and file_obj.tell() != 0:
+            raise ValueError("Stream must be at beginning.")
         chunks: list[bytes] = []
         while chunk := file_obj.read(1 << 16):
             chunks.append(chunk)
@@ -75,8 +106,14 @@ class FakeGcsBlob:
             file_obj.write(body[start : start + (1 << 16)])
 
     def open(self, mode: str = "rb") -> BinaryIO:
-        """Mirror ``Blob.open``; the pull-side read."""
-        assert mode == "rb", f"fake only supports 'rb', got {mode!r}"
+        """Mirror ``Blob.open``: a reader, or a writer that uploads on close.
+
+        The writer takes the blob's properties as they are when it opens, as
+        the client's resumable session does.
+        """
+        if mode == "wb":
+            return _FakeBlobWriter(self, self.custom_time)
+        assert mode == "rb", f"fake only supports 'rb' and 'wb', got {mode!r}"
         return io.BytesIO(self._store[self.name].body)
 
     def upload_from_string(
