@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kvtsjl.keymap_algebra.topology import Role, Topology
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.compose.delegating import DelegatingKvStore
 from kvtsjl.store.compose.topology import StoreTopologyMixin
 from kvtsjl.store.logical import KvStore
@@ -55,6 +55,12 @@ class MirrorKvStore[K, V](StoreTopologyMixin[K, V], DelegatingKvStore[K, V]):
             self._primary.clone_with_scope(scope),
             self._secondary.clone_with_scope(scope),
             sync_policy=self._sync_policy,
+        )
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """Rebuilt over each side's ``beneath()``: one batch per side, across scopes."""
+        return MirrorKvStore(
+            self._primary.beneath(), self._secondary.beneath(), sync_policy=self._sync_policy
         )
 
     def __repr__(self) -> str:

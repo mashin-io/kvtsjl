@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 import io
 import time
-from typing import Any
+from typing import Any, Self
 
 from kvtsjl.backends.object.driver import BlobDriver, BlobStat
 from kvtsjl.backends.object.ttl import TtlSource
@@ -152,17 +152,12 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         return self._live_stat(self._key_codec.encode_physical(key)) is not None
 
     def batch_exists(self, keys: Sequence[K]) -> set[K]:
-        if not keys:
-            return set()
-        out: set[K] = set()
-        for chunk in chunk_sequence(keys, self.batch_size):
-            flags = map_concurrent(
-                chunk, self.exists, max_workers=self.io_concurrency
-            )
-            for key, ok in zip(chunk, flags, strict=True):
-                if ok:
-                    out.add(key)
-        return out
+        keys = list(dict.fromkeys(keys))
+        held = self.batch_exists_across([(self, k) for k in keys])
+        return {k for k, h in zip(keys, held, strict=True) if h}
+
+    def batch_exists_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> list[bool]:
+        return self._each(pairs, lambda b, k: b.exists(k))
 
     def stat(self, key: K) -> RecordStat | None:
         head = self._live_stat(self._key_codec.encode_physical(key))
@@ -173,17 +168,12 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         )
 
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
-        if not keys:
-            return {}
-        out: dict[K, RecordStat] = {}
-        for chunk in chunk_sequence(keys, self.batch_size):
-            stats = map_concurrent(
-                chunk, self.stat, max_workers=self.io_concurrency
-            )
-            for key, meta in zip(chunk, stats, strict=True):
-                if meta is not None:
-                    out[key] = meta
-        return out
+        keys = list(dict.fromkeys(keys))
+        got = self.batch_stat_across([(self, k) for k in keys])
+        return {k: m for k, m in zip(keys, got, strict=True) if m is not None}
+
+    def batch_stat_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> list[RecordStat | None]:
+        return self._each(pairs, lambda b, k: b.stat(k))
 
     def set(
         self,
@@ -201,11 +191,11 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
 
     def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
         """One request per object, ``io_concurrency`` at a time; expired reads as ``None``."""
-        out: dict[K, Versioned[V]] = {}
-        for chunk in chunk_sequence(list(dict.fromkeys(keys)), self.batch_size):
-            seen = map_concurrent(chunk, self._read_versioned, max_workers=self.io_concurrency)
-            out.update(zip(chunk, seen, strict=True))
-        return out
+        keys = list(dict.fromkeys(keys))
+        return dict(zip(keys, self.batch_read_versioned_across([(self, k) for k in keys]), strict=True))
+
+    def batch_read_versioned_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> list[Versioned[V]]:
+        return self._each(pairs, lambda b, k: b._read_versioned(k))
 
     def _read_versioned(self, key: K) -> Versioned[V]:
         got = self._driver.read(self._key_codec.encode_physical(key))
@@ -231,24 +221,34 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         replaces it instead.
         """
 
-        def write(pair: tuple[K, ConditionalWrite[V]]) -> bool:
-            key, w = pair
-            physical = self._key_codec.encode_physical(key)
-            version = None if w.seen.version is None else str(w.seen.version)
-            if isinstance(w.change, Remove):
-                return version is not None and self._driver.delete_if_version(physical, version)
-            return self._driver.write_if_version(
-                physical,
-                self.kvset.value_serde.serialize(w.change.value),
-                version,
-                headers=self._write_headers(ttl, w.created_at),
-            )
+        keys = list(writes)
+        won = self.batch_write_if_unchanged_across([(self, k, writes[k]) for k in keys], ttl=ttl)
+        return {k for k, w in zip(keys, won, strict=True) if w}
 
-        written: set[K] = set()
-        for chunk in chunk_sequence(list(writes.items()), self.batch_size):
-            wins = map_concurrent(chunk, write, max_workers=self.io_concurrency)
-            written |= {key for (key, _), won in zip(chunk, wins, strict=True) if won}
-        return written
+    def batch_write_if_unchanged_across(
+        self,
+        writes: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K, ConditionalWrite[V]]],
+        *,
+        ttl: TtlPolicy | None = None,
+    ) -> list[bool]:
+        return self._each(
+            [(b, (k, w)) for b, k, w in writes],
+            lambda b, kw: b._write_if_unchanged(kw[0], kw[1], ttl),
+        )
+
+    def _write_if_unchanged(
+        self, key: K, w: ConditionalWrite[V], ttl: TtlPolicy | None
+    ) -> bool:
+        physical = self._key_codec.encode_physical(key)
+        version = None if w.seen.version is None else str(w.seen.version)
+        if isinstance(w.change, Remove):
+            return version is not None and self._driver.delete_if_version(physical, version)
+        return self._driver.write_if_version(
+            physical,
+            self.kvset.value_serde.serialize(w.change.value),
+            version,
+            headers=self._write_headers(ttl, w.created_at),
+        )
 
     def _write_headers(
         self, ttl: TtlPolicy | None, created_at: datetime | None
@@ -314,17 +314,12 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         return self._driver.delete(self._key_codec.encode_physical(key))
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
-        if not keys:
-            return {}
-        out: dict[K, V] = {}
-        for chunk in chunk_sequence(keys, self.batch_size):
-            values = map_concurrent(
-                chunk, self.get, max_workers=self.io_concurrency
-            )
-            for key, value in zip(chunk, values, strict=True):
-                if value is not None:
-                    out[key] = value
-        return out
+        keys = list(dict.fromkeys(keys))
+        got = self.batch_get_across([(self, k) for k in keys])
+        return {k: v for k, v in zip(keys, got, strict=True) if v is not None}
+
+    def batch_get_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> list[V | None]:
+        return self._each(pairs, lambda b, k: b.get(k))
 
     def batch_set(
         self,
@@ -333,40 +328,64 @@ class ObjectStoreKvBackend[K, V, KBLOB: str | bytes](KvBackend[K, V, KBLOB, byte
         ttl: TtlPolicy | None = None,
         created_at: datetime | None = None,
     ) -> None:
-        pairs = list(items.items())
-        if not pairs:
-            return
+        self.batch_set_across(
+            [(self, k, v) for k, v in items.items()], ttl=ttl, created_at=created_at
+        )
 
-        def write(pair: tuple[K, V]) -> None:
-            self.set(pair[0], pair[1], ttl=ttl, created_at=created_at)
-
-        for chunk in chunk_sequence(pairs, self.batch_size):
-            map_concurrent(chunk, write, max_workers=self.io_concurrency)
+    def batch_set_across(
+        self,
+        items: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K, V]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        self._each(
+            [(b, (k, v)) for b, k, v in items],
+            lambda b, kv: b.set(kv[0], kv[1], ttl=ttl, created_at=created_at),
+        )
 
     def batch_delete(self, keys: Sequence[K]) -> int:
-        if not keys:
+        return self.batch_delete_across([(self, k) for k in keys])
+
+    def batch_delete_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> int:
+        """Bulk deletes of the objects present, each chunk one request.
+
+        ``max_bulk_delete`` governs request size; ``io_concurrency`` governs
+        parallelism across chunks (the filesystem's limit of one must not go
+        serial).
+        """
+        unique = list(dict.fromkeys(pairs))
+        if not unique:
             return 0
-        unique = list(dict.fromkeys(keys))
-        # max_bulk_delete governs request size; io_concurrency governs
-        # parallelism across chunks (FS max_bulk_delete=1 must not go serial).
         limit = min(self.batch_size, self._driver.max_bulk_delete)
 
-        def delete_chunk(chunk: Sequence[K]) -> int:
-            present = self.batch_exists(chunk)
+        def delete_chunk(chunk: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> int:
+            present = self.batch_exists_across(chunk)
             to_delete = [
-                self._key_codec.encode_physical(key)
-                for key in chunk
-                if key in present
+                self._own(b)._key_codec.encode_physical(k)
+                for (b, k), held in zip(chunk, present, strict=True)
+                if held
             ]
-            if not to_delete:
-                return 0
-            return self._driver.bulk_delete(to_delete)
+            return self._driver.bulk_delete(to_delete) if to_delete else 0
 
         chunks = list(chunk_sequence(unique, limit))
-        counts = map_concurrent(
-            chunks, delete_chunk, max_workers=self.io_concurrency
-        )
-        return sum(counts)
+        return sum(map_concurrent(chunks, delete_chunk, max_workers=self.io_concurrency))
+
+    def batch_unset_across(self, pairs: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], K]]) -> int:
+        return self.batch_delete_across(pairs)
+
+    def _each[T, R](
+        self, items: Sequence[tuple[KvBackend[K, V, KBLOB, bytes, str], T]], op: Callable[[Self, T], R]
+    ) -> list[R]:
+        """``op`` on each item with its clone: one request each, ``io_concurrency`` at a time."""
+        out: list[R] = []
+        for chunk in chunk_sequence(items, self.batch_size):
+            out.extend(
+                map_concurrent(
+                    chunk, lambda bt: op(self._own(bt[0]), bt[1]), max_workers=self.io_concurrency
+                )
+            )
+        return out
 
     def _enrich_list_stat(self, stat: BlobStat) -> BlobStat | None:
         if not self._ttl_source.needs_head_for_list_expiry():

@@ -56,7 +56,7 @@ from kvtsjl.keymap import (
 from kvtsjl.keymap_algebra import DictKeyMap
 from kvtsjl.leaf import PhysicalBackend
 from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, WireRef
-from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
+from kvtsjl.scope import KeyPrefix, Scope, Scoped, ScopeSegment
 from kvtsjl.serde import CompressionCodec, SerDe
 from kvtsjl.store import (
     CopyClock,
@@ -140,6 +140,7 @@ __all__ = [
     "RecordStat",
     "ScanQuery",
     "Scope",
+    "Scoped",
     "ScopeSegment",
     "SerDe",
     "StrBlobOps",

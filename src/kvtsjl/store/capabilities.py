@@ -121,9 +121,6 @@ class ScannableMixin[K, V](ABC):
                 "keeps the scope in the key"
             )
         me = cast(Any, self)
-        kvset = me.kvset
-        ops = kvset.blob_ops
-        scope_prefix = kvset.encode_in_key(me.scope, None)
         rows: Iterator[Any] = me.scan(
             prefix,
             include_values=include_values,
@@ -133,13 +130,21 @@ class ScannableMixin[K, V](ABC):
         )
         for row in rows:
             leaf, value = row if include_values else (row, None)
-            leaf_blob = kvset.key_serde.serialize(leaf)
-            in_key = ops.join([scope_prefix, leaf_blob]) if scope_prefix else leaf_blob
-            decoded = kvset.decode_in_key(in_key)
+            decoded = self.rescope(leaf)
             if decoded is None:
                 continue
             scope, real_leaf = decoded
             yield scope, real_leaf, value
+
+    def rescope(self, key: K) -> tuple[Scope, K] | None:
+        """The whole scope and leaf of a key this store returned under its own scope.
+
+        On a store bound to a prefix of the schema, a key it lists — by scan,
+        or as expired — still carries the scope segments beneath that prefix.
+        ``None`` for a key that does not decode under the schema.
+        """
+        me = cast(Any, self)
+        return cast("tuple[Scope, K] | None", me.kvset.rescope(me.scope, key))
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """Yield ``ScanRow``s for ``spec`` (default: legacy ``scan_entries``)."""

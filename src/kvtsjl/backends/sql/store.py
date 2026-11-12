@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 import json
 import time
@@ -23,7 +23,7 @@ from kvtsjl.exceptions import (
     KvStoreUnsupported,
 )
 from kvtsjl.keymap import ConditionalWrite, Put, Remove, Versioned
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, ScopeSegment
 from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
@@ -478,22 +478,47 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return self._live_row(found[0] if found else None) is not None
 
     def batch_exists(self, keys: Sequence[K]) -> set[K]:
-        out: set[K] = set()
+        keys = list(dict.fromkeys(keys))
+        held = self.batch_exists_across([(self, k) for k in keys])
+        return {k for k, h in zip(keys, held, strict=True) if h}
+
+    def batch_exists_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> list[bool]:
+        """One presence query per batch, across scopes: the scope is in the key columns."""
+        return [row is not None for row in self._live_rows(pairs, presence=True)]
+
+    def _key_rows(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> list[SqlDbRow]:
+        """Each key's full key row, scope columns included, from its scope's clone."""
+        return [self._own(b)._full_key_row(k, require_scope=True) for b, k in pairs]
+
+    def _found_rows(
+        self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]], *, presence: bool
+    ) -> list[SqlDbRow | None]:
+        """The stored row of each key, live or not, in order: one query per batch."""
         sk = self._sql_kvset
-        for chunk in chunk_sequence(list(keys), self.batch_size):
-            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
-            found = self._adapter.exists_by_keys(
-                table=self._table,
-                key_fields=sk.key_fields,
-                keys=key_rows,
-                columns=self._presence_columns(),
-            )
+        out: list[SqlDbRow | None] = []
+        for chunk in chunk_sequence(self._key_rows(pairs), self.batch_size):
+            if presence:
+                found = self._adapter.exists_by_keys(
+                    table=self._table,
+                    key_fields=sk.key_fields,
+                    keys=chunk,
+                    columns=self._presence_columns(),
+                )
+            else:
+                found = self._adapter.fetch_by_keys(
+                    table=self._table,
+                    columns=sk.select_columns(),
+                    key_fields=sk.key_fields,
+                    keys=chunk,
+                )
             by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
-            for key, key_row in zip(chunk, key_rows, strict=True):
-                row = self._live_row(by_tuple.get(_key_tuple(key_row, sk.key_fields)))
-                if row is not None:
-                    out.add(key)
+            out.extend(by_tuple.get(_key_tuple(r, sk.key_fields)) for r in chunk)
         return out
+
+    def _live_rows(
+        self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]], *, presence: bool
+    ) -> list[SqlDbRow | None]:
+        return [self._live_row(row) for row in self._found_rows(pairs, presence=presence)]
 
     def stat(self, key: K) -> RecordStat | None:
         sk = self._sql_kvset
@@ -510,22 +535,15 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return self._stat_from_row(row)
 
     def batch_stat(self, keys: Sequence[K]) -> dict[K, RecordStat]:
-        out: dict[K, RecordStat] = {}
-        sk = self._sql_kvset
-        for chunk in chunk_sequence(list(keys), self.batch_size):
-            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
-            found = self._adapter.exists_by_keys(
-                table=self._table,
-                key_fields=sk.key_fields,
-                keys=key_rows,
-                columns=self._presence_columns(),
-            )
-            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
-            for key, key_row in zip(chunk, key_rows, strict=True):
-                row = self._live_row(by_tuple.get(_key_tuple(key_row, sk.key_fields)))
-                if row is not None:
-                    out[key] = self._stat_from_row(row)
-        return out
+        keys = list(dict.fromkeys(keys))
+        got = self.batch_stat_across([(self, k) for k in keys])
+        return {k: m for k, m in zip(keys, got, strict=True) if m is not None}
+
+    def batch_stat_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> list[RecordStat | None]:
+        return [
+            None if row is None else self._stat_from_row(row)
+            for row in self._live_rows(pairs, presence=True)
+        ]
 
     def set(
         self,
@@ -599,113 +617,119 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return tuple(c for c in self._sql_kvset.write_columns() if c not in keys)
 
     def batch_read_versioned(self, keys: Sequence[K]) -> dict[K, Versioned[V]]:
+        keys = list(dict.fromkeys(keys))
+        return dict(zip(keys, self.batch_read_versioned_across([(self, k) for k in keys]), strict=True))
+
+    def batch_read_versioned_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> list[Versioned[V]]:
         """One fetch per batch; a row's version is its written columns, clock included."""
-        sk = self._sql_kvset
-        out: dict[K, Versioned[V]] = {}
-        for chunk in chunk_sequence(list(dict.fromkeys(keys)), self.batch_size):
-            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
-            found = self._adapter.fetch_by_keys(
-                table=self._table,
-                columns=sk.select_columns(),
-                key_fields=sk.key_fields,
-                keys=key_rows,
-            )
-            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
-            for key, key_row in zip(chunk, key_rows, strict=True):
-                row = by_tuple.get(_key_tuple(key_row, sk.key_fields))
-                if row is None:
-                    out[key] = Versioned.absent()
-                    continue
-                live = not self._row_expired(row) and self._holds(row)
-                value = self.kvset.value_serde.deserialize(row) if live else None
-                out[key] = Versioned(value, tuple(row.get(c) for c in self._version_columns()))
+        out: list[Versioned[V]] = []
+        for row in self._found_rows(pairs, presence=False):
+            if row is None:
+                out.append(Versioned.absent())
+                continue
+            live = not self._row_expired(row) and self._holds(row)
+            value = self.kvset.value_serde.deserialize(row) if live else None
+            out.append(Versioned(value, tuple(row.get(c) for c in self._version_columns())))
         return out
 
     def batch_write_if_unchanged(
         self, writes: Mapping[K, ConditionalWrite[V]], *, ttl: TtlPolicy | None = None
     ) -> set[K]:
+        keys = list(writes)
+        won = self.batch_write_if_unchanged_across([(self, k, writes[k]) for k in keys], ttl=ttl)
+        return {k for k, w in zip(keys, won, strict=True) if w}
+
+    def batch_write_if_unchanged_across(
+        self,
+        writes: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K, ConditionalWrite[V]]],
+        *,
+        ttl: TtlPolicy | None = None,
+    ) -> list[bool]:
         """Insert where no row is, or replace or remove rows only if unchanged.
 
-        One adapter call per kind of write: the inserts, the replacements and
-        the removals. A view of a shared table that does not own its rows
-        refuses to insert one — only an owner creates; removing through it
-        clears its own columns, as ``unset`` does.
+        One adapter call per kind of write per batch, across scopes: the
+        inserts, the replacements and the removals. A view of a shared table
+        that does not own its rows refuses to insert one — only an owner
+        creates; removing through it clears its own columns, as ``unset`` does.
         """
-        for w in writes.values():
+        for _, _, w in writes:
             require_write_clock_supported(w.created_at, allowed=True, backend="SqlDbKvStore")
         sk = self._sql_kvset
-        inserts = {
-            k: w.change.value
-            for k, w in writes.items()
+        at = [(self._own(b), k, w) for b, k, w in writes]
+        inserts = [
+            (i, b._build_write_row(k, w.change.value, ttl=ttl, created_at=w.created_at))
+            for i, (b, k, w) in enumerate(at)
             if w.seen.version is None and isinstance(w.change, Put)
-        }
-        against = {k: w for k, w in writes.items() if w.seen.version is not None}
+        ]
+        replaces = [
+            (i, b._expected(k, w.seen), b._build_write_row(k, w.change.value, ttl=ttl, created_at=w.created_at))
+            for i, (b, k, w) in enumerate(at)
+            if w.seen.version is not None and isinstance(w.change, Put)
+        ]
+        removals = [
+            (i, b._expected(k, w.seen))
+            for i, (b, k, w) in enumerate(at)
+            if w.seen.version is not None and isinstance(w.change, Remove)
+        ]
         if inserts and not self.creates_entries:
             raise KvStoreUnsupported(
                 f"{sk.table_name}: this view does not own its rows, so it cannot "
-                f"create one for {next(iter(inserts))!r}; its owner creates the record"
+                f"create one for {at[inserts[0][0]][1]!r}; its owner creates the record"
             )
-        if against and not self._adapter.supports_compare_and_write():
+        if (replaces or removals) and not self._adapter.supports_compare_and_write():
             raise KvStoreUnsupported(
                 f"{type(self._adapter).__name__} does not support compare-and-write, "
                 "which writing against a version requires; it will not read and "
                 "then write"
             )
-        removals = [k for k, w in against.items() if isinstance(w.change, Remove)]
         if removals and not sk.deletes_rows and not sk.own_columns:
             raise KvStoreUnsupported(
                 f"{sk.table_name}: this view writes no columns of its own, so "
                 "removing through it could only delete a row its siblings share"
             )
-        written: set[K] = set()
-        if inserts:
-            if not self._adapter.supports_insert_if_absent():
-                raise KvStoreUnsupported(
-                    f"{type(self._adapter).__name__} does not support "
-                    "insert_each_if_absent, which set_if_absent — inserting only "
-                    "where no row is — requires; it will not fall back to a get-then-set"
-                )
-            keys = list(inserts)
+        if inserts and not self._adapter.supports_insert_if_absent():
+            raise KvStoreUnsupported(
+                f"{type(self._adapter).__name__} does not support "
+                "insert_each_if_absent, which set_if_absent — inserting only "
+                "where no row is — requires; it will not fall back to a get-then-set"
+            )
+        won = [False] * len(writes)
+        for chunk in chunk_sequence(inserts, self.batch_size):
             flags = self._adapter.insert_each_if_absent(
                 table=self._table,
                 key_fields=sk.key_fields,
                 write_columns=sk.write_columns(),
-                rows=[
-                    self._build_write_row(k, inserts[k], ttl=ttl, created_at=writes[k].created_at)
-                    for k in keys
-                ],
+                rows=[row for _, row in chunk],
             )
-            written |= {k for k, won in zip(keys, flags, strict=True) if won}
-        if removals and sk.deletes_rows:
-            flags = self._adapter.delete_each_if(
-                table=self._table,
-                key_fields=sk.key_fields,
-                expected=[self._expected(k, against[k].seen) for k in removals],
-            )
-            written |= {k for k, won in zip(removals, flags, strict=True) if won}
-        elif removals:
-            flags = self._adapter.replace_each_if(
-                table=self._table,
-                key_fields=sk.key_fields,
-                write_columns=sk.own_columns,
-                expected=[self._expected(k, against[k].seen) for k in removals],
-                rows=[dict.fromkeys(sk.own_columns) for _ in removals],
-            )
-            written |= {k for k, won in zip(removals, flags, strict=True) if won}
-        replaces = {k: w.change.value for k, w in against.items() if isinstance(w.change, Put)}
-        if replaces:
+            for (i, _), flag in zip(chunk, flags, strict=True):
+                won[i] = flag
+        for chunk in chunk_sequence(removals, self.batch_size):
+            expected = [e for _, e in chunk]
+            if sk.deletes_rows:
+                flags = self._adapter.delete_each_if(
+                    table=self._table, key_fields=sk.key_fields, expected=expected
+                )
+            else:
+                flags = self._adapter.replace_each_if(
+                    table=self._table,
+                    key_fields=sk.key_fields,
+                    write_columns=sk.own_columns,
+                    expected=expected,
+                    rows=[dict.fromkeys(sk.own_columns) for _ in chunk],
+                )
+            for (i, _), flag in zip(chunk, flags, strict=True):
+                won[i] = flag
+        for chunk in chunk_sequence(replaces, self.batch_size):
             flags = self._adapter.replace_each_if(
                 table=self._table,
                 key_fields=sk.key_fields,
                 write_columns=sk.write_columns(),
-                expected=[self._expected(k, against[k].seen) for k in replaces],
-                rows=[
-                    self._build_write_row(k, v, ttl=ttl, created_at=against[k].created_at)
-                    for k, v in replaces.items()
-                ],
+                expected=[e for _, e, _ in chunk],
+                rows=[row for _, _, row in chunk],
             )
-            written |= {k for k, won in zip(replaces, flags, strict=True) if won}
-        return written
+            for (i, _, _), flag in zip(chunk, flags, strict=True):
+                won[i] = flag
+        return won
 
     def _expected(self, key: K, seen: Versioned[V]) -> SqlDbRow:
         """The key and the version's columns, which the row must still hold."""
@@ -734,11 +758,14 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         return self.batch_unset([key]) > 0
 
     def batch_unset(self, keys: Sequence[K]) -> int:
-        if not self._sql_kvset.shares_table:
-            return self._delete_rows(keys)
-        return self._clear_own_columns(keys)
+        return self.batch_unset_across([(self, k) for k in keys])
 
-    def _clear_own_columns(self, keys: Sequence[K]) -> int:
+    def batch_unset_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> int:
+        if not self._sql_kvset.shares_table:
+            return self._delete_rows(pairs)
+        return self._clear_own_columns(pairs)
+
+    def _clear_own_columns(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> int:
         sk = self._sql_kvset
         if not sk.own_columns:
             raise KvStoreUnsupported(
@@ -751,33 +778,26 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 "which unsetting a view of a shared table requires"
             )
         cleared = 0
-        for chunk in chunk_sequence(list(keys), self.batch_size):
+        for chunk in chunk_sequence(self._key_rows(list(dict.fromkeys(pairs))), self.batch_size):
             cleared += self._adapter.clear_columns(
                 table=self._table,
                 key_fields=sk.key_fields,
-                keys=[self._full_key_row(k, require_scope=True) for k in chunk],
+                keys=chunk,
                 columns=sk.own_columns,
             )
         return cleared
 
     def batch_get(self, keys: Sequence[K]) -> dict[K, V]:
-        out: dict[K, V] = {}
-        sk = self._sql_kvset
-        for chunk in chunk_sequence(list(keys), self.batch_size):
-            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
-            found = self._adapter.fetch_by_keys(
-                table=self._table,
-                columns=sk.select_columns(),
-                key_fields=sk.key_fields,
-                keys=key_rows,
-            )
-            by_tuple = {_key_tuple(r, sk.key_fields): r for r in found}
-            for key, key_row in zip(chunk, key_rows, strict=True):
-                row = self._live_row(by_tuple.get(_key_tuple(key_row, sk.key_fields)))
-                if row is None:
-                    continue
-                out[key] = self.kvset.value_serde.deserialize(row)
-        return out
+        keys = list(dict.fromkeys(keys))
+        got = self.batch_get_across([(self, k) for k in keys])
+        return {k: v for k, v in zip(keys, got, strict=True) if v is not None}
+
+    def batch_get_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> list[V | None]:
+        """One fetch per batch, across scopes: the scope is in the key columns."""
+        return [
+            None if row is None else self.kvset.value_serde.deserialize(row)
+            for row in self._live_rows(pairs, presence=False)
+        ]
 
     def batch_set(
         self,
@@ -786,16 +806,26 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         ttl: TtlPolicy | None = None,
         created_at: datetime | None = None,
     ) -> None:
+        self.batch_set_across(
+            [(self, k, v) for k, v in items.items()], ttl=ttl, created_at=created_at
+        )
+
+    def batch_set_across(
+        self,
+        items: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K, V]],
+        *,
+        ttl: TtlPolicy | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
         require_write_clock_supported(
             created_at, allowed=True, backend="SqlDbKvStore"
         )
-        pairs = list(items.items())
-        for chunk in chunk_sequence(pairs, self.batch_size):
-            rows = [
-                self._build_write_row(k, v, ttl=ttl, created_at=created_at)
-                for k, v in chunk
-            ]
-            self._write_rows(rows)
+        rows = [
+            self._own(b)._build_write_row(k, v, ttl=ttl, created_at=created_at)
+            for b, k, v in items
+        ]
+        for chunk in chunk_sequence(rows, self.batch_size):
+            self._write_rows(chunk)
 
     def batch_delete(self, keys: Sequence[K]) -> int:
         """Remove the rows — or, from a view that does not own them, its columns.
@@ -804,19 +834,21 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         deleting through any other view removes what that view wrote, so a
         sibling's columns and the record survive.
         """
-        if self._sql_kvset.deletes_rows:
-            return self._delete_rows(keys)
-        return self._clear_own_columns(keys)
+        return self.batch_delete_across([(self, k) for k in keys])
 
-    def _delete_rows(self, keys: Sequence[K]) -> int:
+    def batch_delete_across(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> int:
+        if self._sql_kvset.deletes_rows:
+            return self._delete_rows(pairs)
+        return self._clear_own_columns(pairs)
+
+    def _delete_rows(self, pairs: Sequence[tuple[KvBackend[K, V, str, SqlDbRow, str], K]]) -> int:
         deleted = 0
         sk = self._sql_kvset
-        for chunk in chunk_sequence(list(keys), self.batch_size):
-            key_rows = [self._full_key_row(k, require_scope=True) for k in chunk]
+        for chunk in chunk_sequence(self._key_rows(list(dict.fromkeys(pairs))), self.batch_size):
             deleted += self._adapter.delete_by_keys(
                 table=self._table,
                 key_fields=sk.key_fields,
-                keys=key_rows,
+                keys=chunk,
             )
         return deleted
 
@@ -931,6 +963,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             page_size=spec.page_size,
             include_values=spec.project is Projection.ENTRIES,
             limit=spec.limit,
+            decode=self._decode_leaf_key,
         )
         enforce_strict(spec, residual, backend=type(self).__name__)
         return CompiledScan(rows=rows, residual=residual, pushed=frozenset(pushed))
@@ -971,7 +1004,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 f"invalid scan cursor token for SqlDbKvStore: {cursor.token!r}"
             ) from exc
 
-    def _iter_keyset_rows(
+    def _iter_keyset_rows[T](
         self,
         *,
         user_prefix: K | None,
@@ -979,7 +1012,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         page_size: int,
         include_values: bool,
         limit: int | None,
-    ) -> Iterator[ScanRow[K, V]]:
+        decode: Callable[[SqlDbRow], T | None],
+    ) -> Iterator[ScanRow[T, V]]:
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
         sk = self._sql_kvset
@@ -1007,7 +1041,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                     continue
                 if not self._holds(row):
                     continue
-                decoded = self._decode_leaf_key(row)
+                decoded = decode(row)
                 if decoded is None:
                     continue
                 value = (
@@ -1089,6 +1123,36 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             )
 
     def scan_entries(self, query: ScanQuery[K]) -> Iterator[tuple[K, V | None]]:
+        return self._scan(query, self._decode_leaf_key)
+
+    def scan_scoped_entries(
+        self, query: ScanQuery[K]
+    ) -> Iterator[tuple[Scope, K, V | None]]:
+        """Each row with its whole scope, read from its scope columns."""
+        if not self._sql_kvset.scope_fields:
+            yield from super().scan_scoped_entries(query)
+            return
+        for (scope, leaf), value in self._scan(query, self._decode_scoped):
+            yield scope, leaf, value
+
+    def expired_scoped_keys(
+        self, *, now: datetime | None = None, limit: int
+    ) -> list[tuple[Scope, K]]:
+        if not self._sql_kvset.scope_fields:
+            return super().expired_scoped_keys(now=now, limit=limit)
+        found = map(self._decode_scoped, self._expired_rows(now, limit))
+        return [f for f in found if f is not None]
+
+    def _decode_scoped(self, row: SqlDbRow) -> tuple[Scope, K] | None:
+        leaf = self._decode_leaf_key(row)
+        if leaf is None:
+            return None
+        fields = self._sql_kvset.scope_fields
+        return Scope(segments=tuple(ScopeSegment(f, str(row[f])) for f in fields)), leaf
+
+    def _scan[T](
+        self, query: ScanQuery[K], decode: Callable[[SqlDbRow], T | None]
+    ) -> Iterator[tuple[T, V | None]]:
         if self.kvset.key_layout is not KeyLayout.LITERAL:
             raise KvStoreScanUnsupported(
                 "SqlDbKvStore scan requires KeyLayout.LITERAL "
@@ -1101,6 +1165,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 page_size=query.page_size,
                 include_values=query.include_values,
                 limit=None,
+                decode=decode,
             ):
                 yield row.key, row.value
             return
@@ -1122,7 +1187,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 continue
             if not self._holds(row):
                 continue
-            decoded = self._decode_leaf_key(row)
+            decoded = decode(row)
             if decoded is None:
                 continue
             if query.include_values:

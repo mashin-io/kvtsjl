@@ -312,6 +312,7 @@ Underlying wrapper types (`IndexedKvStore`, `FallbackReadKvStore`, …) exist fo
 | Keys | `.imap_keys` | Caller ↔ storage key (e.g. hash) |
 | Keys | `.scoped` | Restrict keyspace |
 | Keys | `.scope_from` | Take only some kinds of the scope given (a part keyed more coarsely than its record) |
+| Keys | `.beneath` | Every scope beneath this one, each key carrying its scope (`Scoped[K]`) |
 | Across | `.then` / `.then_with` | `other[self[k]]` / `other[f(k,v)]` (FK-style) |
 | Merge | `.coalesce` | Left-biased (same as `.fallback_read`) |
 | Policy | `.mirror`, `.indexed`, `.readonly` | Operational |
@@ -454,6 +455,23 @@ Map caller keys to storage keys (e.g. SHA-256). One-way maps cannot `scan` witho
 ```python
 hashed = memory.imap_keys(sha256_hex, from_store)  # from_store optional
 ```
+
+### `beneath`: many scopes, one batch
+
+A scoped view addresses one scope. `beneath()` addresses every scope beneath it at once: each key is a `Scoped(scope, key)` whose `scope` names the kinds the view has not fixed — all of them:
+
+```python
+mine = bodies.scoped(user=u).beneath()                       # KvStore[Scoped[Hash], bytes]
+found = mine.batch_get([Scoped(Scope.of(slug=s), h) for s, h in refs])
+for ref in mine.scan(): ...                                  # ref.scope, ref.key
+```
+
+- **Isolation holds by construction.** A view scoped to `user=u` cannot express a key under another user: a key naming a fixed kind, missing one, or naming an unknown one raises `KvStoreScopeError`.
+- **It is a store.** Every operation works through it — `get`, `set`, `delete`, `update`, every batch form, scans and expiry — and it composes like any other.
+- **A batch is one batch across scopes**, split by the medium's limits: one SQL query over (scope, key) rows, one Redis `MGET`, and on object stores one concurrent batch under the store's `io_concurrency` — those media have no multi-object read.
+- **Compositions are rebuilt over their children's `beneath()`**: `cache.fallback_read(durable, copy_clock=CopyClock.COPY).scoped(user=u).beneath()` reads the cache in one batch, the misses from the durable store in one batch, and fills in one batch. `mirror`, `zip_with`, `imap` and `imap_keys` are rebuilt too; any other store is correct through `beneath()` with one batch per scope.
+
+`beneath()` and `scoped()` commute: `v.beneath().scoped(slug=s)` and `v.scoped(slug=s).beneath()` address the same entries, and on a view with nothing left beneath every key's scope is empty. A scan through `beneath()` needs the scope recoverable from what is listed — a declared `scope_schema`, and the scope in the key or (SQL) in its columns — and refuses otherwise, before any row; keyed operations still work there. `scan_scoped()` is `beneath().scan()` with each entry's whole scope.
 
 ### Typical pipeline
 

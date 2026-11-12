@@ -63,12 +63,13 @@ def expect_emulator_gap(request: pytest.FixtureRequest, medium: str, feature: st
         request.applymarker(pytest.mark.xfail(strict=True, reason=reason))
 
 
-def _kvset(ttl: TtlPolicy | None) -> Any:
+def _kvset(ttl: TtlPolicy | None, scope_schema: tuple[str, ...] | None) -> Any:
     return KvSet.with_str_keys(
         "media",
         key_serde=SerDe.identity(str),
         value_serde=SerDe.utf8_bytes(),
         ttl_policy=ttl,
+        scope_schema=scope_schema,
     )
 
 
@@ -78,6 +79,7 @@ def make_medium(
     ttl: TtlPolicy | None = None,
     *,
     expiry_gc: ExpiryGc = ExpiryGc.LAZY_DELETE,
+    scope_schema: tuple[str, ...] | None = None,
 ) -> Any:
     """The medium ``name``, holding ``str`` values under ``str`` keys."""
     import fakeredis
@@ -90,12 +92,15 @@ def make_medium(
     from tests.fake_azure import FakeAzureContainer
     from tests.fake_gcs import FakeGcsBucket
 
-    kvset = _kvset(ttl)
+    kvset = _kvset(ttl, scope_schema)
     if name == "memory":
         return MemoryKvStore(kvset, expiry_gc=expiry_gc)
     if name == "sql":
         conn = request.getfixturevalue("sqlite_conn")
-        sql_kvset = make_sql_kvset("media", ttl_policy=ttl)
+        scope = scope_schema or ()
+        sql_kvset = make_sql_kvset(
+            "media", ttl_policy=ttl, scope_fields=scope, scope_schema=scope_schema
+        )
         ensure_sql_table(conn, sql_kvset)
         return SqlDbKvStore(
             sql_kvset, adapter=SqliteSqlDbClientAdapter(conn), expiry_gc=expiry_gc

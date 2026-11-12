@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.compose.topology import StoreTopologyMixin
 from kvtsjl.store.fanout import ScopeFanoutMixin
 from kvtsjl.store.logical import KvStore
@@ -49,6 +49,15 @@ class CoalescedKvStore[K, V](
         return CoalescedKvStore(
             self._primary.clone_with_scope(scope),
             self._secondary.clone_with_scope(scope),
+            promote=self._promote,
+            copy_clock=self._copy_clock,
+        )
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """Rebuilt over each side's ``beneath()``: one batch per side, across scopes."""
+        return CoalescedKvStore(
+            self._primary.beneath(),
+            self._secondary.beneath(),
             promote=self._promote,
             copy_clock=self._copy_clock,
         )

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, cast
 
 from kvtsjl.keymap_algebra.zip import ZippedKeyMap, ZipWithKeyMap
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.compose.topology import StoreTopologyMixin
 from kvtsjl.store.fanout import ScopeFanoutMixin, clone_parts, clone_parts_mapping
 from kvtsjl.store.logical import KvStore
@@ -126,6 +126,14 @@ class ZippedKvStore[K](
             created_at_merge=self._created_at_merge,
         )
 
+    def beneath(self) -> KvStore[Scoped[K], tuple[Any, ...]]:
+        """Rebuilt over each part's ``beneath()``: one batch per part, across scopes."""
+        return ZippedKvStore(
+            [part.beneath() for part in self._store_parts()],
+            mandatory=self._mandatory,
+            created_at_merge=self._created_at_merge,
+        )
+
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import compose_repr
 
@@ -205,6 +213,21 @@ class ZipWithKvStore[K, V](
         return ZipWithKvStore(
             self._ctor,
             clone_parts_mapping(self._store_parts(), scope),
+            commit_part=self._commit_part,
+            after_commit=self._after_commit,
+            mandatory=self._mandatory,
+            created_at_merge=self._created_at_merge,
+        )
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """Rebuilt over each part's ``beneath()``: one batch per part, across scopes.
+
+        A part keyed more coarsely than the record (``scope_from``) narrows
+        each key's scope as it does the record's.
+        """
+        return ZipWithKvStore(
+            self._ctor,
+            {name: part.beneath() for name, part in self._store_parts().items()},
             commit_part=self._commit_part,
             after_commit=self._after_commit,
             mandatory=self._mandatory,

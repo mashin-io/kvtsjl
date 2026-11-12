@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Self, cast
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.exceptions import KvStoreError, PartialSyncError
 from kvtsjl.keymap import ConditionalWrite, Decision, Keep, KeyMap, Put, Versioned
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.policy import SyncPolicy
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from kvtsjl.keymap_algebra.topology import MissingPage
     from kvtsjl.store.compose.indexed import IndexedKvStore
     from kvtsjl.store.readable import ReadableKvStore as ReadableKvStoreType
+    from kvtsjl.store.schema.scan import Predicate
     from kvtsjl.store.schema.stat import RecordStat
 
 
@@ -359,6 +360,54 @@ class KvStore[K, V](
             KvStore[K, V],
             build_coalesce(self, secondary, promote=promote, copy_clock=copy_clock),
         )
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """This store's entries in every scope beneath its own, each key with its scope.
+
+        ``Scoped(scope, key)`` names the scope kinds this store has not fixed —
+        with a declared schema, all of them — so a view scoped to ``user=u``
+        reaches only ``u``'s entries. Every operation works through it, and a batch is one batch
+        across all the scopes it names, as the medium allows::
+
+            mine = bodies.scoped(user=u).beneath()
+            mine.batch_get([Scoped(Scope.of(slug=s), h) for s, h in refs])
+
+        ``beneath()`` and ``scoped()`` commute. See
+        :class:`~kvtsjl.store.compose.beneath.BeneathKvStore`.
+        """
+        from kvtsjl.store.compose.beneath import BeneathKvStore
+
+        return BeneathKvStore(self)
+
+    def scan_scoped(
+        self,
+        prefix: K | None = None,
+        *,
+        include_values: bool = False,
+        page_size: int | None = None,
+        where: Predicate[K] | None = None,
+        limit: int | None = None,
+    ) -> Iterator[tuple[Scope, K, V | None]]:
+        """``beneath().scan()``, each entry with its whole scope rather than the rest of it.
+
+        ``prefix`` and ``where`` apply to the leaf key; ``limit`` counts what
+        they keep.
+        """
+        from kvtsjl.store.compose.beneath import OnLeaf
+        from kvtsjl.store.schema.scan import AlwaysTrue, KeyPrefix, Projection, ScanSpec
+
+        leaf: Predicate[K] | None = where
+        if prefix is not None:
+            starts = KeyPrefix[K](prefix)
+            leaf = starts if leaf is None else starts & leaf
+        spec = ScanSpec[Scoped[K]](
+            where=OnLeaf(leaf) if leaf is not None else AlwaysTrue(),
+            project=Projection.ENTRIES if include_values else Projection.KEYS,
+            limit=limit,
+            page_size=page_size or self.batch_size,
+        )
+        for row in self.beneath().scan_rows(spec):
+            yield self.scope / row.key.scope, row.key.key, row.value
 
     def scope_from(self, *kinds: str) -> KvStore[K, V]:
         """This store, taking only the ``kinds`` of any scope it is given.

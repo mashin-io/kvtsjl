@@ -90,5 +90,18 @@ class Scope:
         return f"Scope({self.path_display()!r})"
 
 
+@dataclass(frozen=True, slots=True)
+class Scoped[K]:
+    """A key in a scope beneath the view it is used through.
+
+    ``scope`` names only kinds the view has not fixed — with a declared
+    schema, all of them: with the view's own segments it is the key's whole
+    scope. A view scoped to ``user=u`` cannot express a key under another user.
+    """
+
+    scope: Scope
+    key: K
+
+
 # Alias for callers who think in prefixes rather than "scope".
 KeyPrefix = Scope

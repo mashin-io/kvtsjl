@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntFlag, auto
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
+from kvtsjl.scope import Scoped
 from kvtsjl.store.schema.layout import ScanQuery
 
 if TYPE_CHECKING:  # annotation only — kvtsjl.keymap imports this package
@@ -189,7 +190,14 @@ class KeyPrefix[K](KeyPredicate[K]):
             return key.startswith(prefix)
         if isinstance(key, bytes) and isinstance(prefix, bytes):
             return key.startswith(prefix)
-        return str(key).startswith(str(prefix))
+        if isinstance(key, Scoped) and isinstance(prefix, Scoped):
+            return _under_scoped_prefix(cast(Scoped[object], key), cast(Scoped[object], prefix))
+        return str(row.key).startswith(str(self.prefix))
+
+
+def _under_scoped_prefix(key: Scoped[object], prefix: Scoped[object]) -> bool:
+    """In the prefix's scope, with a leaf that starts with its leaf."""
+    return key.scope == prefix.scope and KeyPrefix(prefix.key).evaluate(ScanRow(key=key.key))
 
 
 def _cmp_ordered_keys(a: object, b: object) -> int:

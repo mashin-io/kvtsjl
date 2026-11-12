@@ -205,6 +205,17 @@ class KvSet[K, V, KBLOB, VBLOB](PhysicalSchema[K, V, KBLOB, VBLOB]):
             return self.blob_ops.concat()
         return self.blob_ops.join(parts)
 
+    def rescope(self, scope: Scope, key: K) -> tuple[Scope, K] | None:
+        """The whole scope and leaf of ``key``, as a store bound to ``scope`` decoded it.
+
+        Under a prefix of the schema, a key a store lists still carries the
+        scope segments beneath that prefix; this splits them off. ``None`` for
+        a key that does not decode under the schema.
+        """
+        prefix = self.encode_in_key(scope, None)
+        blob = self.key_serde.serialize(key)
+        return self.decode_in_key(self.blob_ops.join([prefix, blob]) if prefix else blob)
+
     def decode_in_key(self, in_key: KBLOB) -> tuple[Scope, K] | None:
         """Inverse of ``encode_in_key``: recover the full scope and the leaf.
 

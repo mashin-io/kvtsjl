@@ -9,7 +9,7 @@ from typing import Any, Self, cast
 from kvtsjl.bind.namespace import CollectionBinding
 from kvtsjl.keymap import ConditionalWrite, Versioned
 from kvtsjl.keymap_algebra.topology import MissingPage
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.backend import KvBackend
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.kvset import KvSet
@@ -195,6 +195,12 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
 
     def clone_with_scope(self, scope: Scope) -> Self:
         return type(self).from_backend(self._backend.clone_with_scope(scope))
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """Batches across scopes in one round of I/O, as the medium allows."""
+        from kvtsjl.store.compose.beneath import LeafBeneathKvStore
+
+        return LeafBeneathKvStore(self)
 
     @property
     def creates_entries(self) -> bool:

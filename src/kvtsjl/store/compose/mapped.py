@@ -9,7 +9,7 @@ from typing import cast
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKeyMap
 from kvtsjl.keymap_algebra.topology import MissingPage
-from kvtsjl.scope import Scope
+from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.fanout import (
     GcPassthroughMixin,
     ScopeFanoutMixin,
@@ -170,6 +170,10 @@ class IMappedKvStore[K, V, U](
             self._src().clone_with_scope(scope), self._forward, self._inverse
         )
 
+    def beneath(self) -> KvStore[Scoped[K], U]:
+        """Rebuilt over the store's ``beneath()``: values map as they do here."""
+        return IMappedKvStore(self._src().beneath(), self._forward, self._inverse)
+
     def __repr__(self) -> str:
         from kvtsjl.store.repr_util import callable_label, compose_repr
 
@@ -309,6 +313,21 @@ class IMappedKeysKvStore[K, SK, V](
     def _clone_fanout(self, scope: Scope) -> IMappedKeysKvStore[K, SK, V]:
         return IMappedKeysKvStore(
             self._src().clone_with_scope(scope), self._to_store, self._from_store
+        )
+
+    def beneath(self) -> KvStore[Scoped[K], V]:
+        """Rebuilt over the store's ``beneath()``: each key's leaf maps as it does here."""
+        to_store, from_store = self._to_store, self._from_store
+
+        def lifted(key: Scoped[K]) -> Scoped[SK]:
+            return Scoped(key.scope, to_store(key.key))
+
+        def lifted_back(stored: Scoped[SK]) -> Scoped[K]:
+            assert from_store is not None
+            return Scoped(stored.scope, from_store(stored.key))
+
+        return IMappedKeysKvStore(
+            self._src().beneath(), lifted, None if from_store is None else lifted_back
         )
 
     def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[K]:
