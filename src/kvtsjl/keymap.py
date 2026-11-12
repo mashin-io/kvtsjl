@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Never, overload
 
 from kvtsjl.exceptions import KvStoreConflict, KvStoreUnsupported
 from kvtsjl.store.schema.stat import RecordStat
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import CopyClock, TtlPolicy
 
 if TYPE_CHECKING:
     from kvtsjl.keymap_algebra.bundle import ZipPartsBundle
@@ -278,12 +278,20 @@ class ReadableKeyMap[K, T](ABC):
 
     @overload
     def coalesce(
-        self: KvStore[K, T], other: KvStore[K, T], *, promote: bool = True
+        self: KvStore[K, T],
+        other: KvStore[K, T],
+        *,
+        promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> KvStore[K, T]: ...
 
     @overload
     def coalesce(
-        self: KeyMap[K, T], other: KeyMap[K, T], *, promote: bool = True
+        self: KeyMap[K, T],
+        other: KeyMap[K, T],
+        *,
+        promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> KeyMap[K, T]: ...
 
     @overload
@@ -292,20 +300,33 @@ class ReadableKeyMap[K, T](ABC):
         other: ReadableKvStore[K, T],
         *,
         promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> ReadableKvStore[K, T]: ...
 
     @overload
     def coalesce(
-        self, other: ReadableKeyMap[K, T], *, promote: bool = True
+        self,
+        other: ReadableKeyMap[K, T],
+        *,
+        promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> ReadableKeyMap[K, T]: ...
 
     def coalesce(
-        self, other: ReadableKeyMap[K, T], *, promote: bool = True
+        self,
+        other: ReadableKeyMap[K, T],
+        *,
+        promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> ReadableKeyMap[K, T]:
-        """Left-biased merge: prefer ``self``, else ``other`` (writes to ``self`` when writable)."""
+        """Left-biased merge: prefer ``self``, else ``other`` (writes to ``self`` when writable).
+
+        ``copy_clock`` says when a value promoted into ``self`` starts its life;
+        see :class:`~kvtsjl.store.schema.ttl.CopyClock`.
+        """
         from kvtsjl.keymap_algebra.build import build_coalesce
 
-        return build_coalesce(self, other, promote=promote)
+        return build_coalesce(self, other, promote=promote, copy_clock=copy_clock)
 
     @overload
     def imap[U](

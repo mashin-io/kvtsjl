@@ -496,7 +496,7 @@ Each operation is one of those traversals plus when it stops, how it combines re
 3. **A part is unset, a record is deleted** — writing a part as absent removes only that part's own data (a shared-table view nulls its own columns); deleting the record removes it all. Every view of a shared entry, table row or index entry, follows one rule: only the view that owns entries creates or deletes them.
 4. **Existence is a read** — `exists(k)` holds exactly when `get(k)` returns a record.
 5. **Scans list only records** — every key a scan yields is one `get` returns.
-6. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept; it carries the write clock so a promoted value keeps its remaining life.
+6. **Reads write only fills, and a fill never replaces** — a promotion is a conditional write, so a value written since the miss is kept. A copy keeps the record's write clock, and so its remaining life, unless the target says its TTL counts from the copy (`copy_clock=CopyClock.COPY`, a cache).
 7. **Values flow downstream only** — fallback → authority → copies; a stale cache or a lagging replica is never written back.
 8. **Failures say which side of the commit they fell on** — `UncommittedWriteError` (`committed=False`): the record is absent; `PartialSyncError` (`committed=True`): it is present and a dependent is stale.
 9. **Unsupported is never best-effort** — a `KvStoreUnsupported` (asking a medium for something it cannot do) is raised under every sync policy, never logged away.
@@ -578,6 +578,17 @@ Under it are two primitives, and both are batches — `batch_read_versioned(keys
 
 A batch is one request where the medium allows it (SQL's fetch and one adapter call per kind of write — `insert_each_if_absent`, `replace_each_if`, `delete_each_if`, each reporting per row, which an adapter may send as one statement; Redis's `MGET`, one pipeline of `SET NX` and one `WATCH`…`EXEC`), and `io_concurrency` requests at a time on object stores. A medium refuses what it cannot do atomically rather than read and then write. A version names what is stored, not when: S3's ETag and Redis's version are the bytes, so a concurrent rewrite of identical bytes is not a change — which matters only to a decision taken on an entry that had expired, and Redis removes those itself. Compositions derive `update` from the laws: the authority's version is the record's; a mirror or an index follows only a write that happened; a fallback's value is seen where the authority has none, and a `Put` writes into the authority — the fallback is never written. Each target receives one batch per round. A zip updates through its `commit_part`, and writes only the parts that changed: those declared `after_commit` once it commits; one written before it refuses to change, since it could not be taken back if the record had changed. A group of child rows has no one version and refuses on its own; as an `after_commit` part it follows its record. A view of a shared row updates its own columns, and only the view that owns rows creates one.
 
+### A cache, or a new version: when a copy starts its life
+
+`fallback_read` promotes what it finds in the fallback. What the promoted copy's TTL counts from depends on what the store in front is for, so say it:
+
+```python
+new_version.fallback_read(old_version)                              # copies keep each record's remaining life
+local_cache.fallback_read(durable, copy_clock=CopyClock.COPY)       # copies stay for the cache's TTL from now
+```
+
+The default, `CopyClock.RECORD`, carries each record's write clock: a record written three days ago into a store with a four-day TTL has one day left. `CopyClock.COPY` makes the TTL mean how long to keep a copy — with `RECORD`, a cache with a one-day TTL would receive every record older than a day already expired, and never serve it. Every copy follows the choice — read fills, streamed fills and `fill_missing` — and under `COPY` the fallback is not asked for a clock at all.
+
 ### Filling a store from its fallback
 
 A fallback already says where the records a store lacks can be found, so copying them over is an operation of that composition — the same lookup, run over keys:
@@ -590,7 +601,7 @@ stats = filling.fill_missing(limit=500)
 # FillStats(scanned=…, missing=…, written=…, lost_race=…, source_miss=…)
 ```
 
-Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. It works at any depth: ask `records.fallback_read(src).indexed(index)` and the fallback inside is found and the copies are indexed; `imap` and `imap_keys` views translate what the store behind them lacks. The fallback's write clock is carried, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional insert in one request (the table above).
+Each copy is a conditional write of the whole record — components, then the authority, then its indexes and copies — so nothing `records` holds is ever replaced; a writer that got there first is counted in `lost_race`. It works at any depth: ask `records.fallback_read(src).indexed(index)` and the fallback inside is found and the copies are indexed; `imap` and `imap_keys` views translate what the store behind them lacks. The fallback's write clock is carried unless the composition says `copy_clock=CopyClock.COPY`, keys are read a page at a time, and a later call continues where a `limit` stopped. Every medium supports the conditional insert in one request (the table above).
 
 ---
 

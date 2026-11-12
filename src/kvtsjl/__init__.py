@@ -59,6 +59,7 @@ from kvtsjl.schema import BlobOps, BytesBlobOps, PhysicalSchema, StrBlobOps, Wir
 from kvtsjl.scope import KeyPrefix, Scope, ScopeSegment
 from kvtsjl.serde import CompressionCodec, SerDe
 from kvtsjl.store import (
+    CopyClock,
     ExpiryGc,
     FallbackReadKvStore,
     FillStats,
@@ -86,6 +87,7 @@ __all__ = [
     "DictKeyMap",
     "FillStats",
     "EmptyEnvelope",
+    "CopyClock",
     "ExpiryGc",
     "FallbackReadKvStore",
     "FilesystemKvStore",

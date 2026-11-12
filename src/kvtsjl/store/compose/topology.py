@@ -15,6 +15,7 @@ from datetime import datetime
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
 from kvtsjl.keymap_algebra.topology import (
+    CopyClock,
     KeyMapTarget,
     Lookup,
     MissingPage,
@@ -67,9 +68,17 @@ class StoreTarget[K, V, P](KeyMapTarget[K, V, P]):
         lookup: Lookup | None = None,
         fill: bool = False,
         policy: SyncPolicy = SyncPolicy.REQUIRED,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> None:
         super().__init__(
-            name, role, store, slot, lookup=lookup, fill=fill, policy=policy
+            name,
+            role,
+            store,
+            slot,
+            lookup=lookup,
+            fill=fill,
+            policy=policy,
+            copy_clock=copy_clock,
         )
         self.store = store
 
@@ -136,6 +145,7 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
         lookup: Lookup | None = None,
         fill: bool = False,
         policy: SyncPolicy = SyncPolicy.REQUIRED,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> Target[K, V, V]:
         return StoreTarget(
             name,
@@ -145,6 +155,7 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
             lookup=lookup,
             fill=fill,
             policy=policy,
+            copy_clock=copy_clock,
         )
 
     def _part[P](

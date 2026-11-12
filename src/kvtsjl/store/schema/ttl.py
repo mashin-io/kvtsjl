@@ -84,3 +84,17 @@ def require_write_clock_supported(
         raise KvStoreTtlUnsupported(
             f"{backend} does not support created_at with the current provision"
         )
+
+
+class CopyClock(str, Enum):
+    """When a copy kvtsjl makes into a target — a fill, a promotion — starts its life.
+
+    Only the composition knows what the target's TTL measures, so it says.
+    """
+
+    RECORD = "record"
+    """The record's write clock: the copy expires when the record would. A
+    migration, a replica, a tier of the same records."""
+    COPY = "copy"
+    """The moment it is copied: the target's TTL is how long it keeps a copy.
+    A cache."""

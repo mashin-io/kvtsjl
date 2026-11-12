@@ -224,8 +224,13 @@ check each one, against the compositions kvtsjl ships and ones it does not.
 6. **Reads write only fills, and a fill never replaces.** A read changes a
    target only to fill one marked ``fill``, with a conditional write: a value
    written since the miss is kept, not overwritten by the copy. A fill is
-   best-effort — the read already succeeded — and carries the write clock, so
-   a filled value keeps its remaining life.
+   best-effort — the read already succeeded. When the copy starts its life is
+   the target's ``copy_clock``: with the record's write clock, so it keeps the
+   record's remaining life (``RECORD``, a migration or a replica), or when it
+   is copied, so the target's TTL counts how long it keeps a copy (``COPY``, a
+   cache). Every copy kvtsjl makes into the target follows it — a fill, a
+   streamed fill, ``fill_missing`` — and the source is asked for a clock only
+   where one is kept.
 7. **Values flow downstream only.** Fallback → authority → dependents. A copy
    never feeds what it was copied from, so neither a read nor
    ``fill_missing`` can write a stale cache or a lagging replica back into
@@ -329,7 +334,7 @@ from kvtsjl.exceptions import (
 from kvtsjl.keymap import Change, ConditionalWrite, KeyMap, Put, Remove, Versioned
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.stat import RecordStat
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import CopyClock, TtlPolicy
 from kvtsjl.store.streaming import StreamSource, close_stream
 
 logger = logging.getLogger(__name__)
@@ -386,6 +391,7 @@ class Target[K, V, P](ABC):
         lookup: Lookup | None = None,
         fill: bool = False,
         policy: SyncPolicy = SyncPolicy.REQUIRED,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> None:
         if lookup is not None and role in (Role.AUTHORITY, Role.COMPONENT):
             raise ValueError(
@@ -399,6 +405,7 @@ class Target[K, V, P](ABC):
         self.lookup = lookup if lookup is not None else _DEFAULT_LOOKUP.get(role)
         self.fill = fill
         self.policy = policy
+        self.copy_clock = copy_clock
 
     # --- writes --------------------------------------------------------------
 
@@ -495,6 +502,11 @@ class Target[K, V, P](ABC):
         return replace(options, created_at=None)
 
     @property
+    def keeps_record_clock(self) -> bool:
+        """Whether a copy into this target carries the record's write clock."""
+        return self.supports_write_clock and self.copy_clock is CopyClock.RECORD
+
+    @property
     def expires(self) -> bool:
         """Whether entries expire here on their own, leaving garbage to collect."""
         return False
@@ -539,8 +551,11 @@ class KeyMapTarget[K, V, P](Target[K, V, P]):
         lookup: Lookup | None = None,
         fill: bool = False,
         policy: SyncPolicy = SyncPolicy.REQUIRED,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> None:
-        super().__init__(name, role, lookup=lookup, fill=fill, policy=policy)
+        super().__init__(
+            name, role, lookup=lookup, fill=fill, policy=policy, copy_clock=copy_clock
+        )
         self.keymap = keymap
         self._slot = slot
 
@@ -647,6 +662,10 @@ class MissingPage[K, V]:
             return {k: u for k, v in read(keys).items() if (u := forward(v)) is not None}
 
         return MissingPage(self.listed, self.missing, mapped, self.stat)
+
+    def without_clocks(self) -> MissingPage[K, V]:
+        """This page with no write clock to carry: its copies start when made."""
+        return MissingPage(self.listed, self.missing, self.read, lambda _keys: {})
 
     def map_keys[J](self, outward: Callable[[K], J]) -> MissingPage[J, V]:
         """This page under the keys a view shows; reads go back to the stored ones."""
@@ -1224,7 +1243,9 @@ class Topology[K, V]:
         authority = self.whole_authority
         if authority is None:
             return
-        yield from authority.missing_pages(page_size)
+        fresh = authority.copy_clock is CopyClock.COPY
+        for inner in authority.missing_pages(page_size):
+            yield inner.without_clocks() if fresh else inner
         fallbacks = [t for t in self.lookups() if t.role is Role.FALLBACK]
         for index, fallback in enumerate(fallbacks):
             ahead = [authority, *fallbacks[:index]]
@@ -1235,7 +1256,8 @@ class Topology[K, V]:
                         break
                     held = target.batch_exists(absent)
                     absent = [k for k in absent if k not in held]
-                yield MissingPage(page, absent, fallback.batch_read, fallback.batch_stat)
+                found = MissingPage(page, absent, fallback.batch_read, fallback.batch_stat)
+                yield found.without_clocks() if fresh else found
 
     # --- reads ---------------------------------------------------------------
 
@@ -1378,21 +1400,23 @@ class Topology[K, V]:
         """Give each value to every target that asked for it, unless it has one now.
 
         A conditional write, so a value written between the miss and the fill
-        is kept rather than replaced by the copy; each carries its record's
-        write clock. One batch per target.
+        is kept rather than replaced by the copy. A target that keeps the
+        record's clock gets each record's write clock; any other starts the
+        copy now, and the source is not asked for a clock nobody keeps. One
+        batch per target.
         """
         into = _fillable(source, consulted)
         if not into:
             return
-        stats = source.batch_stat(list(hits)) if any(t.supports_write_clock for t in into) else {}
-        writes = {
-            k: ConditionalWrite(Versioned.absent(), Put(v), _clock(stats.get(k)))
-            for k, v in hits.items()
-        }
+        keeping = any(t.keeps_record_clock for t in into)
+        stats = source.batch_stat(list(hits)) if keeping else {}
+        fresh = {k: ConditionalWrite(Versioned.absent(), Put(v)) for k, v in hits.items()}
+        stamped = {k: replace(w, created_at=_clock(stats.get(k))) for k, w in fresh.items()}
         for target in into:
+            writes = stamped if target.keeps_record_clock else fresh
             _try_fill(
                 target.name,
-                lambda t=target: t.batch_write_if_unchanged(_received(t, writes), WriteOptions()),
+                lambda t=target, w=writes: t.batch_write_if_unchanged(w, WriteOptions()),
             )
 
     # --- the whole tree ------------------------------------------------------
@@ -1422,12 +1446,12 @@ def _fill_stream[K, C: (bytes, str)](
     into = _fillable(source, consulted)
     if not into:
         return chunks
-    clock = _clock(source.stat(key)) if any(t.supports_write_clock for t in into) else None
+    clock = _clock(source.stat(key)) if any(t.keeps_record_clock for t in into) else None
     current: Iterator[C] | None = chunks
     for target in into:
         if current is None:
             return None
-        options = target.receives(WriteOptions(created_at=clock))
+        options = WriteOptions(created_at=clock if target.keeps_record_clock else None)
         try:
             target.write_stream(key, current, options, None)
         except KvStoreUnsupported:
@@ -1594,9 +1618,17 @@ class RecordTopologyMixin[K, V](KeyMap[K, V], ABC):
         lookup: Lookup | None = None,
         fill: bool = False,
         policy: SyncPolicy = SyncPolicy.REQUIRED,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> Target[K, V, V]:
         return KeyMapTarget(
-            name, role, keymap, whole, lookup=lookup, fill=fill, policy=policy
+            name,
+            role,
+            keymap,
+            whole,
+            lookup=lookup,
+            fill=fill,
+            policy=policy,
+            copy_clock=copy_clock,
         )
 
     def _part[P](

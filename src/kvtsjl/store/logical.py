@@ -15,7 +15,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.capabilities import ExpiringMixin, TtlWritesMixin
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.policy import SyncPolicy
-from kvtsjl.store.schema.ttl import TtlPolicy
+from kvtsjl.store.schema.ttl import CopyClock, TtlPolicy
 from kvtsjl.store.streaming import StreamingView, StreamSource
 
 if TYPE_CHECKING:
@@ -161,9 +161,10 @@ class KvStore[K, V](
         one ``batch_write_if_unchanged`` — so it is written at the level the
         fill was asked for: indexes and copies on the way down receive it,
         and nothing the store holds is ever replaced — a writer
-        that got there first wins and is counted in ``lost_race``. The
-        fallback's write clock is carried where the store keeps one, so a
-        copy keeps its remaining life. A failure raises: this is an explicit
+        that got there first wins and is counted in ``lost_race``. A copy
+        starts its life as the composition's ``copy_clock`` says: with the
+        fallback's write clock where the store keeps one (``RECORD``), or
+        when it is copied (``COPY``). A failure raises: this is an explicit
         write, not a read's best-effort fill. ``limit`` bounds the records
         written, and a later call continues, since what was copied is no
         longer missing::
@@ -338,11 +339,26 @@ class KvStore[K, V](
         secondary: KvStore[K, V],
         *,
         promote: bool = True,
+        copy_clock: CopyClock = CopyClock.RECORD,
     ) -> KvStore[K, V]:
-        """Read-through secondary on miss (e.g. new version → old version)."""
+        """Read-through secondary on miss.
+
+        ``copy_clock`` says what this store's TTL measures for a value it
+        promotes. ``CopyClock.RECORD`` (default): the record's life — a new
+        version of an old store keeps each record's write clock, so it
+        expires when it would have. ``CopyClock.COPY``: how long to keep a
+        copy — a cache in front of a durable store keeps a promoted value for
+        its own TTL from when it is promoted::
+
+            new_version.fallback_read(old_version)
+            local_cache.fallback_read(durable, copy_clock=CopyClock.COPY)
+        """
         from kvtsjl.keymap_algebra.build import build_coalesce
 
-        return cast(KvStore[K, V], build_coalesce(self, secondary, promote=promote))
+        return cast(
+            KvStore[K, V],
+            build_coalesce(self, secondary, promote=promote, copy_clock=copy_clock),
+        )
 
     def scope_from(self, *kinds: str) -> KvStore[K, V]:
         """This store, taking only the ``kinds`` of any scope it is given.

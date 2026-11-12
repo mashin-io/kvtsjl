@@ -12,6 +12,7 @@ from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKe
 from kvtsjl.keymap_algebra.then import ThenKeyMap, ThenWithKeyMap
 from kvtsjl.keymap_algebra.zip import ZippedKeyMap, ZipWithKeyMap
 from kvtsjl.store.logical import KvStore
+from kvtsjl.store.schema.ttl import CopyClock
 
 
 def build_map[K, T, U](
@@ -153,6 +154,7 @@ def build_coalesce[K, T](
     right: ReadableKeyMap[K, T],
     *,
     promote: bool = True,
+    copy_clock: CopyClock = CopyClock.RECORD,
 ) -> ReadableKeyMap[K, T]:
     """Left-biased merge; KvStore parts get scan/GC fan-out (scan never promotes)."""
     from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
@@ -160,9 +162,9 @@ def build_coalesce[K, T](
     if isinstance(left, KvStore) and isinstance(right, KvStore):
         from kvtsjl.store.compose.fallback import CoalescedKvStore
 
-        return CoalescedKvStore(left, right, promote=promote)
+        return CoalescedKvStore(left, right, promote=promote, copy_clock=copy_clock)
     if isinstance(left, KeyMap) and isinstance(right, KeyMap):
-        return CoalescedKeyMap(left, right, promote=promote)
+        return CoalescedKeyMap(left, right, promote=promote, copy_clock=copy_clock)
     raise TypeError(
         f"coalesce requires writable KeyMap or KvStore parts, got "
         f"{type(left).__name__} and {type(right).__name__}"

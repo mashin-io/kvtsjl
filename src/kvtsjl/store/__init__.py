@@ -30,9 +30,10 @@ from kvtsjl.store.schema.scan import (
     ScanRow,
     ScanSpec,
 )
-from kvtsjl.store.schema.ttl import ExpiryGc
+from kvtsjl.store.schema.ttl import CopyClock, ExpiryGc
 
 __all__ = [
+    "CopyClock",
     "ExpiryGc",
     "Expired",
     "FallbackReadKvStore",
