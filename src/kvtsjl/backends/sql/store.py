@@ -8,7 +8,7 @@ import json
 import time
 from typing import Any, cast
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness, SqlSelect
+from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness, SqlOrder, SqlSelect
 from kvtsjl.backends.sql.schema import ExpiryBinding, SqlDbKvSet, SqlDbRow
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
@@ -28,6 +28,7 @@ from kvtsjl.store import KvBackend
 from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
+    After,
     AlwaysTrue,
     CompiledScan,
     FieldContains,
@@ -866,9 +867,9 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         ``KEY_ASC`` rests on the adapter contract: ``scan_by_key_parts`` and
         ``select`` yield rows in ascending ``key_fields`` order unless told
         otherwise. With ``select`` the adapter also takes the field tests on
-        the view's declared columns, ``order_by`` over them, and keyset pages
-        that a ``ScanCursor`` resumes; without it the store runs every filter
-        itself and ``order_by`` refuses.
+        the view's declared columns, ``order_by`` over them and its
+        ``after``, and keyset pages that a ``ScanCursor`` resumes; without it
+        the store runs every filter itself and sorts ``order_by`` in process.
         """
         selects = self._adapter.supports_select()
         pushdown: set[type] = {KeyPrefix}
@@ -896,20 +897,13 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
         return (None if isinstance(taken, AlwaysTrue) else taken), rest
 
-    def _resolve_order_by(self, order_by: Sequence[OrderBy]) -> list[OrderBy]:
-        """Validate columns and append key fields ascending for a total order.
+    def _resolve_order_by(self, order_by: Sequence[OrderBy[Any]]) -> list[SqlOrder]:
+        """The columns to order by: ``order_by``'s, then the key fields ascending.
 
-        Without the tiebreak, SQL may return tied rows in any order, so repeated
-        scans disagree on which row is "newest" whenever timestamps collide
-        (fast tests, bulk imports). Appended fields are always ascending: the
-        direction is irrelevant for determinism, and fixing it means two
-        implementations cannot disagree.
+        The key fields make the order total, and ascending is the tiebreak
+        every store sorts by in process — by key, ascending — so SQL and
+        Python agree on which of two rows with equal values comes first.
         """
-        if not self._adapter.supports_select():
-            raise KvStoreScanUnsupported(
-                f"{type(self._adapter).__name__} does not support order_by; "
-                "implement supports_select() and select()"
-            )
         allowed = frozenset(self._sql_kvset.select_columns())
         for item in order_by:
             if item.column not in allowed:
@@ -917,12 +911,23 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                     f"order_by column {item.column!r} is not a declared column "
                     f"(have {sorted(allowed)!r})"
                 )
-        resolved = list(order_by)
+        resolved = [SqlOrder(item.column, item.descending) for item in order_by]
         named = {item.column for item in resolved}
         for field_name in self._sql_kvset.key_fields:
             if field_name not in named:
-                resolved.append(OrderBy(field_name))
+                resolved.append(SqlOrder(field_name))
         return resolved
+
+    def _after_row(self, after: After[K], order: Sequence[SqlOrder]) -> SqlDbRow:
+        """``after`` as the leading columns of ``order``: its values, then its key's."""
+        row: SqlDbRow = {
+            item.column: value for item, value in zip(order, after.values, strict=False)
+        }
+        if after.key is not None:
+            key_row = self._full_key_row(after.key, require_scope=True)
+            for item in order[len(after.values) :]:
+                row[item.column] = key_row[item.column]
+        return row
 
     def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
         if not spec.order_by:
@@ -940,6 +945,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         user_prefix, rest = peel_key_prefix(spec.where)
         tests, residual = self._peel_field_tests(rest)
         pushed = {"order_by"}
+        if spec.after is not None:
+            pushed.add("after")
         if user_prefix is not None:
             pushed.add("KeyPrefix")
         if tests is not None:
@@ -958,6 +965,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             user_prefix=user_prefix,
             tests=tests,
             order_by=order_by,
+            after=None if spec.after is None else self._after_row(spec.after, order_by),
             limit=limit,
             include_values=spec.project is Projection.ENTRIES,
         )
@@ -1048,7 +1056,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         sk = self._sql_kvset
         exact = self._scope_key_row(require_all=False)
         prefixes = self._leaf_prefix_map(user_prefix)
-        key_order = tuple(OrderBy(f) for f in sk.key_fields)
+        key_order = tuple(SqlOrder(f) for f in sk.key_fields)
         expired_keys: list[SqlDbRow] = []
         after = after_key
         yielded = 0
@@ -1118,7 +1126,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         *,
         user_prefix: K | None,
         tests: Predicate[K] | None,
-        order_by: Sequence[OrderBy],
+        order_by: Sequence[SqlOrder],
+        after: SqlDbRow | None,
         limit: int | None,
         include_values: bool,
     ) -> Iterator[ScanRow[K, V]]:
@@ -1141,6 +1150,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             exact=self._scope_key_row(require_all=False),
             prefixes=self._leaf_prefix_map(user_prefix),
             where=tests,
+            after=after,
             limit=limit,
             live=live,
         )

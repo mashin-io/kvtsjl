@@ -2,7 +2,8 @@
 
 The commit part decides which records exist, so its scan is the record's
 scan: the order and the pages come from it, and each record is assembled and
-confirmed by ``get``. Asking for an order no one part can give refuses.
+confirmed by ``get``. An order no one part can give is sorted from the
+assembled records.
 """
 
 from __future__ import annotations
@@ -18,7 +19,15 @@ from kvtsjl.backends.sql.sqlite import SqliteSqlDbClientAdapter
 from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.store.logical import KvStore
-from kvtsjl.store.schema.scan import OrderBy, Projection, ScanCursor, ScanSpec
+from kvtsjl.store.schema.scan import (
+    After,
+    Field,
+    OrderBy,
+    Projection,
+    Pushdown,
+    ScanCursor,
+    ScanSpec,
+)
 from tests.sql_helpers import ensure_sql_table, make_sql_kvset
 
 
@@ -26,6 +35,11 @@ from tests.sql_helpers import ensure_sql_table, make_sql_kvset
 class Turn:
     core: str | None
     body: str | None
+
+
+# The commit part's "value" column holds the record's core.
+CORE = Field[Turn, str | None]("value", lambda t: t.core)
+BODY = Field[Turn, str | None]("body", lambda t: t.body)
 
 
 def _core(conn: sqlite3.Connection) -> Any:
@@ -50,13 +64,19 @@ def _turns(conn: sqlite3.Connection, *, bodies: Any = None, **kw: Any) -> Any:
 
 def test_an_ordered_scan_follows_the_commit_part_s_columns() -> None:
     turns = _turns(sqlite3.connect(":memory:"))
-    newest = list(turns.scan(order_by=[OrderBy("value", descending=True)]))
-    assert newest == ["d", "a", "c", "b"], "the order asked for was ignored"
+    newest = turns.scan(order_by=[OrderBy(CORE, descending=True)], on_unsupported=Pushdown.STRICT)
+    assert list(newest) == ["d", "a", "c", "b"], "the order asked for was ignored"
+    rest = turns.scan(
+        order_by=[OrderBy(CORE, descending=True)],
+        after=After(("3",)),
+        on_unsupported=Pushdown.STRICT,
+    )
+    assert list(rest) == ["c", "b"], "the record lost its after on the way down"
 
 
 def test_ordered_records_are_assembled_exactly_as_get_assembles_them() -> None:
     turns = _turns(sqlite3.connect(":memory:"))
-    rows = list(turns.scan(order_by=[OrderBy("value")], include_values=True, limit=3))
+    rows = list(turns.scan(order_by=[OrderBy(CORE)], include_values=True, limit=3))
     assert rows == [(k, turns.get(k)) for k in ("b", "c", "a")]
 
 
@@ -68,7 +88,7 @@ def test_a_limit_counts_records_not_commit_rows() -> None:
     turns.set("e", Turn(core="5", body="body-e"))
     bodies.delete("e")   # e's row stays, its record no longer assembles
 
-    newest = list(turns.scan(order_by=[OrderBy("value", descending=True)], limit=2))
+    newest = list(turns.scan(order_by=[OrderBy(CORE, descending=True)], limit=2))
     assert newest == ["d", "a"]
 
 
@@ -84,19 +104,22 @@ def test_pages_resume_where_the_last_one_stopped() -> None:
     assert first + rest == ["a", "b", "c", "d"]
 
 
-def test_an_order_the_commit_part_cannot_give_refuses() -> None:
+def test_an_order_the_commit_part_cannot_give_sorts_the_records() -> None:
     turns = _turns(sqlite3.connect(":memory:"))
-    with pytest.raises(KvStoreScanUnsupported):
-        list(turns.scan(order_by=[OrderBy("not_a_column")]))
+    turns.set("a", Turn(core="3", body="body-z"))
+    assert list(turns.scan(order_by=[OrderBy(BODY, descending=True)])) == ["a", "d", "c", "b"]
+    assert turns.explain(order_by=[OrderBy(BODY)]).root.name == "Sort"
+    with pytest.raises(KvStoreScanUnsupported, match="sort in process"):
+        list(turns.scan(order_by=[OrderBy(BODY)], on_unsupported=Pushdown.STRICT))
 
 
-def test_a_record_without_a_commit_part_refuses_an_order() -> None:
+def test_a_record_without_a_commit_part_sorts_its_records() -> None:
     """Its keys come from every part, so no one part's order is the record's."""
     conn = sqlite3.connect(":memory:")
     turns = KvStore.zip_with(Turn, core=_core(conn), body=_bodies())
-    turns.set("a", Turn(core="1", body="x"))
-    with pytest.raises(KvStoreScanUnsupported, match="commit part"):
-        list(turns.scan(order_by=[OrderBy("value")]))
+    turns.batch_set({"a": Turn(core="2", body="x"), "b": Turn(core="1", body="y")})
+    assert list(turns.scan(order_by=[OrderBy(CORE)])) == ["b", "a"]
+    assert turns.explain(order_by=[OrderBy(CORE)]).root.name == "Sort"
 
 
 def test_a_view_listing_another_store_s_keys_keeps_its_order() -> None:
@@ -112,4 +135,10 @@ def test_a_view_listing_another_store_s_keys_keeps_its_order() -> None:
         labels.set(seq, f"label-{seq}")
 
     view = orders.then(labels)
-    assert list(view.scan(order_by=[OrderBy("value")])) == ["b", "c", "a"]
+    # The orders' "value" column holds the seq each label is named after.
+    seq = Field[str, str]("value", lambda label: label.removeprefix("label-"))
+    listed = view.scan(order_by=[OrderBy(seq)], on_unsupported=Pushdown.STRICT)
+    assert list(listed) == ["b", "c", "a"]
+    by_label = [OrderBy(Field[str, str]("label", lambda label: label), descending=True)]
+    assert list(view.scan(order_by=by_label)) == ["a", "c", "b"]
+    assert view.explain(order_by=by_label).root.name == "Sort"

@@ -6,6 +6,7 @@ from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import (
+    After,
     AlwaysTrue,
     And,
     CompiledScan,
@@ -26,6 +27,7 @@ from kvtsjl.store.schema.scan import (
     Needs,
     Not,
     Or,
+    OrderBy,
     Predicate,
     Projection,
     Pushdown,
@@ -45,6 +47,7 @@ from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
 
 __all__ = [
+    "After",
     "AlwaysTrue",
     "And",
     "CompiledScan",
@@ -68,6 +71,7 @@ __all__ = [
     "Needs",
     "Not",
     "Or",
+    "OrderBy",
     "Predicate",
     "Projection",
     "Pushdown",

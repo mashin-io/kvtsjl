@@ -17,13 +17,13 @@ from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     CompiledScan,
     KeyPrefix,
+    OrderBy,
     ScanCapabilities,
     ScanOrder,
     ScanRow,
     ScanSpec,
     apply_cascade,
     compile_from_scan_entries,
-    enforce_order_by_supported,
 )
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
@@ -179,10 +179,15 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
             self._backend.scan_entries, spec, backend=type(self).__name__
         )
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        """The medium sorts when it keeps every field as a column it can order by."""
+        orderable = self.scan_capabilities().orderable_columns
+        return orderable is not None and all(item.column in orderable for item in order_by)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
-        enforce_order_by_supported(
-            spec, self.scan_capabilities(), backend=type(self._backend).__name__
-        )
+        if self.sorts_in_process(spec):
+            yield from self.scan_in_process_order(spec)
+            return
         compiled = self.compile_scan(spec)
         yield from apply_cascade(
             compiled.rows,

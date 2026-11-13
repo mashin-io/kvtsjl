@@ -1,8 +1,8 @@
 """Scan ordering by declared SQL columns (``ScanSpec.order_by``).
 
-``order_by`` is the one ``ScanSpec`` field that never falls back to the client
-cascade — sorting would have to materialise the whole result, so unsupported
-backends raise under both ``Pushdown`` modes rather than buffering.
+SQL sorts by the columns its view declares; a store that cannot sorts in
+process, and ``Pushdown.STRICT`` refuses that. ``tests/test_ordered_scan.py``
+holds the order every store gives.
 """
 
 from __future__ import annotations
@@ -15,11 +15,21 @@ import pytest
 
 from kvtsjl import KvSet, MemoryKvStore, SerDe
 from kvtsjl.backends.sql import SqlDbField, SqlDbKvSet, SqlDbRow, SqliteSqlDbClientAdapter
-from kvtsjl.backends.sql.adapter import SqlLiveness, SqlSelect
+from kvtsjl.backends.sql.adapter import SqlLiveness, SqlOrder, SqlSelect
 from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import KvStoreScanUnsupported
-from kvtsjl.store.schema.scan import OrderBy, Pushdown, ScanOrder, ScanSpec
+from kvtsjl.store.schema.scan import Field, OrderBy, Pushdown, ScanOrder, ScanSpec
 from tests.sql_helpers import str_sql_row_serde
+
+
+def _sql_only(row_value: str) -> Any:
+    raise AssertionError("SQL orders by this column; the getter must not run")
+
+
+# Columns the table keeps beside the value: only SQL can order by them.
+CREATED_AT = Field[str, float]("created_at", _sql_only)
+ID = Field[str, str]("id", _sql_only)
+VALUE = Field[str, str]("value", lambda v: v)
 
 
 def _catalog_kvset(name: str = "catalog") -> SqlDbKvSet[str, str]:
@@ -84,7 +94,7 @@ def test_order_by_returns_rows_newest_first(conn: sqlite3.Connection) -> None:
     store = _catalog(conn)
     _seed(conn, [("a", 1.0, "f1"), ("b", 3.0, "f2"), ("c", 2.0, "f3")])
 
-    keys = list(store.scan(order_by=[OrderBy("created_at", descending=True)]))
+    keys = list(store.scan(order_by=[OrderBy(CREATED_AT, descending=True)]))
 
     assert keys == ["b", "c", "a"]
 
@@ -100,7 +110,7 @@ def test_key_fields_are_appended_ascending_for_a_total_order(
     """
     sql_kvset = _catalog_kvset()
     _catalog(conn)
-    seen: list[OrderBy] = []
+    seen: list[SqlOrder] = []
 
     class CapturingAdapter(SqliteSqlDbClientAdapter):
         def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
@@ -111,11 +121,11 @@ def test_key_fields_are_appended_ascending_for_a_total_order(
         sql_kvset, adapter=CapturingAdapter(conn, db_name="capturing")
     )
     _seed(conn, [("c", 5.0, "f"), ("a", 5.0, "f"), ("b", 5.0, "f")])
-    rows = list(store.scan(order_by=[OrderBy("created_at", descending=True)]))
+    rows = list(store.scan(order_by=[OrderBy(CREATED_AT, descending=True)]))
 
     assert seen == [
-        OrderBy("created_at", descending=True),
-        OrderBy("id", descending=False),
+        SqlOrder("created_at", descending=True),
+        SqlOrder("id", descending=False),
     ]
     assert rows == ["a", "b", "c"]
 
@@ -125,7 +135,7 @@ def test_order_by_already_ending_with_key_fields_is_not_duplicated(
 ) -> None:
     sql_kvset = _catalog_kvset()
     _catalog(conn)
-    seen: list[OrderBy] = []
+    seen: list[SqlOrder] = []
 
     class CapturingAdapter(SqliteSqlDbClientAdapter):
         def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
@@ -134,15 +144,20 @@ def test_order_by_already_ending_with_key_fields_is_not_duplicated(
 
     store = SqlDbKvStore(sql_kvset, adapter=CapturingAdapter(conn, db_name="dedupe"))
     _seed(conn, [("a", 1.0, "f")])
-    list(store.scan(order_by=[OrderBy("created_at"), OrderBy("id")]))
+    list(store.scan(order_by=[OrderBy(CREATED_AT), OrderBy(ID)]))
 
-    assert seen == [OrderBy("created_at"), OrderBy("id")]
+    assert seen == [SqlOrder("created_at"), SqlOrder("id")]
 
 
-def test_order_by_unknown_column_raises_naming_it(conn: sqlite3.Connection) -> None:
+def test_a_field_the_view_does_not_declare_sorts_in_process(
+    conn: sqlite3.Connection,
+) -> None:
     store = _catalog(conn)
-    with pytest.raises(KvStoreScanUnsupported, match="nope"):
-        list(store.scan(order_by=[OrderBy("nope")]))
+    _seed(conn, [("a", 1.0, "f1"), ("b", 3.0, "f2"), ("c", 2.0, "f3")])
+    by_length = [OrderBy(Field[str, int]("nope", lambda v: -ord(v[-1])))]
+
+    assert list(store.scan(order_by=by_length)) == ["c", "b", "a"]
+    assert store.explain(order_by=by_length).root.name == "Sort"
 
 
 def test_limit_is_fetched_from_the_adapter_not_just_returned(
@@ -164,16 +179,14 @@ def test_limit_is_fetched_from_the_adapter_not_just_returned(
 
     store = SqlDbKvStore(sql_kvset, adapter=CountingAdapter(conn, db_name="counting"))
     keys = list(
-        store.scan(order_by=[OrderBy("created_at", descending=True)], limit=5)
+        store.scan(order_by=[OrderBy(CREATED_AT, descending=True)], limit=5)
     )
 
     assert len(keys) == 5
     assert fetched == 5, "limit must reach SQL, not truncate a full scan"
 
 
-def test_adapter_without_ordering_support_is_unsupported_not_type_error(
-    conn: sqlite3.Connection,
-) -> None:
+def test_an_adapter_without_select_sorts_in_process(conn: sqlite3.Connection) -> None:
     sql_kvset = _catalog_kvset()
     _catalog(conn)
 
@@ -181,9 +194,15 @@ def test_adapter_without_ordering_support_is_unsupported_not_type_error(
         def supports_select(self) -> bool:
             return False
 
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+            raise AssertionError("select was called without supports_select")
+
     store = SqlDbKvStore(sql_kvset, adapter=PlainAdapter(conn, db_name="plain"))
-    with pytest.raises(KvStoreScanUnsupported):
-        list(store.scan(order_by=[OrderBy("created_at")]))
+    _seed(conn, [("a", 1.0, "f"), ("c", 2.0, "f"), ("b", 3.0, "f")])
+
+    assert list(store.scan(order_by=[OrderBy(VALUE, descending=True)])) == ["c", "b", "a"]
+    with pytest.raises(KvStoreScanUnsupported, match="sort in process"):
+        list(store.scan(order_by=[OrderBy(VALUE)], on_unsupported=Pushdown.STRICT))
 
 
 def test_sql_reports_key_asc_and_orderable_columns(conn: sqlite3.Connection) -> None:
@@ -195,26 +214,28 @@ def test_sql_reports_key_asc_and_orderable_columns(conn: sqlite3.Connection) -> 
     assert {"created_at", "filename", "id"} <= caps.orderable_columns
 
 
-@pytest.mark.parametrize("mode", [Pushdown.CLIENT_SIDE, Pushdown.STRICT])
-def test_non_sql_backend_raises_under_both_pushdown_modes(mode: Pushdown) -> None:
+def test_a_store_without_columns_sorts_in_process_and_strict_refuses() -> None:
     store = MemoryKvStore(
         KvSet.with_str_keys(
             "mem", key_serde=SerDe.identity(str), value_serde=SerDe.utf8_bytes()
         )
     )
-    store.set("a", "v")
-    with pytest.raises(KvStoreScanUnsupported):
-        list(store.scan(order_by=[OrderBy("created_at")], on_unsupported=mode))
+    for key, value in (("a", "2"), ("b", "1"), ("c", "3")):
+        store.set(key, value)
+
+    assert list(store.scan(order_by=[OrderBy(VALUE)])) == ["b", "a", "c"]
+    with pytest.raises(KvStoreScanUnsupported, match="sort in process"):
+        list(store.scan(order_by=[OrderBy(VALUE)], on_unsupported=Pushdown.STRICT))
 
 
 def test_order_and_order_by_together_raise(conn: sqlite3.Connection) -> None:
     # Contradictory arguments are a usage error, not a backend limitation.
     with pytest.raises(ValueError):
-        ScanSpec(order=ScanOrder.KEY_ASC, order_by=(OrderBy("created_at"),))
+        ScanSpec(order=ScanOrder.KEY_ASC, order_by=(OrderBy(CREATED_AT),))
 
 
 def test_order_by_with_default_order_is_allowed() -> None:
-    spec = ScanSpec(order_by=(OrderBy("created_at"),))
+    spec = ScanSpec(order_by=(OrderBy(CREATED_AT),))
     assert spec.order is ScanOrder.UNORDERED
 
 
@@ -222,7 +243,7 @@ def test_order_by_with_cursor_raises(conn: sqlite3.Connection) -> None:
     from kvtsjl.store.schema.scan import ScanCursor
 
     with pytest.raises(KvStoreScanUnsupported, match="cursor"):
-        ScanSpec(order_by=(OrderBy("created_at"),), cursor=ScanCursor(token="x"))
+        ScanSpec(order_by=(OrderBy(CREATED_AT),), cursor=ScanCursor(token="x"))
 
 
 def _ttl_catalog_kvset(name: str = "ttlcat") -> SqlDbKvSet[str, str]:
@@ -281,7 +302,7 @@ def test_pushed_limit_returns_n_live_rows_when_newer_rows_expired(
 
     store = SqlDbKvStore(sql_kvset, adapter=CapturingAdapter(conn, db_name="ttl"))
     keys = list(
-        store.scan(order_by=[OrderBy("created_at", descending=True)], limit=5)
+        store.scan(order_by=[OrderBy(CREATED_AT, descending=True)], limit=5)
     )
 
     assert len(keys) == 5, "pushed LIMIT under-filled past expired rows"

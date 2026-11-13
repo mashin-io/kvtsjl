@@ -16,6 +16,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery, supports_prefix_scan
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import (
+    After,
     CompiledScan,
     Expired,
     OrderBy,
@@ -28,10 +29,13 @@ from kvtsjl.store.schema.scan import (
     ScanPlanNode,
     ScanRow,
     ScanSpec,
+    explain_sorted,
     is_gc_predicate,
     peel_key_prefix,
     predicate_label,
+    scan_sorted,
     sugar_to_spec,
+    unordered,
 )
 from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
@@ -146,17 +150,34 @@ class ScannableMixin[K, V](ABC):
         me = cast(Any, self)
         return cast("tuple[Scope, K] | None", me.kvset.rescope(me.scope, key))
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        """Whether this store's own scan gives ``order_by``, so it never sorts here.
+
+        False by default: the store sorts its rows in process. A medium that
+        keeps every field as a column answers True; a view that lists one
+        store's rows under the same keys answers for that store, and hands
+        it the order.
+        """
+        return False
+
+    def sorts_in_process(self, spec: ScanSpec[K]) -> bool:
+        """Whether a scan of ``spec`` here reads every row and sorts it."""
+        return bool(spec.order_by) and not self.pushes_order(spec.order_by)
+
+    def scan_in_process_order(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        """``spec`` by sorting every row this store's own scan keeps."""
+        return scan_sorted(self.scan_rows, spec, backend=type(self).__name__)
+
+    def explain_in_process_order(self, spec: ScanSpec[K]) -> ScanPlanNode:
+        return explain_sorted(self.explain_node(unordered(spec)), spec)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """Yield ``ScanRow``s for ``spec`` (default: legacy ``scan_entries``)."""
-        from kvtsjl.store.schema.scan import (
-            apply_cascade,
-            enforce_order_by_supported,
-            spec_to_scan_query,
-        )
+        from kvtsjl.store.schema.scan import apply_cascade, spec_to_scan_query
 
-        # Composed stores drop order_by through spec_to_scan_query; fail loudly
-        # rather than returning an arbitrary order.
-        enforce_order_by_supported(spec, None, backend=type(self).__name__)
+        if self.sorts_in_process(spec):
+            yield from self.scan_in_process_order(spec)
+            return
         query = spec_to_scan_query(spec)
         raw = (
             ScanRow(key=key, value=value)
@@ -181,7 +202,9 @@ class ScannableMixin[K, V](ABC):
         page_size: int = 100,
         where: Predicate[K] | None = None,
         limit: int | None = None,
-        order_by: Sequence[OrderBy] = (),
+        order_by: Sequence[OrderBy[V]] = (),
+        after: After[K] | None = None,
+        on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
     ) -> Iterator[K]: ...
 
     @overload
@@ -193,7 +216,9 @@ class ScannableMixin[K, V](ABC):
         page_size: int = 100,
         where: Predicate[K] | None = None,
         limit: int | None = None,
-        order_by: Sequence[OrderBy] = (),
+        order_by: Sequence[OrderBy[V]] = (),
+        after: After[K] | None = None,
+        on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
     ) -> Iterator[tuple[K, V]]: ...
 
     def scan(
@@ -210,7 +235,8 @@ class ScannableMixin[K, V](ABC):
         cursor: ScanCursor | None = None,
         on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
         spec: ScanSpec[K] | None = None,
-        order_by: Sequence[OrderBy] = (),
+        order_by: Sequence[OrderBy[V]] = (),
+        after: After[K] | None = None,
     ) -> Iterator[K] | Iterator[tuple[K, V]]:
         if prefix is not None and not supports_prefix_scan(self.key_layout()):
             raise KvStoreScanUnsupported(
@@ -229,6 +255,7 @@ class ScannableMixin[K, V](ABC):
                 cursor=cursor,
                 on_unsupported=on_unsupported,
                 order_by=order_by,
+                after=after,
             )
         if include_values or spec.project is Projection.ENTRIES:
             for row in self.scan_rows(spec):
@@ -319,6 +346,8 @@ class ScannableMixin[K, V](ABC):
         return ScanPlan(root=self.explain_node(spec))
 
     def explain_node(self, spec: ScanSpec[K]) -> ScanPlanNode:
+        if self.sorts_in_process(spec):
+            return self.explain_in_process_order(spec)
         compile_fn = getattr(self, "compile_scan", None)
         if callable(compile_fn):
             compiled = cast(CompiledScan[K], compile_fn(spec))

@@ -1,10 +1,11 @@
-"""A scan's order travels through a view of one store.
+"""A scan's order travels through a view of one store that can give it.
 
-``readonly()``, ``map``, ``imap`` and ``imap_keys`` list one store's rows, so
-the order — ``order_by`` names that store's columns — travels to it, and the
-view returns the store's rows in that order. A store that cannot give the
-order refuses it through the view as it would directly. ``limit`` travels
-only where nothing is left to filter.
+``readonly()``, ``map`` and ``imap`` list one store's rows under its keys, so
+an ``order_by`` that store gives — a field's name is its column there —
+travels to it, and the view returns the store's rows in that order. Where the
+store cannot give it, the view sorts its own values. ``imap_keys`` always
+sorts: ties fall in the caller's key order, not the store's. ``limit``
+travels only where nothing is left to filter.
 """
 
 from __future__ import annotations
@@ -22,7 +23,10 @@ from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.dict_map import DictKeyMap
 from kvtsjl.store.schema.scan import (
+    After,
+    Field,
     OrderBy,
+    Pushdown,
     ScanOrder,
     ScanRow,
     ScanSpec,
@@ -33,7 +37,8 @@ from kvtsjl.store.schema.ttl import ExpiryGc
 from tests.media import TTL, make_medium
 from tests.sql_helpers import ensure_sql_table, make_sql_kvset
 
-NEWEST = [OrderBy("value", descending=True)]
+# The catalog's "value" column holds the value; a view's values keep its order.
+NEWEST = [OrderBy(Field[str, str]("value", lambda v: v), descending=True)]
 
 
 class _Counting(SqliteSqlDbClientAdapter):
@@ -104,16 +109,46 @@ def test_a_value_filter_reads_the_values_the_scan_brought(view: str) -> None:
 
 
 @pytest.mark.parametrize("view", ["readonly", "map", "imap"])
-def test_a_store_that_cannot_order_refuses_through_the_view(view: str) -> None:
+def test_a_store_that_cannot_order_sorts_through_the_view(view: str) -> None:
     plain = MemoryKvStore(
         KvSet.with_str_keys("plain", key_serde=SerDe.identity(str), value_serde=SerDe.identity(str))
     )
-    plain.set("a", "1")
-    with pytest.raises(KvStoreScanUnsupported, match="order_by"):
-        list(_views(plain)[view].scan(order_by=NEWEST))
+    plain.batch_set({"a": "3", "b": "5", "c": "1"})
+    assert not _views(plain)[view].pushes_order(NEWEST)
+    assert list(_views(plain)[view].scan(order_by=NEWEST)) == ["b", "a", "c"]
+    with pytest.raises(KvStoreScanUnsupported, match="sort in process"):
+        list(_views(plain)[view].scan(order_by=NEWEST, on_unsupported=Pushdown.STRICT))
 
 
-# --- imap_keys: the store's columns travel, the caller's keys do not --------
+@pytest.mark.parametrize("view", ["readonly", "map", "imap"])
+def test_a_store_that_orders_takes_the_order_through_the_view(view: str) -> None:
+    store, _ = _catalog()
+    views = _views(store)
+    assert views[view].pushes_order(NEWEST)
+    rows = views[view].scan(order_by=NEWEST, on_unsupported=Pushdown.STRICT)
+    assert list(rows) == ["b", "d", "a", "e", "c"]
+    after = views[view].scan(
+        order_by=NEWEST, after=After(("4",)), on_unsupported=Pushdown.STRICT
+    )
+    assert list(after) == ["a", "e", "c"], "the view lost its after on the way down"
+
+
+def test_readonly_explains_its_store_s_plan() -> None:
+    store, _ = _catalog()
+    assert "order_by" in store.readonly().explain(order_by=NEWEST).root.pushed
+
+
+def test_a_record_held_whole_by_one_store_takes_that_store_s_order() -> None:
+    store, _ = _catalog()
+    cache = MemoryKvStore(
+        KvSet.with_str_keys("cache", key_serde=SerDe.identity(str), value_serde=SerDe.identity(str))
+    )
+    mirrored = store.mirror(cache)
+    assert mirrored.pushes_order(NEWEST)
+    assert not cache.mirror(store).pushes_order(NEWEST)
+
+
+# --- imap_keys: sorts under the caller's keys --------------------------------
 
 
 def _renamed(store: Any) -> Any:
@@ -130,6 +165,17 @@ def test_imap_keys_lists_the_store_s_rows_under_the_caller_s_keys() -> None:
     odd = ValueWhere[str](lambda v: int(v) % 2 == 1)
     rows = list(renamed.scan_rows(ScanSpec(where=odd, order_by=NEWEST, limit=2)))
     assert [r.key for r in rows] == ["doc:b", "doc:a"]
+
+
+def test_imap_keys_breaks_ties_by_the_caller_s_keys() -> None:
+    """The store's keys put ``m`` first; the caller knows it as ``q``, after ``p``."""
+    store, _ = _catalog()
+    store.batch_set({"m": "9", "n": "9"})
+    to_caller = {"m": "q", "n": "p"}
+    to_store = {v: k for k, v in to_caller.items()}
+    view = store.imap_keys(lambda k: to_store.get(k, k), lambda sk: to_caller.get(sk, sk))
+    assert list(view.scan(order_by=NEWEST, limit=2)) == ["p", "q"]
+    assert view.explain(order_by=NEWEST).root.name == "Sort"
 
 
 def test_imap_keys_refuses_a_key_order_it_cannot_give_in_the_caller_s_keys() -> None:

@@ -22,6 +22,7 @@ from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
     Needs,
+    OrderBy,
     Projection,
     ScanOrder,
     ScanRow,
@@ -135,16 +136,18 @@ def iter_union_keys_spec[K](
 def part_key_spec[K](spec: ScanSpec[K], key_where: Any) -> ScanSpec[K]:
     """What the store whose keys are listed is asked: its keys, in the order asked.
 
-    The order — ``order`` or ``order_by`` — travels with the keys, so a view
+    The order — ``order``, or ``order_by`` and its ``after`` where that
+    store gives it (``pushes_order``) — travels with the keys, so a view
     that lists another store's keys returns them in that store's order, and a
-    store that cannot honour it refuses. Dropping it silently returned key
-    order to a caller who asked for something else.
+    store that cannot honour a key order refuses. Dropping it silently
+    returned key order to a caller who asked for something else.
     """
     return ScanSpec(
         where=key_where,
         project=Projection.KEYS,
         order=spec.order,
         order_by=spec.order_by,
+        after=spec.after,
         page_size=spec.page_size,
         cursor=spec.cursor,
         on_unsupported=spec.on_unsupported,
@@ -186,9 +189,11 @@ def scan_values_through[K, V, U](
     """A view of ``src`` with its values mapped: ``src``'s rows, in the order asked.
 
     What concerns keys travels to ``src`` — key predicates, the order, the
-    page size, the cursor — and ``src`` refuses an order it cannot give;
-    ``order_by`` names ``src``'s own columns. What reads a value runs on the
-    view's values. ``limit`` travels only when nothing is left to filter:
+    page size, the cursor — and ``src`` refuses a key order it cannot give.
+    ``order_by`` travels only where ``src`` gives it (the view sorts
+    otherwise), and there a field's name is the promise that ``src`` keeps
+    the field's value in that column. What reads a value runs on the view's
+    values. ``limit`` travels only when nothing is left to filter:
     pushed under a filter, it would count rows the filter then drops.
     """
     key_where, residual = split_key_predicates(spec.where)
@@ -198,6 +203,7 @@ def scan_values_through[K, V, U](
         project=Projection.ENTRIES if needs_values(spec, residual) else spec.project,
         order=spec.order,
         order_by=spec.order_by,
+        after=spec.after,
         limit=spec.limit if unfiltered else None,
         page_size=spec.page_size,
         cursor=spec.cursor,
@@ -218,20 +224,18 @@ def scan_values_through[K, V, U](
 
 
 def require_unordered[K](spec: ScanSpec[K], op: str) -> None:
-    """Refuse an order over keys merged from several stores: no one order holds."""
+    """Refuse a key order over keys merged from several stores: no one order holds.
+
+    ``order_by`` never reaches here: such a store sorts it in process.
+    """
     if spec.order is not ScanOrder.UNORDERED:
         raise KvStoreScanUnsupported(
             f"{op} scan supports ScanOrder.UNORDERED only "
             f"(got ScanOrder.{spec.order.name})"
         )
-    if spec.order_by:
-        raise KvStoreScanUnsupported(
-            f"{op} scan merges keys from several stores, so no one store's "
-            "columns order it; give the record a commit part to order by"
-        )
 
 
-class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
+class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ScannableMixin[K, V], ABC):
     """Scan keys from a single underlying; values via ``self.batch_get`` pages.
 
     Assembled onto a store that is already a ``ReadableKeyMap`` (provides
@@ -258,7 +262,13 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
             include_values=query.include_values,
         )
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        return self._scan_src.pushes_order(order_by)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
+        if self.sorts_in_process(spec):
+            yield from self.scan_in_process_order(spec)
+            return
         key_where, residual = split_key_predicates(spec.where)
         part_spec = part_key_spec(spec, key_where)
         keys = (row.key for row in self._scan_src.scan_rows(part_spec))
@@ -284,6 +294,8 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ABC):
     def explain_node(self, spec: ScanSpec[K]) -> Any:
         from kvtsjl.store.schema.scan import predicate_label
 
+        if self.sorts_in_process(spec):
+            return self.explain_in_process_order(spec)
         key_where, residual = split_key_predicates(spec.where)
         part_spec = part_key_spec(spec, key_where)
         return explain_parts(

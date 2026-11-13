@@ -9,17 +9,13 @@ table with real columns, pushed down.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from dataclasses import dataclass
-import json
 import sqlite3
 from typing import Any
 
 import pytest
 
-from kvtsjl import KvSet, SerDe
-from kvtsjl.backends.sql import SqlDbField, SqlDbKvSet, SqlDbRow, SqliteSqlDbClientAdapter
-from kvtsjl.backends.sql.adapter import SqlSelect
+from kvtsjl.backends.sql import SqlDbRow, SqliteSqlDbClientAdapter
+from kvtsjl.backends.sql.adapter import SqlOrder, SqlSelect
 from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.store.schema.scan import (
@@ -37,31 +33,19 @@ from kvtsjl.store.schema.scan import (
     ScanRow,
     ScanSpec,
 )
+from tests.doc_fixtures import (
+    AGENT,
+    DOCS,
+    KIND,
+    MIME,
+    NAME,
+    Doc,
+    columns_store,
+    decode_doc,
+    encode_doc,
+)
 from tests.media import MEDIA, make_medium
 from tests.sql_helpers import ensure_sql_table, make_composite_sql_kvset
-
-
-@dataclass(frozen=True)
-class Doc:
-    name: str
-    kind: str
-    mime: str | None
-    agent: str | None
-
-
-NAME = Field[Doc, str]("name", lambda d: d.name)
-KIND = Field[Doc, str]("kind", lambda d: d.kind)
-MIME = Field[Doc, str | None]("mime", lambda d: d.mime)
-AGENT = Field[Doc, str | None]("agent", lambda d: d.agent)
-
-DOCS = {
-    "a": Doc("Report.xlsx", "chat", "application/vnd.ms-excel", "alice"),
-    "b": Doc("photo.png", "job", "image/png", None),
-    "c": Doc("Ünïcode.txt", "chat", None, "bob"),
-    "d": Doc("notes.md", "asset", "text/markdown", "alice"),
-    "e": Doc("image_dump.bin", "job", "application/octet-stream", None),
-    "f": Doc("100%.csv", "chat", "text/csv", "carol"),
-}
 
 CASES: list[tuple[str, Predicate[str], str]] = [
     ("eq", KIND.eq("chat"), "acf"),
@@ -87,69 +71,11 @@ CASES: list[tuple[str, Predicate[str], str]] = [
 ]
 
 
-def _encode(doc: Doc) -> str:
-    return json.dumps(doc.__dict__)
-
-
-def _decode(raw: str) -> Doc:
-    return Doc(**json.loads(raw))
-
-
-def _doc_row_serde() -> SerDe[Doc, SqlDbRow]:
-    return SerDe(
-        serializer=lambda d: {"name": d.name, "kind": d.kind, "mime": d.mime, "agent": d.agent},
-        deserializer=lambda r: Doc(r["name"], r["kind"], r["mime"], r["agent"]),
-        blob_type=dict,
-    )
-
-
-class _Recording(SqliteSqlDbClientAdapter):
-    """Counts the rows the database returns, and keeps each query."""
-
-    def __init__(self, conn: sqlite3.Connection, *, selects: bool = True) -> None:
-        super().__init__(conn)
-        self._selects = selects
-        self.queries: list[SqlSelect] = []
-        self.returned = 0
-
-    def supports_select(self) -> bool:
-        return self._selects
-
-    def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
-        self.queries.append(query)
-        for row in super().select(query):
-            self.returned += 1
-            yield row
-
-
-def _columns_store(*, selects: bool = True) -> tuple[SqlDbKvStore[str, Doc], _Recording]:
-    """``DOCS`` in a SQL table whose fields are its columns."""
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        'CREATE TABLE "docs_1" (id TEXT PRIMARY KEY, name TEXT, kind TEXT, mime TEXT, '
-        "agent TEXT, updated_at REAL NOT NULL, expires_at REAL)"
-    )
-    kvset: KvSet[str, Doc, str, SqlDbRow] = KvSet.with_str_keys(
-        "docs", version=1, key_serde=SerDe.identity(str), value_serde=_doc_row_serde()
-    )
-    sql_kvset = SqlDbKvSet[str, Doc].create(
-        kvset,
-        key_field="id",
-        fields=[SqlDbField("name"), SqlDbField("kind"), SqlDbField("mime"), SqlDbField("agent")],
-    )
-    adapter = _Recording(conn, selects=selects)
-    store = SqlDbKvStore(sql_kvset, adapter=adapter)
-    store.batch_set(DOCS)
-    adapter.returned = 0
-    adapter.queries.clear()
-    return store, adapter
-
-
 @pytest.fixture(params=[*MEDIA, "sql_columns"])
 def docs(request: pytest.FixtureRequest) -> Any:
     if request.param == "sql_columns":
-        return _columns_store()[0]
-    store = make_medium(request.param, request).imap(_decode, _encode)
+        return columns_store()[0]
+    store = make_medium(request.param, request).imap(decode_doc, encode_doc)
     store.batch_set(DOCS)
     return store
 
@@ -165,7 +91,7 @@ def test_a_field_filter_means_the_same_on_every_store(
 def test_sql_runs_a_field_filter_in_the_database(
     case: str, where: Predicate[str], expected: str
 ) -> None:
-    store, adapter = _columns_store()
+    store, adapter = columns_store()
     assert sorted(store.scan(where=where)) == list(expected), case
     # Only key tests are left for Python: the rows SQL returned are the
     # field filter's own matches, plus whatever a key test then drops.
@@ -178,8 +104,8 @@ def test_sql_runs_a_field_filter_in_the_database(
 
 def test_an_ordered_scan_pushes_the_limit_past_a_field_filter() -> None:
     """Nothing left to filter in Python, so SQL stops after the rows asked for."""
-    store, adapter = _columns_store()
-    by_name = [OrderBy("name")]
+    store, adapter = columns_store()
+    by_name = [OrderBy(NAME)]
     assert list(store.scan(order_by=by_name, limit=2)) == ["f", "a"]
     adapter.returned = 0
     adapter.queries.clear()
@@ -191,7 +117,7 @@ def test_an_ordered_scan_pushes_the_limit_past_a_field_filter() -> None:
 
 
 def test_keyset_pages_carry_the_field_filter_to_each_page() -> None:
-    store, adapter = _columns_store()
+    store, adapter = columns_store()
     assert list(store.scan(where=KIND.eq("chat"), page_size=1)) == ["a", "c", "f"]
     assert all(q.where is not None for q in adapter.queries)
     assert adapter.returned == 3
@@ -199,7 +125,7 @@ def test_keyset_pages_carry_the_field_filter_to_each_page() -> None:
 
 def test_a_cursor_resumes_a_field_filtered_scan() -> None:
     """The cursor is the last key returned; the filter skips what lies between."""
-    store, _ = _columns_store()
+    store, _ = columns_store()
     chat = KIND.eq("chat")
     first = [r.key for r in store.scan_rows(ScanSpec[str](where=chat, limit=2, page_size=2))]
     assert first == ["a", "c"]
@@ -209,7 +135,7 @@ def test_a_cursor_resumes_a_field_filtered_scan() -> None:
 
 def test_a_field_the_view_does_not_declare_runs_in_python() -> None:
     """``title`` is not one of the view's columns, so SQL is not asked to test it."""
-    store, adapter = _columns_store()
+    store, adapter = columns_store()
     title = Field[Doc, str]("title", lambda d: d.name)
     assert list(store.scan(where=title.startswith("photo"))) == ["b"]
     assert all(q.where is None for q in adapter.queries)
@@ -217,13 +143,13 @@ def test_a_field_the_view_does_not_declare_runs_in_python() -> None:
 
 
 def test_an_adapter_without_select_runs_the_filter_in_python() -> None:
-    store, adapter = _columns_store(selects=False)
+    store, adapter = columns_store(selects=False)
     assert list(store.scan(where=KIND.eq("asset"))) == ["d"]
     assert adapter.queries == []
 
 
 def test_strict_takes_a_pushed_field_filter_and_refuses_one_that_is_not() -> None:
-    store, _ = _columns_store()
+    store, _ = columns_store()
     strict = Pushdown.STRICT
     pushed = ScanSpec[str](where=KIND.eq("asset"), on_unsupported=strict)
     assert [r.key for r in store.scan_rows(pushed)] == ["d"]
@@ -252,7 +178,7 @@ def test_select_pages_through_an_order_with_nulls(descending: bool, page: int) -
     conn.execute('CREATE TABLE "t" (id TEXT PRIMARY KEY, n INTEGER)')
     conn.executemany('INSERT INTO "t" VALUES (?, ?)', _ROWS)
     adapter = SqliteSqlDbClientAdapter(conn)
-    order = (OrderBy("n", descending=descending), OrderBy("id"))
+    order = (SqlOrder("n", descending=descending), SqlOrder("id"))
     if descending:  # NULLs last; ties by id, ascending
         expected = sorted(_ROWS, key=lambda r: (r[1] is None, -(r[1] or 0), r[0]))
     else:  # NULLs first
@@ -283,8 +209,8 @@ def test_a_field_test_is_false_on_a_missing_value() -> None:
 
 def test_sql_reports_the_field_tests_it_takes_only_with_select() -> None:
     tests = {FieldEq, FieldIn, FieldStartsWith, FieldContains, FieldIsNull}
-    assert tests <= _columns_store()[0].scan_capabilities().pushdown
-    assert not tests & _columns_store(selects=False)[0].scan_capabilities().pushdown
+    assert tests <= columns_store()[0].scan_capabilities().pushdown
+    assert not tests & columns_store(selects=False)[0].scan_capabilities().pushdown
 
 
 def test_a_key_ordered_page_reads_the_index_without_sorting() -> None:

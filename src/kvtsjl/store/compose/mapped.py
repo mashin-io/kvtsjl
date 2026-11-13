@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.keymap_algebra.map import IMappedKeyMap, IMappedKeysKeyMap, MappedKeyMap
@@ -21,6 +21,7 @@ from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
+    OrderBy,
     Projection,
     ScanOrder,
     ScanRow,
@@ -76,7 +77,12 @@ class MappedKvStore[K, V, U](
             else:
                 yield key, self._forward(value)
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        return self._src().pushes_order(order_by)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
+        if self.sorts_in_process(spec):
+            return self.scan_in_process_order(spec)
         return scan_values_through(self, self._src(), spec, self._forward)
 
     def _clone_fanout(self, scope: Scope) -> MappedKvStore[K, V, U]:
@@ -162,7 +168,12 @@ class IMappedKvStore[K, V, U](
             else:
                 yield key, self._forward(value)
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        return self._src().pushes_order(order_by)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
+        if self.sorts_in_process(spec):
+            return self.scan_in_process_order(spec)
         return scan_values_through(self, self._src(), spec, self._forward)
 
     def _clone_fanout(self, scope: Scope) -> IMappedKvStore[K, V, U]:
@@ -271,13 +282,15 @@ class IMappedKeysKvStore[K, SK, V](
             yield from_store(sk), value
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
-        """The store's rows under the caller's keys, in the order of the store's columns.
+        """The store's rows under the caller's keys.
 
-        ``order_by`` names the store's columns, so it travels. Nothing about
-        the caller's keys does: a key order would be the store's, not the
-        caller's, so it refuses, as a prefix does; key predicates run here,
-        on the caller's keys.
+        Nothing about the caller's keys travels: a key order would be the
+        store's, not the caller's, so it refuses, as a prefix does; key
+        predicates run here, on the caller's keys. ``order_by`` sorts here,
+        since its ties fall in key order — the caller's keys, not the store's.
         """
+        if self.sorts_in_process(spec):
+            return self.scan_in_process_order(spec)
         from_store = self.require_from_store()
         if spec.order is not ScanOrder.UNORDERED:
             raise KvStoreScanUnsupported(
@@ -291,7 +304,6 @@ class IMappedKeysKvStore[K, SK, V](
         unfiltered = isinstance(spec.where, AlwaysTrue) and spec.refine is None
         down = ScanSpec[SK](
             project=Projection.ENTRIES if needs_values(spec, spec.where) else spec.project,
-            order_by=spec.order_by,
             limit=spec.limit if unfiltered else None,
             page_size=spec.page_size,
             cursor=spec.cursor,

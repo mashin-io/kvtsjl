@@ -11,6 +11,7 @@ from __future__ import annotations
 from abc import ABC
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
+from typing import Any
 
 from kvtsjl.exceptions import PartialSyncError
 from kvtsjl.keymap import KeyMap
@@ -38,6 +39,7 @@ from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import (
+    OrderBy,
     Predicate,
     Projection,
     ScanPlanNode,
@@ -249,11 +251,22 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
             include_values=query.include_values,
         )
 
+    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
+        """The one store whose rows are the record's gives the order, or it sorts here."""
+        whole_record = self.topology().whole_authority
+        if whole_record is not None:
+            return self._store_of(whole_record).pushes_order(order_by)
+        scanned = self._scanned()
+        return len(scanned) == 1 and scanned[0].pushes_order(order_by)
+
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         topology = self.topology()
         whole_record = topology.whole_authority
         if whole_record is not None:
             yield from self._store_of(whole_record).scan_rows(spec)
+            return
+        if self.sorts_in_process(spec):
+            yield from self.scan_in_process_order(spec)
             return
         scanned = self._scanned()
         if len(scanned) > 1:
@@ -288,6 +301,8 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
                 pushed=frozenset({"all→authority"}),
                 children=(child,),
             )
+        if self.sorts_in_process(spec):
+            return self.explain_in_process_order(spec)
         scanned = self._scanned()
         if len(scanned) > 1:
             require_unordered(spec, type(self).__name__)

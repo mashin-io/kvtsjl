@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from kvtsjl.backends.sql.schema import SqlDbRow
-from kvtsjl.store.schema.scan import OrderBy, Predicate
+from kvtsjl.store.schema.scan import Predicate
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +46,14 @@ class SqlLiveness:
 
 
 @dataclass(frozen=True, slots=True)
+class SqlOrder:
+    """One column of a ``SqlSelect``'s order."""
+
+    column: str
+    descending: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class SqlSelect:
     """One ``SELECT`` the store asks of the adapter; every condition holds at once.
 
@@ -67,10 +75,14 @@ class SqlSelect:
         Always given, and total: the store appends the key columns. A NULL
         sorts as the smallest value — first ascending, last descending
         (``NULLS FIRST`` / ``NULLS LAST`` where the engine's default differs).
+        Text sorts by code point, as Python compares ``str`` — SQLite's
+        ``BINARY``, ``COLLATE "C"`` on Postgres — so the order is the one
+        every other store sorts in process.
     ``after``
-        The ``order_by`` columns' values on the row the previous page ended
-        at, or ``None``; return only rows strictly after it in that order.
-        A NULL there is the smallest value, as in ``order_by``.
+        Values of a leading run of the ``order_by`` columns — all of them,
+        or fewer — or ``None``; return only rows strictly after them in the
+        order of those columns. A NULL there is the smallest value, as in
+        ``order_by``.
     ``limit``
         At most this many rows, or ``None``.
     ``live``
@@ -81,7 +93,7 @@ class SqlSelect:
     table: str
     columns: Sequence[str]
     key_fields: Sequence[str]
-    order_by: Sequence[OrderBy]
+    order_by: Sequence[SqlOrder]
     exact: Mapping[str, Any] = field(default_factory=lambda: {})
     prefixes: Mapping[str, str] = field(default_factory=lambda: {})
     where: Predicate[Any] | None = None
@@ -108,8 +120,8 @@ class SqlDbClientAdapter(ABC):
     ===========================  =========================================
     Forward this                 ...or lose
     ===========================  =========================================
-    ``supports_select``          pushed filters, ``order_by`` (which
-    ``select``                   raises without it) and keyset paging;
+    ``supports_select``          pushed filters, ``order_by`` (sorted in
+    ``select``                   process without it) and keyset paging;
                                  forward every field of ``SqlSelect`` —
                                  drop ``live`` and a pushed ``LIMIT``
                                  counts rows that have expired or that a
@@ -333,8 +345,8 @@ class SqlDbClientAdapter(ABC):
     def supports_select(self) -> bool:
         """Whether this adapter implements ``select``.
 
-        Default ``False``: the store streams ``scan_by_key_parts`` and runs
-        every filter itself, and ``order_by`` refuses.
+        Default ``False``: the store streams ``scan_by_key_parts``, runs
+        every filter itself, and sorts ``order_by`` in process.
         """
         return False
 

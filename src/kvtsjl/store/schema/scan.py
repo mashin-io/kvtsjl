@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum, IntFlag, auto
 from fnmatch import fnmatch
+from functools import cmp_to_key
+import heapq
 import string
 from typing import TYPE_CHECKING, Any, cast
 
@@ -37,14 +39,6 @@ class ScanOrder(str, Enum):
     UNORDERED = "unordered"
     KEY_ASC = "key_asc"
     KEY_DESC = "key_desc"
-
-
-@dataclass(frozen=True, slots=True)
-class OrderBy:
-    """Order by one declared column (see ``ScanSpec.order_by``)."""
-
-    column: str
-    descending: bool = False
 
 
 class Pushdown(str, Enum):
@@ -82,7 +76,10 @@ class ScanCapabilities:
     resumable: bool
     stats: bool
     orderable_columns: frozenset[str] | None = None
-    """Columns usable in ``ScanSpec.order_by``; ``None`` means unsupported."""
+    """Columns the medium sorts by, for ``ScanSpec.order_by``; ``None`` for none.
+
+    An order on other fields is sorted in process (see ``pushes_order``).
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +382,49 @@ class Field[V, T]:
         return FieldIsNull(self)
 
 
+@dataclass(frozen=True, slots=True)
+class OrderBy[V]:
+    """Order a scan by one field of the value (see ``ScanSpec.order_by``).
+
+    Every store gives the same order: by each ``OrderBy`` in turn — a
+    missing field (``None``) first ascending, last descending — then by key,
+    ascending. A store that keeps every field as a column of its name sorts
+    there (SQL, for the columns its view declares); any other sorts in
+    process, reading the whole scan, and ``explain()`` shows a ``Sort``.
+    """
+
+    field: Field[V, Any]
+    descending: bool = False
+
+    @property
+    def column(self) -> str:
+        return self.field.name
+
+
+@dataclass(frozen=True, slots=True)
+class After[K]:
+    """Where an ordered scan resumes: just past one place in its ``order_by``.
+
+    ``values`` are the ``order_by`` fields' values at that place, in order.
+    With ``key`` the place is that row's, so rows with the same values and a
+    larger key come next. Without it the scan resumes past every row with
+    those values — the same place whenever the order tells every row apart.
+    """
+
+    values: Sequence[Any]
+    key: K | None = None
+
+    def __post_init__(self) -> None:
+        # A tuple, as ScanSpec.order_by is, so the spec stays hashable.
+        if not isinstance(self.values, tuple):
+            object.__setattr__(self, "values", tuple(self.values))
+
+    @staticmethod
+    def of[RK, RV](order_by: Sequence[OrderBy[RV]], key: RK, value: RV) -> After[RK]:
+        """The place of the row ``key`` → ``value``: resume a scan just past it."""
+        return After(tuple(item.field.get(value) for item in order_by), key)
+
+
 class FieldTest[V, T](ValuePredicate[Any], ABC):
     """A test of one field of the value; ``Predicate[Any]``, since it reads no key.
 
@@ -495,9 +535,18 @@ class ScanSpec[K]:
     page_size: int = 100
     cursor: ScanCursor | None = None
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE
-    order_by: Sequence[OrderBy] = ()
+    order_by: Sequence[OrderBy[Any]] = ()
+    after: After[K] | None = None
 
     def __post_init__(self) -> None:
+        if self.after is not None:
+            if not self.order_by:
+                raise ValueError("after resumes an order_by; pass order_by too")
+            if len(self.after.values) != len(self.order_by):
+                raise ValueError(
+                    f"after has {len(self.after.values)} values for "
+                    f"{len(self.order_by)} order_by fields"
+                )
         if not self.order_by:
             return
         # Keep the frozen spec hashable when built directly with a list.
@@ -512,7 +561,7 @@ class ScanSpec[K]:
         if self.cursor is not None:
             raise KvStoreScanUnsupported(
                 "order_by with cursor is unsupported: the cursor is key-shaped "
-                "and would reorder pages. Scan without a cursor, or drop order_by."
+                "and would reorder pages. Resume an ordered scan with after=."
             )
 
 
@@ -528,7 +577,8 @@ def sugar_to_spec[K](
     order: ScanOrder = ScanOrder.UNORDERED,
     refine: Callable[[ScanRow[K, Any]], bool] | None = None,
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
-    order_by: Sequence[OrderBy] = (),
+    order_by: Sequence[OrderBy[Any]] = (),
+    after: After[K] | None = None,
 ) -> ScanSpec[K]:
     """Build a ``ScanSpec`` from sugar kwargs and/or an explicit ``where``."""
     pred: Predicate[K] = AlwaysTrue()
@@ -549,37 +599,99 @@ def sugar_to_spec[K](
         cursor=cursor,
         on_unsupported=on_unsupported,
         order_by=tuple(order_by),
+        after=after,
     )
 
 
-def enforce_order_by_supported[K](
+def _compare(a: Any, b: Any) -> int:
+    """``a`` against ``b`` as -1, 0 or 1, ``None`` being the smallest value."""
+    if a is None or b is None:
+        return (a is not None) - (b is not None)
+    return (a > b) - (a < b)
+
+
+type _Place[K] = tuple[Sequence[Any], K | None]
+
+
+def _compare_places[K](
+    order_by: Sequence[OrderBy[Any]], a: _Place[K], b: _Place[K], *, by_key: bool
+) -> int:
+    for item, x, y in zip(order_by, a[0], b[0], strict=True):
+        if c := _compare(x, y):
+            return -c if item.descending else c
+    return _compare(a[1], b[1]) if by_key else 0
+
+
+def unordered[K](spec: ScanSpec[K]) -> ScanSpec[K]:
+    """What a store that sorts in process asks of its own scan: every row ``spec`` keeps."""
+    return replace(spec, order_by=(), after=None, limit=None, project=Projection.ENTRIES)
+
+
+def sort_rows[K](
+    rows: Iterable[ScanRow[K, Any]], spec: ScanSpec[K]
+) -> Iterator[ScanRow[K, Any]]:
+    """``rows`` — what ``unordered(spec)`` returned — in ``spec``'s order, past its ``after``.
+
+    Holds every row to sort them, or only ``spec.limit`` of them with one.
+    """
+    order_by = spec.order_by
+    after = spec.after
+    placed = (
+        ((tuple(item.field.get(row.value) for item in order_by), row.key), row)
+        for row in rows
+        if row.value is not None
+    )
+    if after is not None:
+        at: _Place[K] = (after.values, after.key)
+        by_key = after.key is not None
+        placed = (
+            p for p in placed if _compare_places(order_by, p[0], at, by_key=by_key) > 0
+        )
+
+    def compare(a: tuple[_Place[K], ScanRow[K, Any]], b: tuple[_Place[K], ScanRow[K, Any]]) -> int:
+        return _compare_places(order_by, a[0], b[0], by_key=True)
+
+    sort_key = cmp_to_key(compare)
+    ordered = (
+        sorted(placed, key=sort_key)
+        if spec.limit is None
+        else heapq.nsmallest(spec.limit, placed, key=sort_key)
+    )
+    for _, row in ordered:
+        yield _project_row(row, spec.project)
+
+
+def order_label(order_by: Sequence[OrderBy[Any]]) -> str:
+    return ", ".join(
+        f"{item.column} desc" if item.descending else item.column for item in order_by
+    )
+
+
+def scan_sorted[K](
+    scan: Callable[[ScanSpec[K]], Iterator[ScanRow[K, Any]]],
     spec: ScanSpec[K],
-    capabilities: ScanCapabilities | None,
     *,
     backend: str,
-) -> None:
-    """Reject ``order_by`` where it cannot be pushed down.
+) -> Iterator[ScanRow[K, Any]]:
+    """``spec`` from a store that cannot give its order: ``scan`` every row, then sort.
 
-    Unlike predicates, ``order_by`` does **not** fall back to the client
-    cascade, and it raises even under ``Pushdown.CLIENT_SIDE``. Filtering a
-    stream costs nothing extra; sorting has to materialise the whole result
-    first, which would quietly turn a streaming scan into an unbounded buffer.
-    Do not add a client-side sort fallback.
+    ``Pushdown.STRICT`` refuses, as it does a filter that would run here.
     """
-    if not spec.order_by:
-        return
-    orderable = capabilities.orderable_columns if capabilities is not None else None
-    if orderable is None:
+    if spec.on_unsupported is Pushdown.STRICT:
         raise KvStoreScanUnsupported(
-            f"{backend} does not support order_by (no orderable columns); "
-            "order_by is never applied client-side"
+            f"{backend} cannot push order_by ({order_label(spec.order_by)}); "
+            "it would sort in process"
         )
-    unknown = [item.column for item in spec.order_by if item.column not in orderable]
-    if unknown:
-        raise KvStoreScanUnsupported(
-            f"{backend} order_by column(s) {unknown!r} are not declared "
-            f"(have {sorted(orderable)!r})"
-        )
+    return sort_rows(scan(unordered(spec)), spec)
+
+
+def explain_sorted[K](child: ScanPlanNode, spec: ScanSpec[K]) -> ScanPlanNode:
+    """The plan of ``scan_sorted``: ``child`` lists every row, then a ``Sort`` here."""
+    return ScanPlanNode(
+        name="Sort",
+        residual=f"order_by({order_label(spec.order_by)})",
+        children=(child,),
+    )
 
 
 def compile_from_scan_entries[K, V](

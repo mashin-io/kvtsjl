@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from itertools import takewhile
 import re
 import sqlite3
 from typing import Any
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness, SqlSelect
+from kvtsjl.backends.sql.adapter import (
+    SqlDbClientAdapter,
+    SqlLiveness,
+    SqlOrder,
+    SqlSelect,
+)
 from kvtsjl.backends.sql.schema import SqlDbRow
 from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.scan import (
@@ -20,7 +26,6 @@ from kvtsjl.store.schema.scan import (
     FieldStartsWith,
     Not,
     Or,
-    OrderBy,
     Predicate,
     fold_ascii,
 )
@@ -78,11 +83,17 @@ def _where_sql(pred: Predicate[Any], params: list[Any]) -> str:
     raise KvStoreError(f"cannot run {type(pred).__name__} in SQL")
 
 
-def _after_sql(order_by: Sequence[OrderBy], after: SqlDbRow, params: list[Any]) -> str:
-    """Rows strictly after ``after`` in ``order_by``, a NULL being the smallest value."""
-    missing = [item.column for item in order_by if item.column not in after]
-    if missing:
-        raise ValueError(f"after is missing order_by columns: {missing}")
+def _after_sql(order: Sequence[SqlOrder], after: SqlDbRow, params: list[Any]) -> str:
+    """Rows strictly after ``after`` in the order of the columns it names.
+
+    ``after`` names a leading run of ``order``; a NULL is the smallest value.
+    """
+    order_by = list(takewhile(lambda item: item.column in after, order))
+    if not order_by or len(order_by) != len(after):
+        raise ValueError(
+            f"after must name a leading run of the order's columns "
+            f"{[item.column for item in order]}, got {sorted(after)}"
+        )
     values = [after[item.column] for item in order_by]
     if all(not item.descending for item in order_by) and all(v is not None for v in values):
         # One row-value comparison: SQLite reads the index from that point on,

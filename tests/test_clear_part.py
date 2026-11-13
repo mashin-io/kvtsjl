@@ -227,7 +227,12 @@ def test_a_cleared_view_no_longer_holds_the_key() -> None:
 
 def test_an_ordered_scan_with_a_limit_skips_cleared_rows_in_sql() -> None:
     """A pushed LIMIT must not be used up by rows this view no longer holds."""
-    from kvtsjl.store.schema.scan import OrderBy
+    from kvtsjl.store.schema.scan import Field, OrderBy, Pushdown
+
+    def sql_only(digest: Digest) -> str:
+        raise AssertionError("SQL orders by core; the getter must not run")
+
+    core_order = Field[Digest, str]("core", sql_only)
 
     conn = sqlite3.connect(":memory:")
     _wide_table(conn)
@@ -237,7 +242,13 @@ def test_an_ordered_scan_with_a_limit_skips_cleared_rows_in_sql() -> None:
         digest.set(key, Digest(f"t{key}", None))
     digest.unset("c")
 
-    newest = list(digest.scan(order_by=[OrderBy("core", descending=True)], limit=2))
+    newest = list(
+        digest.scan(
+            order_by=[OrderBy(core_order, descending=True)],
+            limit=2,
+            on_unsupported=Pushdown.STRICT,
+        )
+    )
     assert newest == ["b", "a"], "the cleared row took a place in the limit"
 
 

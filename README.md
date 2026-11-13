@@ -46,6 +46,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Wire schema** — `KvSet` describes key/value serdes, layout, TTL; leaf backends own I/O
 - **Scope views** — prefix namespaces without copying data
 - **Field filters** — `Field(name, get).eq / is_in / startswith / contains / is_null` filter a scan on every store; SQL runs them in its `WHERE`
+- **Ordered scans** — `order_by=[OrderBy(field, descending=…)]` and `after=` resume the same order on every store; SQL sorts and pages in the database, any other store sorts in process
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
 - **Store algebra** — `.map` / `.imap` / `.imap_keys`, `.zip` / `.zip_with` / `.zip_as`, `.then` / `.then_with`, `.expand` / `.expand_map`, `.coalesce`, plus `.mirror()`, `.indexed()`, `.readonly()`, `.scoped()`
@@ -195,6 +196,42 @@ holds for an artifact with no agent, wherever it runs.
 A SQL adapter takes these through `select(SqlSelect)`, together with the
 order, the keyset page and liveness — one request object, so new kinds of
 query reach an adapter without changing its signature.
+
+---
+
+## Ordering a scan
+
+Order by fields of the value, and resume just past the last row read:
+
+```python
+from kvtsjl.store.schema import After, OrderBy
+
+NEWEST = [OrderBy(CREATED_AT, descending=True), OrderBy(ARTIFACT_ID, descending=True)]
+
+page = list(store.scan(order_by=NEWEST, include_values=True, limit=50))
+key, value = page[-1]
+more = store.scan(order_by=NEWEST, include_values=True, limit=50,
+                  after=After.of(NEWEST, key, value))
+```
+
+Every store gives the same order: by each field in turn — an unset field
+first ascending, last descending — then by key, ascending; text by code
+point. A SQL view that declares every field as a column sorts and pages in
+the database. Any other store sorts in process, reading the whole scan (with
+a `limit`, it holds only that many rows); `explain()` shows a `Sort`, and
+`Pushdown.STRICT` refuses it.
+
+A view of one store under the same keys — `readonly()`, `map`, `imap`,
+`then`, a record's commit part — hands the order to that store when it can
+give it, so a field's name is the promise that the store's column of that
+name holds the field's value. Otherwise the view sorts its own values.
+`imap_keys` and stores that merge several always sort themselves: their
+ties fall in their own key order.
+
+`After(values, key)` names a place in the order. With only `values`, the
+scan resumes past every row with those values — the same place, when the
+order tells every row apart, as `NEWEST` does here — so a cursor can carry
+just the fields it orders by.
 
 ---
 
