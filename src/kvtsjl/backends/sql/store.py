@@ -30,7 +30,10 @@ from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     After,
     AlwaysTrue,
+    And,
     CompiledScan,
+    Field,
+    FieldCompare,
     FieldContains,
     FieldEq,
     FieldIn,
@@ -38,6 +41,10 @@ from kvtsjl.store.schema.scan import (
     FieldStartsWith,
     FieldTest,
     KeyPrefix,
+    ModifiedAfter,
+    ModifiedBefore,
+    Not,
+    Or,
     OrderBy,
     Predicate,
     Projection,
@@ -77,6 +84,10 @@ def _clock_base(created_at: datetime | None) -> float:
     if created_at.tzinfo is None:
         return created_at.replace(tzinfo=UTC).timestamp()
     return created_at.timestamp()
+
+
+def _clock_is_sql_s(value: Any) -> float:
+    raise KvStoreError("the write clock is a column of the row, not a field of its value")
 
 
 def _as_timestamp(value: Any) -> float | None:
@@ -878,7 +889,16 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         selects = self._adapter.supports_select()
         pushdown: set[type] = {KeyPrefix}
         if selects:
-            pushdown |= {FieldEq, FieldIn, FieldStartsWith, FieldContains, FieldIsNull}
+            pushdown |= {
+                FieldEq,
+                FieldIn,
+                FieldStartsWith,
+                FieldContains,
+                FieldIsNull,
+                FieldCompare,
+                ModifiedBefore,
+                ModifiedAfter,
+            }
         return ScanCapabilities(
             pushdown=frozenset(pushdown),
             orders=frozenset({ScanOrder.UNORDERED, ScanOrder.KEY_ASC}),
@@ -899,12 +919,37 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def _peel_field_tests(
         self, where: Predicate[K]
     ) -> tuple[Predicate[K] | None, Predicate[K]]:
-        """The tests of this view's own columns, for SQL to run, and the rest."""
+        """The tests SQL runs, and the rest.
+
+        Tests of this view's own columns, and of the time a row was written:
+        ``ModifiedBefore`` / ``ModifiedAfter`` become tests of the clock
+        column, which holds that time. Only what SQL takes is rewritten, so
+        a time test left for Python still reads the row's stat.
+        """
         columns = {f.name for f in self._sql_kvset.fields}
-        taken, rest = split_where(
-            where, lambda p: isinstance(p, FieldTest) and p.of.name in columns
-        )
-        return (None if isinstance(taken, AlwaysTrue) else taken), rest
+
+        def runs_in_sql(p: Predicate[K]) -> bool:
+            if isinstance(p, ModifiedBefore | ModifiedAfter):
+                return True
+            return isinstance(p, FieldTest) and cast(FieldTest[Any, Any], p).of.name in columns
+
+        taken, rest = split_where(where, runs_in_sql)
+        if isinstance(taken, AlwaysTrue):
+            return None, rest
+        return self._clock_tests_as_columns(taken), rest
+
+    def _clock_tests_as_columns(self, pred: Predicate[K]) -> Predicate[K]:
+        if isinstance(pred, ModifiedBefore | ModifiedAfter):
+            clock = Field[Any, float](self._sql_kvset.updated_at_field, _clock_is_sql_s)
+            when = pred.when.timestamp()
+            return clock.lt(when) if isinstance(pred, ModifiedBefore) else clock.gt(when)
+        if isinstance(pred, And):
+            return And(self._clock_tests_as_columns(pred.left), self._clock_tests_as_columns(pred.right))
+        if isinstance(pred, Or):
+            return Or(self._clock_tests_as_columns(pred.left), self._clock_tests_as_columns(pred.right))
+        if isinstance(pred, Not):
+            return Not(self._clock_tests_as_columns(pred.inner))
+        return pred
 
     def _resolve_order_by(self, order_by: Sequence[OrderBy[Any]]) -> list[SqlOrder]:
         """The columns to order by: ``order_by``'s, then the key fields ascending.
@@ -1055,6 +1100,12 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             pushed.add("FieldTest")
         if spec.cursor is not None:
             pushed.add("cursor")
+        # Only with nothing left to filter: a limit spent here on rows Python
+        # then drops would return fewer than asked, or none.
+        limit: int | None = None
+        if spec.limit is not None and isinstance(residual, AlwaysTrue) and spec.refine is None:
+            limit = spec.limit
+            pushed.add("limit")
         after_key = (
             self._after_key_from_cursor(spec.cursor)
             if spec.cursor is not None
@@ -1066,7 +1117,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             after_key=after_key,
             page_size=spec.page_size,
             include_values=spec.project is Projection.ENTRIES,
-            limit=spec.limit,
+            limit=limit,
             decode=self._decode_leaf_key,
         )
         enforce_strict(spec, residual, backend=type(self).__name__)
@@ -1129,6 +1180,9 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         after = after_key
         yielded = 0
         while True:
+            # No more than the rows still owed: a page of a GC sweep is one
+            # query that stops there.
+            asked = page_size if limit is None else min(page_size, limit - yielded)
             page = list(
                 self._adapter.select(
                     SqlSelect(
@@ -1140,7 +1194,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                         prefixes=prefixes,
                         where=tests,
                         after=after,
-                        limit=page_size,
+                        limit=asked,
                     )
                 )
             )
@@ -1180,7 +1234,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                     "the scan would never terminate"
                 )
             after = advanced
-            if len(page) < page_size:
+            if len(page) < asked:
                 break
         if expired_keys:
             self._adapter.delete_by_keys(

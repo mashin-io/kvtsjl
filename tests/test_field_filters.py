@@ -68,6 +68,13 @@ CASES: list[tuple[str, Predicate[str], str]] = [
     ("and", KIND.eq("chat") & ~AGENT.is_null(), "acf"),
     ("with a key test", KeyIn[str](frozenset("abc")) & KIND.eq("chat"), "ac"),
     ("or with a key test", KeyIn[str](frozenset("b")) | KIND.eq("asset"), "bd"),
+    ("lt by code point", NAME.lt("i"), "af"),
+    ("le holds at the value", NAME.le("image_dump.bin"), "aef"),
+    ("gt is false where unset", MIME.gt("text/"), "df"),
+    ("ge holds at the value", MIME.ge("image/png"), "bdf"),
+    ("not gt holds where unset", ~MIME.gt("text/"), "abce"),
+    ("lt is strict", NAME.lt("notes.md"), "aef"),
+    ("gt is strict", MIME.gt("text/csv"), "d"),
 ]
 
 

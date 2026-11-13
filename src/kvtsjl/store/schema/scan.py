@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.scope import Scoped
 from kvtsjl.store.schema.layout import ScanQuery
+from kvtsjl.store.schema.stat import RecordStat
 
 if TYPE_CHECKING:  # annotation only — kvtsjl.keymap imports this package
     from kvtsjl.keymap import ReadableKeyMap
@@ -398,6 +399,27 @@ class Field[V, T]:
         """The field is unset."""
         return FieldIsNull(self)
 
+    def lt(self, value: T) -> FieldCompare[V, T]:
+        """The field is set, and less than ``value``."""
+        return self._compare(Comparison.LT, value)
+
+    def le(self, value: T) -> FieldCompare[V, T]:
+        """The field is set, and at most ``value``."""
+        return self._compare(Comparison.LE, value)
+
+    def gt(self, value: T) -> FieldCompare[V, T]:
+        """The field is set, and greater than ``value``."""
+        return self._compare(Comparison.GT, value)
+
+    def ge(self, value: T) -> FieldCompare[V, T]:
+        """The field is set, and at least ``value``."""
+        return self._compare(Comparison.GE, value)
+
+    def _compare(self, op: Comparison, value: T) -> FieldCompare[V, T]:
+        if value is None:
+            raise ValueError(f"{self.name} compared with None never holds; use is_null()")
+        return FieldCompare(self, op, value)
+
 
 @dataclass(frozen=True, slots=True)
 class OrderBy[V]:
@@ -447,7 +469,7 @@ class FieldTest[V, T](ValuePredicate[Any], ABC):
 
     The node types a medium that pushes field tests down receives, under
     ``And`` / ``Or`` / ``Not``: ``FieldEq``, ``FieldIn``, ``FieldStartsWith``,
-    ``FieldContains`` and ``FieldIsNull``.
+    ``FieldContains``, ``FieldIsNull`` and ``FieldCompare``.
     """
 
     @property
@@ -540,6 +562,40 @@ class FieldIsNull[V, T](FieldTest[V, T]):
 
     def holds(self, value: T) -> bool:
         return value is None
+
+
+class Comparison(str, Enum):
+    LT = "<"
+    LE = "<="
+    GT = ">"
+    GE = ">="
+
+
+@dataclass(frozen=True, slots=True)
+class FieldCompare[V, T](FieldTest[V, T]):
+    """The field is set, and compares with ``value`` as ``op`` says."""
+
+    field: Field[V, T]
+    op: Comparison
+    value: T
+
+    @property
+    def of(self) -> Field[V, T]:
+        return self.field
+
+    def holds(self, value: T) -> bool:
+        if value is None:
+            return False
+        a, b = cast(Any, value), cast(Any, self.value)
+        match self.op:
+            case Comparison.LT:
+                return bool(a < b)
+            case Comparison.LE:
+                return bool(a <= b)
+            case Comparison.GT:
+                return bool(a > b)
+            case Comparison.GE:
+                return bool(a >= b)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,34 +1076,53 @@ def apply_cascade[K, V](
 ) -> Iterator[ScanRow[K, V]]:
     """Client-side cascade: KEY → STAT → VALUE → refine → limit.
 
-    A value predicate reads the value a row carries; only rows the scan
-    brought without one are read, a page at a time, with ``batch_get``.
+    A stat or value predicate reads what a row carries; only rows the scan
+    brought without it are read, a page at a time, with ``batch_stat`` and
+    then ``batch_get`` — so a value is read only where the stat passed, and
+    a row gone since it was listed is dropped. Rows keep their order.
     """
     key_p, stat_p, value_p = partition_by_needs(residual)
+    # A value test may read the stat too, as ``ModifiedBefore | ValueWhere`` does.
+    wants_stat = any(p.needs() & Needs.STAT for p in (*stat_p, *value_p))
     yielded = 0
-    pending_keys: list[K] = []
-    pending_rows: dict[K, ScanRow[K, V]] = {}
+    pending: list[ScanRow[K, V]] = []
+
+    def lacks(row: ScanRow[K, V]) -> bool:
+        return (wants_stat and row.stat is None) or bool(value_p and row.value is None)
+
+    def reader() -> ReadableKeyMap[K, V]:
+        if store is None:
+            raise KvStoreScanUnsupported(
+                "a stat or value residual needs a store to read rows from"
+            )
+        return store
 
     def flush() -> Iterator[ScanRow[K, V]]:
         nonlocal yielded
-        if not pending_keys:
-            return
-        assert store is not None
-        keys = list(pending_keys)
-        pending_keys.clear()
-        pending_rows_snap = {k: pending_rows.pop(k) for k in keys}
-        found = store.batch_get(keys)
-        for key in keys:
-            if key not in found:
-                continue
-            base = pending_rows_snap[key]
-            row = ScanRow(key=key, value=found[key], stat=base.stat)
+        batch = list(pending)
+        pending.clear()
+        unstated = [r.key for r in batch if wants_stat and r.stat is None]
+        stats = reader().batch_stat(unstated) if unstated else {}
+        stated: list[ScanRow[K, V]] = []
+        for row in batch:
+            if wants_stat and row.stat is None:
+                if row.key not in stats:
+                    continue
+                row = ScanRow(key=row.key, value=row.value, stat=_scan_stat(stats[row.key]))
+            if _all_pass(stat_p, row):
+                stated.append(row)
+        unread = [r.key for r in stated if value_p and r.value is None]
+        found = reader().batch_get(unread) if unread else {}
+        for row in stated:
+            if value_p and row.value is None:
+                if row.key not in found:
+                    continue
+                row = ScanRow(key=row.key, value=found[row.key], stat=row.stat)
             if not _all_pass(value_p, row):
                 continue
             if refine is not None and not refine(row):
                 continue
-            out = _project_row(row, project)
-            yield out
+            yield _project_row(row, project)
             yielded += 1
             if limit is not None and yielded >= limit:
                 return
@@ -1057,36 +1132,27 @@ def apply_cascade[K, V](
             break
         if not _all_pass(key_p, row):
             continue
-        if not _all_pass(stat_p, row):
-            continue
-        if value_p and row.value is None:
-            if store is None:
-                raise KvStoreScanUnsupported(
-                    "VALUE residual requires a store for batch_get cascade"
-                )
-            pending_keys.append(row.key)
-            pending_rows[row.key] = row
-            if len(pending_keys) >= 100:
+        waits = lacks(row)
+        if waits or pending:
+            # Behind rows still waiting for what they lack, so the order holds.
+            pending.append(row)
+            if len(pending) >= 100 or not waits:
                 yield from flush()
-                if limit is not None and yielded >= limit:
-                    break
             continue
-        if value_p:
-            # The scan brought the value: filter on it, after the rows still
-            # waiting for theirs, so the order holds.
-            yield from flush()
-            if limit is not None and yielded >= limit:
-                break
-            if not _all_pass(value_p, row):
-                continue
-        if refine is not None and not refine(row):
-            continue
-        out = _project_row(row, project)
-        yield out
-        yielded += 1
-
-    if value_p and pending_keys and (limit is None or yielded < limit):
+        pending.append(row)
         yield from flush()
+
+    if pending and (limit is None or yielded < limit):
+        yield from flush()
+
+
+def _scan_stat(stat: RecordStat) -> ScanStat:
+    return ScanStat(
+        size=stat.size,
+        modified_at=stat.modified_at,
+        expires_at=stat.expires_at,
+        etag=stat.etag,
+    )
 
 
 def _project_row[K, V](row: ScanRow[K, V], project: Projection) -> ScanRow[K, V]:

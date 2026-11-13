@@ -20,6 +20,7 @@ from kvtsjl.exceptions import KvStoreError
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
     And,
+    FieldCompare,
     FieldContains,
     FieldEq,
     FieldIn,
@@ -83,6 +84,10 @@ def _where_sql(pred: Predicate[Any], params: list[Any]) -> str:
         return f"(typeof({c}) = 'text' AND instr({c}, ?) > 0)"
     if isinstance(pred, FieldIsNull):
         return f"({_quote_ident(pred.of.name)} IS NULL)"
+    if isinstance(pred, FieldCompare):
+        params.append(pred.value)
+        c = _quote_ident(pred.of.name)
+        return f"({c} IS NOT NULL AND {c} {pred.op.value} ?)"
     raise KvStoreError(f"cannot run {type(pred).__name__} in SQL")
 
 

@@ -63,8 +63,9 @@ class SqlSelect:
     ``where``
         Tests of value columns, or ``None``. A tree of ``And`` / ``Or`` /
         ``Not`` over ``FieldEq``, ``FieldIn``, ``FieldStartsWith``,
-        ``FieldContains`` and ``FieldIsNull`` (``kvtsjl.store.schema``), each
-        naming its column as ``test.of.name``. Every test is two-valued —
+        ``FieldContains``, ``FieldIsNull`` and ``FieldCompare``
+        (``kvtsjl.store.schema``), each naming its column as
+        ``test.of.name``; ``FieldCompare.op.value`` is its SQL operator. Every test is two-valued —
         false where the column is NULL, except ``FieldIsNull`` — so ``Not``
         means what it does in Python: compile each one so it never yields
         NULL (``(c IS NOT NULL AND c = ?)``). ``FieldStartsWith`` and

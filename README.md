@@ -191,9 +191,17 @@ declares the field as a column runs it in the `WHERE` instead, and with
 nothing left to filter in Python an ordered scan's `limit` goes to SQL too;
 `explain()` shows which, and `Pushdown.STRICT` refuses what would run in
 Python. The tests are `eq`, `is_in`, `startswith`, `contains` (with
-`ignore_case`, which folds ASCII letters only, as SQL's `lower()` does) and
-`is_null`. Each is false where the field is unset, so `~AGENT.eq("alice")`
-holds for an artifact with no agent, wherever it runs.
+`ignore_case`, which folds ASCII letters only, as SQL's `lower()` does),
+`lt` / `le` / `gt` / `ge` (text by code point) and `is_null`. Each is false
+where the field is unset, so `~AGENT.eq("alice")` holds for an artifact with
+no agent, wherever it runs.
+
+`ModifiedBefore(t)` / `ModifiedAfter(t)` test when an entry was written. A
+scan that brings rows without their stat reads it to test them; SQL tests
+its clock column instead, so a GC page —
+`store.scan(where=ModifiedBefore(cutoff), limit=page, on_unsupported=Pushdown.STRICT)`
+— is one query that stops at the page. Redis keeps no write time, so there a
+time test holds for nothing.
 
 A SQL adapter takes these through `select(SqlSelect)`, together with the
 order, the keyset page and liveness — one request object, so new kinds of
