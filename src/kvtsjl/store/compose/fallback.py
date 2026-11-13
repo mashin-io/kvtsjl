@@ -2,12 +2,41 @@
 
 from __future__ import annotations
 
+from kvtsjl.exceptions import KvStoreComposeError
 from kvtsjl.keymap_algebra.coalesce import CoalescedKeyMap
 from kvtsjl.scope import Scope, Scoped
 from kvtsjl.store.compose.topology import StoreTopologyMixin
 from kvtsjl.store.fanout import ScopeFanoutMixin
-from kvtsjl.store.logical import KvStore
+from kvtsjl.store.logical import KvStore, SyncTreeNode
 from kvtsjl.store.schema.ttl import CopyClock
+
+
+def _stores_beneath(node: object) -> dict[int, object]:
+    """The stores at the bottom of ``node``'s tree, by identity."""
+    children = node.child_stores() if isinstance(node, SyncTreeNode) else ()
+    if not children:
+        return {id(node): node}
+    found: dict[int, object] = {}
+    for child in children:
+        found |= _stores_beneath(child)
+    return found
+
+
+def _refuse_promoting_into_its_source(primary: object, secondary: object) -> None:
+    """A promote writes into the primary; refuse where that is where the value came from.
+
+    ``cache.mirror(durable).fallback_read(durable)`` promotes through the
+    mirror, so every cold read rewrites ``durable`` with what it just read.
+    """
+    shared = _stores_beneath(primary).keys() & _stores_beneath(secondary).keys()
+    if shared:
+        raise KvStoreComposeError(
+            "fallback_read(promote=True) would write each value it reads from its "
+            "fallback back into the same store: the primary writes to a store the "
+            "fallback reads from. Read through a cache with "
+            "cache.fallback_read(durable), write through it with "
+            "durable.mirror(cache); or pass promote=False"
+        )
 
 
 class CoalescedKvStore[K, V](
@@ -39,6 +68,8 @@ class CoalescedKvStore[K, V](
         promote: bool = True,
         copy_clock: CopyClock = CopyClock.RECORD,
     ) -> None:
+        if promote:
+            _refuse_promoting_into_its_source(primary, secondary)
         super().__init__(primary, secondary, promote=promote, copy_clock=copy_clock)
         self.scope = primary.scope
         self.batch_size = primary.batch_size

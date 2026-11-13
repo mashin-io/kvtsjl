@@ -730,6 +730,8 @@ new_version.fallback_read(old_version)                              # copies kee
 local_cache.fallback_read(durable, copy_clock=CopyClock.COPY)       # copies stay for the cache's TTL from now
 ```
 
+A promote writes into the store in front, so that store must not write to the fallback it reads from. `cache.mirror(durable).fallback_read(durable)` would promote through the mirror and rewrite `durable` with every value it had just read; built with `promote=True`, it raises `KvStoreComposeError`. Read through a cache with `cache.fallback_read(durable)`, and write through it with `durable.mirror(cache)`.
+
 The default, `CopyClock.RECORD`, carries each record's write clock: a record written three days ago into a store with a four-day TTL has one day left. `CopyClock.COPY` makes the TTL mean how long to keep a copy — with `RECORD`, a cache with a one-day TTL would receive every record older than a day already expired, and never serve it. Every copy follows the choice — read fills, streamed fills and `fill_missing` — and under `COPY` the fallback is not asked for a clock at all.
 
 ### Filling a store from its fallback
