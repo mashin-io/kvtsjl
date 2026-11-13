@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntFlag, auto
 from fnmatch import fnmatch
+import string
 from typing import TYPE_CHECKING, Any, cast
 
 from kvtsjl.exceptions import KvStoreScanUnsupported
@@ -331,6 +332,160 @@ class ValueWhere[K](ValuePredicate[K]):
 
 
 @dataclass(frozen=True, slots=True)
+class Field[V, T]:
+    """One field of a value ``V``: the name a medium stores it under, and how to read it.
+
+    Declare it once, beside the value type, and filter any store of ``V``
+    with it::
+
+        MIME = Field[Artifact, str | None]("mime", lambda a: a.mime)
+        store.scan(where=MIME.startswith("image/"))
+
+    Every store runs the test on its values. A medium that keeps the field
+    as a column of that ``name`` runs it there instead — SQL, for a field
+    its view declares — so ``get`` and the column must say the same thing.
+
+    Every test is two-valued and false on a missing field, so ``~`` keeps
+    its meaning wherever it runs: ``~MIME.eq("x")`` holds where ``mime`` is
+    unset. Test for that with ``is_null()``.
+    """
+
+    name: str
+    get: Callable[[V], T] = field(compare=False, hash=False)
+
+    def eq(self, value: T) -> FieldEq[V, T]:
+        """The field equals ``value``."""
+        if value is None:
+            raise ValueError(f"{self.name}.eq(None) never holds; use is_null()")
+        return FieldEq(self, value)
+
+    def is_in(self, values: Iterable[T]) -> FieldIn[V, T]:
+        """The field equals one of ``values``; none at all holds for no row."""
+        kept = tuple(dict.fromkeys(values))
+        if any(v is None for v in kept):
+            raise ValueError(f"{self.name}.is_in(...) cannot match None; or it with is_null()")
+        return FieldIn(self, kept)
+
+    def startswith(self: Field[V, str] | Field[V, str | None], prefix: str) -> FieldStartsWith[V]:
+        """The field is text that starts with ``prefix``, case and all."""
+        return FieldStartsWith(self, prefix)
+
+    def contains(
+        self: Field[V, str] | Field[V, str | None], part: str, *, ignore_case: bool = False
+    ) -> FieldContains[V]:
+        """The field is text with ``part`` in it.
+
+        ``ignore_case`` folds ASCII letters only, as SQL's ``lower()`` does on
+        every engine, so the test means the same wherever it runs.
+        """
+        return FieldContains(self, part, ignore_case)
+
+    def is_null(self) -> FieldIsNull[V, T]:
+        """The field is unset."""
+        return FieldIsNull(self)
+
+
+class FieldTest[V, T](ValuePredicate[Any], ABC):
+    """A test of one field of the value; ``Predicate[Any]``, since it reads no key.
+
+    The node types a medium that pushes field tests down receives, under
+    ``And`` / ``Or`` / ``Not``: ``FieldEq``, ``FieldIn``, ``FieldStartsWith``,
+    ``FieldContains`` and ``FieldIsNull``.
+    """
+
+    @property
+    @abstractmethod
+    def of(self) -> Field[V, T]:
+        """The field tested."""
+
+    @abstractmethod
+    def holds(self, value: T) -> bool:
+        """Whether the test holds for the field's value."""
+
+    def evaluate(self, row: ScanRow[Any, Any]) -> bool:
+        if row.value is None:
+            return False
+        return self.holds(self.of.get(row.value))
+
+
+@dataclass(frozen=True, slots=True)
+class FieldEq[V, T](FieldTest[V, T]):
+    field: Field[V, T]
+    value: T
+
+    @property
+    def of(self) -> Field[V, T]:
+        return self.field
+
+    def holds(self, value: T) -> bool:
+        return value == self.value
+
+
+@dataclass(frozen=True, slots=True)
+class FieldIn[V, T](FieldTest[V, T]):
+    field: Field[V, T]
+    values: tuple[T, ...]
+
+    @property
+    def of(self) -> Field[V, T]:
+        return self.field
+
+    def holds(self, value: T) -> bool:
+        return value in self.values
+
+
+@dataclass(frozen=True, slots=True)
+class FieldStartsWith[V](FieldTest[V, str | None]):
+    field: Field[V, str] | Field[V, str | None]
+    prefix: str
+
+    @property
+    def of(self) -> Field[V, str | None]:
+        return cast(Field[V, str | None], self.field)
+
+    def holds(self, value: str | None) -> bool:
+        return isinstance(value, str) and value.startswith(self.prefix)
+
+
+_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def fold_ascii(text: str) -> str:
+    """Lower-case ASCII letters only — what ``FieldContains(ignore_case=True)`` folds."""
+    return text.translate(_ASCII_FOLD)
+
+
+@dataclass(frozen=True, slots=True)
+class FieldContains[V](FieldTest[V, str | None]):
+    field: Field[V, str] | Field[V, str | None]
+    part: str
+    ignore_case: bool = False
+
+    @property
+    def of(self) -> Field[V, str | None]:
+        return cast(Field[V, str | None], self.field)
+
+    def holds(self, value: str | None) -> bool:
+        if not isinstance(value, str):
+            return False
+        if self.ignore_case:
+            return fold_ascii(self.part) in fold_ascii(value)
+        return self.part in value
+
+
+@dataclass(frozen=True, slots=True)
+class FieldIsNull[V, T](FieldTest[V, T]):
+    field: Field[V, T]
+
+    @property
+    def of(self) -> Field[V, T]:
+        return self.field
+
+    def holds(self, value: T) -> bool:
+        return value is None
+
+
+@dataclass(frozen=True, slots=True)
 class ScanSpec[K]:
     where: Predicate[K] = field(default_factory=lambda: AlwaysTrue())
     refine: Callable[[ScanRow[K, Any]], bool] | None = None
@@ -510,16 +665,50 @@ def peel_key_prefix[K](
     return None, where
 
 
-def is_key_only_predicate[K](pred: Predicate[K]) -> bool:
+def made_of[K](pred: Predicate[K], leaf: Callable[[Predicate[K]], bool]) -> bool:
+    """Whether ``pred`` is ``leaf`` tests alone, under ``And`` / ``Or`` / ``Not``."""
     if isinstance(pred, AlwaysTrue):
         return True
-    if isinstance(pred, KeyPredicate):
-        return True
     if isinstance(pred, And | Or):
-        return is_key_only_predicate(pred.left) and is_key_only_predicate(pred.right)
+        return made_of(pred.left, leaf) and made_of(pred.right, leaf)
     if isinstance(pred, Not):
-        return is_key_only_predicate(pred.inner)
-    return False
+        return made_of(pred.inner, leaf)
+    return leaf(pred)
+
+
+def split_where[K](
+    where: Predicate[K], leaf: Callable[[Predicate[K]], bool]
+) -> tuple[Predicate[K], Predicate[K]]:
+    """Split ``where`` into the conjuncts made of ``leaf`` tests alone, and the rest.
+
+    How a medium takes the part of a filter it can run: the first half goes
+    to it, the second runs on the rows it returns, and the two together mean
+    ``where``. Conjuncts split; an ``Or`` or a ``Not`` goes whole to one side,
+    since part of one would mean something else.
+    """
+    if isinstance(where, And):
+        left_taken, left_rest = split_where(where.left, leaf)
+        right_taken, right_rest = split_where(where.right, leaf)
+        return _conjoin(left_taken, right_taken), _conjoin(left_rest, right_rest)
+    if made_of(where, leaf):
+        return where, AlwaysTrue()
+    return AlwaysTrue(), where
+
+
+def _conjoin[K](left: Predicate[K], right: Predicate[K]) -> Predicate[K]:
+    if isinstance(left, AlwaysTrue):
+        return right
+    if isinstance(right, AlwaysTrue):
+        return left
+    return And(left, right)
+
+
+def _is_key_test[K](pred: Predicate[K]) -> bool:
+    return isinstance(pred, KeyPredicate)
+
+
+def is_key_only_predicate[K](pred: Predicate[K]) -> bool:
+    return made_of(pred, _is_key_test)
 
 
 def split_key_predicates[K](
@@ -531,43 +720,7 @@ def split_key_predicates[K](
     ``ScanSpec``s. Stat/value predicates stay residual for the post-assembly
     cascade.
     """
-    if isinstance(where, AlwaysTrue):
-        return AlwaysTrue(), AlwaysTrue()
-    if isinstance(where, KeyPredicate):
-        return where, AlwaysTrue()
-    if isinstance(where, StatPredicate | ValuePredicate):
-        return AlwaysTrue(), where
-    if isinstance(where, Not):
-        key_w, resid = split_key_predicates(where.inner)
-        if isinstance(resid, AlwaysTrue) and not isinstance(key_w, AlwaysTrue):
-            return Not(key_w), AlwaysTrue()
-        if isinstance(key_w, AlwaysTrue) and not isinstance(resid, AlwaysTrue):
-            return AlwaysTrue(), Not(resid)
-        # Mixed — keep whole Not as residual (cannot push partial invert safely).
-        return AlwaysTrue(), where
-    if isinstance(where, And):
-        lk, lr = split_key_predicates(where.left)
-        rk, rr = split_key_predicates(where.right)
-        key_w: Predicate[K] = AlwaysTrue()
-        if not isinstance(lk, AlwaysTrue) and not isinstance(rk, AlwaysTrue):
-            key_w = And(lk, rk)
-        elif not isinstance(lk, AlwaysTrue):
-            key_w = lk
-        elif not isinstance(rk, AlwaysTrue):
-            key_w = rk
-        resid: Predicate[K] = AlwaysTrue()
-        if not isinstance(lr, AlwaysTrue) and not isinstance(rr, AlwaysTrue):
-            resid = And(lr, rr)
-        elif not isinstance(lr, AlwaysTrue):
-            resid = lr
-        elif not isinstance(rr, AlwaysTrue):
-            resid = rr
-        return key_w, resid
-    if isinstance(where, Or):
-        if is_key_only_predicate(where):
-            return where, AlwaysTrue()
-        return AlwaysTrue(), where
-    return AlwaysTrue(), where
+    return split_where(where, _is_key_test)
 
 
 def is_gc_predicate[K](where: Predicate[K]) -> bool:

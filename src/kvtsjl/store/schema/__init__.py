@@ -10,6 +10,13 @@ from kvtsjl.store.schema.scan import (
     And,
     CompiledScan,
     Expired,
+    Field,
+    FieldContains,
+    FieldEq,
+    FieldIn,
+    FieldIsNull,
+    FieldStartsWith,
+    FieldTest,
     KeyIn,
     KeyMatches,
     KeyPrefix,
@@ -32,6 +39,7 @@ from kvtsjl.store.schema.scan import (
     SizeBetween,
     ValueWhere,
     split_key_predicates,
+    split_where,
 )
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import ExpiryGc, TtlPolicy
@@ -42,6 +50,13 @@ __all__ = [
     "CompiledScan",
     "Expired",
     "ExpiryGc",
+    "Field",
+    "FieldContains",
+    "FieldEq",
+    "FieldIn",
+    "FieldIsNull",
+    "FieldStartsWith",
+    "FieldTest",
     "KeyIn",
     "KeyLayout",
     "KeyMatches",
@@ -70,5 +85,6 @@ __all__ = [
     "TtlPolicy",
     "ValueWhere",
     "split_key_predicates",
+    "split_where",
     "supports_prefix_scan",
 ]

@@ -45,6 +45,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Footprint-free medium** — default writes do not stamp library identity (`x-amz-meta-kvtsjl-*`, tags, sidecars)
 - **Wire schema** — `KvSet` describes key/value serdes, layout, TTL; leaf backends own I/O
 - **Scope views** — prefix namespaces without copying data
+- **Field filters** — `Field(name, get).eq / is_in / startswith / contains / is_null` filter a scan on every store; SQL runs them in its `WHERE`
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
 - **Store algebra** — `.map` / `.imap` / `.imap_keys`, `.zip` / `.zip_with` / `.zip_as`, `.then` / `.then_with`, `.expand` / `.expand_map`, `.coalesce`, plus `.mirror()`, `.indexed()`, `.readonly()`, `.scoped()`
@@ -162,6 +163,38 @@ store = MemoryKvStore(kvset)
 ```
 
 Apply compression on the **leaf** `KvSet` before `.mirror()`, `.coalesce()`, or `.indexed()`.
+
+---
+
+## Filtering a scan by field
+
+Declare a field of the value once — the name a medium stores it under, and how
+to read it — and filter any store of that value with it:
+
+```python
+from kvtsjl.store.schema import Field
+
+KIND = Field[Artifact, str]("kind", lambda a: a.kind)
+MIME = Field[Artifact, str | None]("mime", lambda a: a.mime)
+AGENT = Field[Artifact, str | None]("agent", lambda a: a.agent)
+
+store.scan(where=KIND.is_in(["chat", "job"])
+                 & MIME.startswith("image/")
+                 & (AGENT.eq("alice") | AGENT.is_null()))
+```
+
+Every store runs the test on its values, through every view. A SQL view that
+declares the field as a column runs it in the `WHERE` instead, and with
+nothing left to filter in Python an ordered scan's `limit` goes to SQL too;
+`explain()` shows which, and `Pushdown.STRICT` refuses what would run in
+Python. The tests are `eq`, `is_in`, `startswith`, `contains` (with
+`ignore_case`, which folds ASCII letters only, as SQL's `lower()` does) and
+`is_null`. Each is false where the field is unset, so `~AGENT.eq("alice")`
+holds for an artifact with no agent, wherever it runs.
+
+A SQL adapter takes these through `select(SqlSelect)`, together with the
+order, the keyset page and liveness — one request object, so new kinds of
+query reach an adapter without changing its signature.
 
 ---
 

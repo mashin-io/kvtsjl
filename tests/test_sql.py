@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import sqlite3
 from typing import Any
@@ -12,6 +13,7 @@ import pytest
 
 from kvtsjl import ExpiryGc, KeyLayout, TtlPolicy
 from kvtsjl.backends.sql import ExpiryBinding, SqlDbKvStore, SqliteSqlDbClientAdapter
+from kvtsjl.backends.sql.adapter import SqlSelect
 from kvtsjl.backends.sql.schema import SqlDbRow
 from kvtsjl.exceptions import KvStoreError, KvStoreReadOnlyError, KvStoreScanUnsupported
 from kvtsjl.store.schema.scan import Projection, ScanCursor, ScanOrder, ScanSpec
@@ -929,38 +931,20 @@ class _PagingAdapter(SqliteSqlDbClientAdapter):
         self.page_calls: list[dict[str, Any]] = []
         self._paged = True
 
-    def supports_paged_scan(self) -> bool:
+    def supports_select(self) -> bool:
         return self._paged
 
     def disable_paged_scan(self) -> None:
         self._paged = False
 
-    def scan_page_by_key_parts(
-        self,
-        *,
-        table: str,
-        columns: Sequence[str],
-        key_fields: Sequence[str],
-        exact: Mapping[str, Any],
-        prefixes: Mapping[str, str],
-        after_key: SqlDbRow | None,
-        page_size: int,
-    ) -> Sequence[SqlDbRow]:
+    def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
         self.page_calls.append(
             {
-                "after_key": None if after_key is None else dict(after_key),
-                "page_size": page_size,
+                "after_key": None if query.after is None else dict(query.after),
+                "page_size": query.limit,
             }
         )
-        return super().scan_page_by_key_parts(
-            table=table,
-            columns=columns,
-            key_fields=key_fields,
-            exact=exact,
-            prefixes=prefixes,
-            after_key=after_key,
-            page_size=page_size,
-        )
+        return super().select(query)
 
 
 @pytest.mark.sql
@@ -1097,10 +1081,8 @@ def test_a_page_that_does_not_advance_raises_instead_of_looping(
     """
 
     class IgnoresAfterKey(SqliteSqlDbClientAdapter):
-        def scan_page_by_key_parts(
-            self, *, after_key: SqlDbRow | None, **kw: Any
-        ) -> Sequence[SqlDbRow]:
-            return super().scan_page_by_key_parts(after_key=None, **kw)
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+            return super().select(replace(query, after=None))
 
     sql_kvset = make_sql_kvset("stuck")
     ensure_sql_table(sqlite_conn, sql_kvset)
@@ -1109,7 +1091,7 @@ def test_a_page_that_does_not_advance_raises_instead_of_looping(
         store.set(f"k{i}", "v")
 
     stuck = store.rebind(IgnoresAfterKey(sqlite_conn))
-    with pytest.raises(KvStoreError, match="does not advance after_key"):
+    with pytest.raises(KvStoreError, match="does not advance past after"):
         list(stuck.scan(page_size=2))
 
 

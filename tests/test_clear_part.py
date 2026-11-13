@@ -391,7 +391,7 @@ def test_a_wrapped_view_is_unset_through_its_wrapper() -> None:
 
 def test_a_scan_without_keyset_paging_skips_cleared_rows_too() -> None:
     class Streaming(SqliteSqlDbClientAdapter):
-        def supports_paged_scan(self) -> bool:
+        def supports_select(self) -> bool:
             return False
 
     conn = sqlite3.connect(":memory:")

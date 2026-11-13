@@ -15,7 +15,7 @@ import pytest
 
 from kvtsjl import KvSet, MemoryKvStore, SerDe
 from kvtsjl.backends.sql import SqlDbField, SqlDbKvSet, SqlDbRow, SqliteSqlDbClientAdapter
-from kvtsjl.backends.sql.adapter import SqlLiveness
+from kvtsjl.backends.sql.adapter import SqlLiveness, SqlSelect
 from kvtsjl.backends.sql.store import SqlDbKvStore
 from kvtsjl.exceptions import KvStoreScanUnsupported
 from kvtsjl.store.schema.scan import OrderBy, Pushdown, ScanOrder, ScanSpec
@@ -103,29 +103,9 @@ def test_key_fields_are_appended_ascending_for_a_total_order(
     seen: list[OrderBy] = []
 
     class CapturingAdapter(SqliteSqlDbClientAdapter):
-        def scan_ordered(
-            self,
-            *,
-            table: str,
-            columns: Sequence[str],
-            key_fields: Sequence[str],
-            exact: Mapping[str, Any],
-            prefixes: Mapping[str, str],
-            order_by: Sequence[OrderBy],
-            limit: int | None,
-            live: SqlLiveness | None = None,
-        ) -> Iterator[SqlDbRow]:
-            seen.extend(order_by)
-            return super().scan_ordered(
-                table=table,
-                columns=columns,
-                key_fields=key_fields,
-                exact=exact,
-                prefixes=prefixes,
-                order_by=order_by,
-                limit=limit,
-                live=live,
-            )
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+            seen.extend(query.order_by)
+            return super().select(query)
 
     store = SqlDbKvStore(
         sql_kvset, adapter=CapturingAdapter(conn, db_name="capturing")
@@ -148,17 +128,9 @@ def test_order_by_already_ending_with_key_fields_is_not_duplicated(
     seen: list[OrderBy] = []
 
     class CapturingAdapter(SqliteSqlDbClientAdapter):
-        def scan_ordered(
-            self, *, table: str, columns: Sequence[str], key_fields: Sequence[str],
-            exact: Mapping[str, Any], prefixes: Mapping[str, str],
-            order_by: Sequence[OrderBy], limit: int | None,
-            live: SqlLiveness | None = None,
-        ) -> Iterator[SqlDbRow]:
-            seen.extend(order_by)
-            return super().scan_ordered(
-                table=table, columns=columns, key_fields=key_fields, exact=exact,
-                prefixes=prefixes, order_by=order_by, limit=limit, live=live,
-            )
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+            seen.extend(query.order_by)
+            return super().select(query)
 
     store = SqlDbKvStore(sql_kvset, adapter=CapturingAdapter(conn, db_name="dedupe"))
     _seed(conn, [("a", 1.0, "f")])
@@ -184,29 +156,9 @@ def test_limit_is_fetched_from_the_adapter_not_just_returned(
     fetched = 0
 
     class CountingAdapter(SqliteSqlDbClientAdapter):
-        def scan_ordered(
-            self,
-            *,
-            table: str,
-            columns: Sequence[str],
-            key_fields: Sequence[str],
-            exact: Mapping[str, Any],
-            prefixes: Mapping[str, str],
-            order_by: Sequence[OrderBy],
-            limit: int | None,
-            live: SqlLiveness | None = None,
-        ) -> Iterator[SqlDbRow]:
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
             nonlocal fetched
-            for row in super().scan_ordered(
-                table=table,
-                columns=columns,
-                key_fields=key_fields,
-                exact=exact,
-                prefixes=prefixes,
-                order_by=order_by,
-                limit=limit,
-                live=live,
-            ):
+            for row in super().select(query):
                 fetched += 1
                 yield row
 
@@ -226,7 +178,7 @@ def test_adapter_without_ordering_support_is_unsupported_not_type_error(
     _catalog(conn)
 
     class PlainAdapter(SqliteSqlDbClientAdapter):
-        def supports_scan_ordering(self) -> bool:
+        def supports_select(self) -> bool:
             return False
 
     store = SqlDbKvStore(sql_kvset, adapter=PlainAdapter(conn, db_name="plain"))
@@ -323,17 +275,9 @@ def test_pushed_limit_returns_n_live_rows_when_newer_rows_expired(
     seen_live: list[SqlLiveness | None] = []
 
     class CapturingAdapter(SqliteSqlDbClientAdapter):
-        def scan_ordered(
-            self, *, table: str, columns: Sequence[str], key_fields: Sequence[str],
-            exact: Mapping[str, Any], prefixes: Mapping[str, str],
-            order_by: Sequence[OrderBy], limit: int | None,
-            live: SqlLiveness | None = None,
-        ) -> Iterator[SqlDbRow]:
-            seen_live.append(live)
-            return super().scan_ordered(
-                table=table, columns=columns, key_fields=key_fields, exact=exact,
-                prefixes=prefixes, order_by=order_by, limit=limit, live=live,
-            )
+        def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+            seen_live.append(query.live)
+            return super().select(query)
 
     store = SqlDbKvStore(sql_kvset, adapter=CapturingAdapter(conn, db_name="ttl"))
     keys = list(

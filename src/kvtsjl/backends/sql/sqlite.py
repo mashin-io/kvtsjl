@@ -7,10 +7,23 @@ import re
 import sqlite3
 from typing import Any
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
+from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness, SqlSelect
 from kvtsjl.backends.sql.schema import SqlDbRow
 from kvtsjl.exceptions import KvStoreError
-from kvtsjl.store.schema.scan import OrderBy
+from kvtsjl.store.schema.scan import (
+    AlwaysTrue,
+    And,
+    FieldContains,
+    FieldEq,
+    FieldIn,
+    FieldIsNull,
+    FieldStartsWith,
+    Not,
+    Or,
+    OrderBy,
+    Predicate,
+    fold_ascii,
+)
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Each retry needs another writer to insert the key and delete it again
@@ -30,6 +43,90 @@ def _escape_like(value: str) -> str:
 
 def _row_from_sqlite(row: sqlite3.Row) -> SqlDbRow:
     return {k: row[k] for k in row.keys()}
+
+
+def _where_sql(pred: Predicate[Any], params: list[Any]) -> str:
+    """Two-valued SQL for a value-column filter: no test ever yields NULL."""
+    if isinstance(pred, AlwaysTrue):
+        return "1"
+    if isinstance(pred, And):
+        return f"({_where_sql(pred.left, params)} AND {_where_sql(pred.right, params)})"
+    if isinstance(pred, Or):
+        return f"({_where_sql(pred.left, params)} OR {_where_sql(pred.right, params)})"
+    if isinstance(pred, Not):
+        return f"(NOT {_where_sql(pred.inner, params)})"
+    if isinstance(pred, FieldEq):
+        params.append(pred.value)
+        return f"({_quote_ident(pred.of.name)} IS NOT NULL AND {_quote_ident(pred.of.name)} = ?)"
+    if isinstance(pred, FieldIn):
+        params.extend(pred.values)
+        c = _quote_ident(pred.of.name)
+        return f"({c} IS NOT NULL AND {c} IN ({', '.join('?' for _ in pred.values)}))"
+    if isinstance(pred, FieldStartsWith):
+        params.extend([len(pred.prefix), pred.prefix])
+        c = _quote_ident(pred.of.name)
+        return f"(typeof({c}) = 'text' AND substr({c}, 1, ?) = ?)"
+    if isinstance(pred, FieldContains):
+        c = _quote_ident(pred.of.name)
+        if pred.ignore_case:
+            params.append(fold_ascii(pred.part))
+            return f"(typeof({c}) = 'text' AND instr(lower({c}), ?) > 0)"
+        params.append(pred.part)
+        return f"(typeof({c}) = 'text' AND instr({c}, ?) > 0)"
+    if isinstance(pred, FieldIsNull):
+        return f"({_quote_ident(pred.of.name)} IS NULL)"
+    raise KvStoreError(f"cannot run {type(pred).__name__} in SQL")
+
+
+def _after_sql(order_by: Sequence[OrderBy], after: SqlDbRow, params: list[Any]) -> str:
+    """Rows strictly after ``after`` in ``order_by``, a NULL being the smallest value."""
+    missing = [item.column for item in order_by if item.column not in after]
+    if missing:
+        raise ValueError(f"after is missing order_by columns: {missing}")
+    values = [after[item.column] for item in order_by]
+    if all(not item.descending for item in order_by) and all(v is not None for v in values):
+        # One row-value comparison: SQLite reads the index from that point on,
+        # where the expanded form below sorts every page in a temporary
+        # B-tree. A NULL in a row compares as NULL, i.e. not after — right
+        # for the smallest value.
+        params.extend(values)
+        cols = ", ".join(_quote_ident(item.column) for item in order_by)
+        return f"(({cols}) > ({', '.join('?' for _ in values)}))"
+    branches: list[str] = []
+    for i, item in enumerate(order_by):
+        same: list[str] = []
+        for prior, value in zip(order_by[:i], values[:i], strict=True):
+            same.append(f"{_quote_ident(prior.column)} IS ?")
+            params.append(value)
+        c = _quote_ident(item.column)
+        value = values[i]
+        if not item.descending:
+            beyond = f"{c} IS NOT NULL" if value is None else f"{c} > ?"
+        else:
+            beyond = "0" if value is None else f"({c} < ? OR {c} IS NULL)"
+        if value is not None:
+            params.append(value)
+        branches.append("(" + " AND ".join([*same, beyond]) + ")")
+    return "(" + " OR ".join(branches) + ")"
+
+
+def _live_sql(live: SqlLiveness, params: list[Any]) -> list[str]:
+    expires = _quote_ident(live.expires_at_field)
+    updated = _quote_ident(live.updated_at_field)
+    clauses: list[str] = []
+    if live.ttl_seconds is None:
+        clauses.append(f"({expires} IS NULL OR {expires} > ?)")
+        params.append(live.now)
+    else:
+        clauses.append(
+            f"(CASE WHEN {expires} IS NOT NULL THEN {expires} > ? "
+            f"ELSE ({updated} IS NULL OR {updated} + ? > ?) END)"
+        )
+        params.extend([live.now, float(live.ttl_seconds), live.now])
+    if live.held_columns:
+        held = " OR ".join(f"{_quote_ident(c)} IS NOT NULL" for c in live.held_columns)
+        clauses.append(f"({held})")
+    return clauses
 
 
 class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
@@ -407,7 +504,6 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         key_fields: Sequence[str],
         exact: Mapping[str, Any],
         prefixes: Mapping[str, str],
-        after_key: SqlDbRow | None,
     ) -> tuple[list[str], list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -418,14 +514,6 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             elif field in prefixes:
                 clauses.append(f"{_quote_ident(field)} LIKE ? ESCAPE '\\'")
                 params.append(f"{_escape_like(prefixes[field])}%")
-        if after_key is not None:
-            missing = [f for f in key_fields if f not in after_key]
-            if missing:
-                raise ValueError(f"after_key missing key fields: {missing}")
-            tuple_cols = ", ".join(_quote_ident(f) for f in key_fields)
-            placeholders = ", ".join("?" for _ in key_fields)
-            clauses.append(f"({tuple_cols}) > ({placeholders})")
-            params.extend(after_key[f] for f in key_fields)
         return clauses, params
 
     def scan_by_key_parts(
@@ -443,7 +531,6 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             key_fields=key_fields,
             exact=exact,
             prefixes=prefixes,
-            after_key=None,
         )
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         order = ", ".join(_quote_ident(f) for f in key_fields)
@@ -452,41 +539,31 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         for row in cur:
             yield _row_from_sqlite(row)
 
-    def supports_paged_scan(self) -> bool:
+    def supports_select(self) -> bool:
         return True
 
-    def scan_page_by_key_parts(
-        self,
-        *,
-        table: str,
-        columns: Sequence[str],
-        key_fields: Sequence[str],
-        exact: Mapping[str, Any],
-        prefixes: Mapping[str, str],
-        after_key: SqlDbRow | None,
-        page_size: int,
-    ) -> Sequence[SqlDbRow]:
-        if page_size < 1:
-            raise ValueError(f"page_size must be >= 1, got {page_size}")
-        if not key_fields:
-            raise ValueError("key_fields must be non-empty")
-        cols = ", ".join(_quote_ident(c) for c in columns)
-        t = _quote_ident(table)
+    def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+        cols = ", ".join(_quote_ident(c) for c in query.columns)
         clauses, params = self._key_parts_filters(
-            key_fields=key_fields,
-            exact=exact,
-            prefixes=prefixes,
-            after_key=after_key,
+            key_fields=query.key_fields, exact=query.exact, prefixes=query.prefixes
         )
+        if query.where is not None:
+            clauses.append(_where_sql(query.where, params))
+        if query.after is not None:
+            clauses.append(_after_sql(query.order_by, query.after, params))
+        if query.live is not None:
+            clauses.extend(_live_sql(query.live, params))
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        order = ", ".join(_quote_ident(f) for f in key_fields)
-        sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order} LIMIT ?"
-        params.append(page_size)
-        cur = self._conn.execute(sql, params)
-        return [_row_from_sqlite(row) for row in cur]
-
-    def supports_scan_ordering(self) -> bool:
-        return True
+        order = ", ".join(
+            f"{_quote_ident(item.column)}{' DESC' if item.descending else ''}"
+            for item in query.order_by
+        )
+        sql = f"SELECT {cols} FROM {_quote_ident(query.table)}{where} ORDER BY {order}"
+        if query.limit is not None:
+            sql += " LIMIT ?"
+            params.append(query.limit)
+        for row in self._conn.execute(sql, params):
+            yield _row_from_sqlite(row)
 
     def supports_expiry_scan(self) -> bool:
         return True
@@ -557,56 +634,3 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
             params,
         )
         return cur.fetchone() is not None
-
-    def scan_ordered(
-        self,
-        *,
-        table: str,
-        columns: Sequence[str],
-        key_fields: Sequence[str],
-        exact: Mapping[str, Any],
-        prefixes: Mapping[str, str],
-        order_by: Sequence[OrderBy],
-        limit: int | None,
-        live: SqlLiveness | None = None,
-    ) -> Iterator[SqlDbRow]:
-        cols = ", ".join(_quote_ident(c) for c in columns)
-        t = _quote_ident(table)
-        clauses: list[str] = []
-        params: list[Any] = []
-        for field in key_fields:
-            if field in exact:
-                clauses.append(f"{_quote_ident(field)}=?")
-                params.append(exact[field])
-            elif field in prefixes:
-                clauses.append(f"{_quote_ident(field)} LIKE ? ESCAPE '\\'")
-                params.append(f"{_escape_like(prefixes[field])}%")
-        if live is not None:
-            expires = _quote_ident(live.expires_at_field)
-            updated = _quote_ident(live.updated_at_field)
-            if live.ttl_seconds is None:
-                clauses.append(f"({expires} IS NULL OR {expires} > ?)")
-                params.append(live.now)
-            else:
-                clauses.append(
-                    f"(CASE WHEN {expires} IS NOT NULL THEN {expires} > ? "
-                    f"ELSE ({updated} IS NULL OR {updated} + ? > ?) END)"
-                )
-                params.extend([live.now, float(live.ttl_seconds), live.now])
-            if live.held_columns:
-                held = " OR ".join(
-                    f"{_quote_ident(c)} IS NOT NULL" for c in live.held_columns
-                )
-                clauses.append(f"({held})")
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        order = ", ".join(
-            f"{_quote_ident(item.column)}{' DESC' if item.descending else ''}"
-            for item in order_by
-        )
-        sql = f"SELECT {cols} FROM {t}{where} ORDER BY {order}"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(limit)
-        cur = self._conn.execute(sql, params)
-        for row in cur:
-            yield _row_from_sqlite(row)

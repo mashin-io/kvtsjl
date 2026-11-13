@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from kvtsjl.backends.sql.schema import SqlDbRow
-from kvtsjl.store.schema.scan import OrderBy
+from kvtsjl.store.schema.scan import OrderBy, Predicate
 
 
 @dataclass(frozen=True, slots=True)
 class SqlLiveness:
-    """Expiry predicate for ``scan_ordered`` to apply in SQL.
+    """Expiry predicate for ``select`` to apply in SQL.
 
     A row is live when ``expires_at`` is in the future, or ``expires_at`` is
     NULL and (no collection TTL, or ``updated_at + ttl_seconds`` is in the
@@ -45,6 +45,51 @@ class SqlLiveness:
     """
 
 
+@dataclass(frozen=True, slots=True)
+class SqlSelect:
+    """One ``SELECT`` the store asks of the adapter; every condition holds at once.
+
+    ``exact`` / ``prefixes``
+        Equality, and a literal string prefix, on key columns — as for
+        ``scan_by_key_parts``.
+    ``where``
+        Tests of value columns, or ``None``. A tree of ``And`` / ``Or`` /
+        ``Not`` over ``FieldEq``, ``FieldIn``, ``FieldStartsWith``,
+        ``FieldContains`` and ``FieldIsNull`` (``kvtsjl.store.schema``), each
+        naming its column as ``test.of.name``. Every test is two-valued —
+        false where the column is NULL, except ``FieldIsNull`` — so ``Not``
+        means what it does in Python: compile each one so it never yields
+        NULL (``(c IS NOT NULL AND c = ?)``). ``FieldStartsWith`` and
+        ``FieldContains`` hold for text only, and compare case and all;
+        ``FieldContains.ignore_case`` folds ASCII letters only (``lower()``),
+        on both sides. ``FieldIn`` with no values holds for no row.
+    ``order_by``
+        Always given, and total: the store appends the key columns. A NULL
+        sorts as the smallest value — first ascending, last descending
+        (``NULLS FIRST`` / ``NULLS LAST`` where the engine's default differs).
+    ``after``
+        The ``order_by`` columns' values on the row the previous page ended
+        at, or ``None``; return only rows strictly after it in that order.
+        A NULL there is the smallest value, as in ``order_by``.
+    ``limit``
+        At most this many rows, or ``None``.
+    ``live``
+        The expiry and holding conditions, or ``None`` — see ``SqlLiveness``.
+        Pushed whenever ``limit`` is.
+    """
+
+    table: str
+    columns: Sequence[str]
+    key_fields: Sequence[str]
+    order_by: Sequence[OrderBy]
+    exact: Mapping[str, Any] = field(default_factory=lambda: {})
+    prefixes: Mapping[str, str] = field(default_factory=lambda: {})
+    where: Predicate[Any] | None = None
+    after: SqlDbRow | None = None
+    limit: int | None = None
+    live: SqlLiveness | None = None
+
+
 class SqlDbClientAdapter(ABC):
     """Caller-owned DB access. The store never passes SQL text.
 
@@ -63,10 +108,12 @@ class SqlDbClientAdapter(ABC):
     ===========================  =========================================
     Forward this                 ...or lose
     ===========================  =========================================
-    ``supports_scan_ordering``   ``order_by`` entirely — it raises
-    ``scan_ordered``             (forward ``live`` too, or a pushed ``LIMIT``
+    ``supports_select``          pushed filters, ``order_by`` (which
+    ``select``                   raises without it) and keyset paging;
+                                 forward every field of ``SqlSelect`` —
+                                 drop ``live`` and a pushed ``LIMIT``
                                  counts rows that have expired or that a
-                                 shared-table view has cleared)
+                                 shared-table view has cleared
     ``supports_expiry_scan``     expiry pushdown; GC reads every row
     ``scan_expired``
     ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
@@ -78,8 +125,6 @@ class SqlDbClientAdapter(ABC):
     ``supports_update_rows``     writes through a shared-table view that
     ``update_rows``              does not own rows, which raise rather
                                  than create a row
-    ``supports_paged_scan``      keyset paging; scans materialise in full
-    ``scan_page_by_key_parts``
     ===========================  =========================================
 
     Forwarding a ``supports_*`` flag without its method is worse than
@@ -285,72 +330,22 @@ class SqlDbClientAdapter(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement clear_columns")
 
-    def supports_scan_ordering(self) -> bool:
-        """Whether this adapter implements ``scan_ordered``.
+    def supports_select(self) -> bool:
+        """Whether this adapter implements ``select``.
 
-        Default ``False`` so existing adapters keep working untouched: the store
-        checks this before routing, and reports ``order_by`` as unsupported
-        otherwise. Adding ``order_by`` / ``limit`` as parameters of
-        ``scan_by_key_parts`` instead would narrow every existing override's
-        signature — a strict-mode type error for anyone wrapping this ABC.
+        Default ``False``: the store streams ``scan_by_key_parts`` and runs
+        every filter itself, and ``order_by`` refuses.
         """
         return False
 
-    def supports_paged_scan(self) -> bool:
-        """Whether this adapter implements ``scan_page_by_key_parts``.
+    def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+        """Run one ``SqlSelect``: rows matching all of its conditions, in its order.
 
-        Default ``False``: the store streams ``scan_by_key_parts`` (one query,
-        connection held for the iterator). Opt in for keyset pages so each
-        page is a bounded fetch — no connection held across pages, and
-        ``ScanCursor`` resumes with ``after_key`` instead of a client-side seek.
+        Implement together with ``supports_select``. See ``SqlSelect`` for
+        what each field asks; every one of them must be honoured, since the
+        store counts on the database having applied it.
         """
-        return False
-
-    def scan_page_by_key_parts(
-        self,
-        *,
-        table: str,
-        columns: Sequence[str],
-        key_fields: Sequence[str],
-        exact: Mapping[str, Any],
-        prefixes: Mapping[str, str],
-        after_key: SqlDbRow | None,
-        page_size: int,
-    ) -> Sequence[SqlDbRow]:
-        """One keyset page: rows with ``key_fields > after_key``, ordered, limited.
-
-        Same equality/prefix filters as ``scan_by_key_parts``. When
-        ``after_key`` is set it must contain every ``key_fields`` column; the
-        page starts strictly after that full key (SQL row-value compare).
-        Returns a materialized sequence so the caller can close the underlying
-        cursor/connection before the next page.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement scan_page_by_key_parts"
-        )
-
-    def scan_ordered(
-        self,
-        *,
-        table: str,
-        columns: Sequence[str],
-        key_fields: Sequence[str],
-        exact: Mapping[str, Any],
-        prefixes: Mapping[str, str],
-        order_by: Sequence[OrderBy],
-        limit: int | None,
-        live: SqlLiveness | None = None,
-    ) -> Iterator[SqlDbRow]:
-        """Like ``scan_by_key_parts`` but with ``ORDER BY``, ``LIMIT`` and liveness.
-
-        ``order_by`` is already total (the store appends key fields ascending),
-        so ties are deterministic. ``limit`` is only passed when nothing remains
-        to filter client-side, so pushing it cannot drop rows the caller asked
-        for. Implement together with ``supports_scan_ordering``.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement scan_ordered"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not implement select")
 
     @abstractmethod
     def scan_by_key_parts(

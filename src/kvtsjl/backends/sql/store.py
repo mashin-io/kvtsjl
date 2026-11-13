@@ -8,7 +8,7 @@ import json
 import time
 from typing import Any, cast
 
-from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness
+from kvtsjl.backends.sql.adapter import SqlDbClientAdapter, SqlLiveness, SqlSelect
 from kvtsjl.backends.sql.schema import ExpiryBinding, SqlDbKvSet, SqlDbRow
 from kvtsjl.batching import chunk_sequence
 from kvtsjl.bind import (
@@ -30,8 +30,15 @@ from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
     CompiledScan,
+    FieldContains,
+    FieldEq,
+    FieldIn,
+    FieldIsNull,
+    FieldStartsWith,
+    FieldTest,
     KeyPrefix,
     OrderBy,
+    Predicate,
     Projection,
     ScanCapabilities,
     ScanCursor,
@@ -42,6 +49,7 @@ from kvtsjl.store.schema.scan import (
     compile_from_scan_entries,
     enforce_strict,
     peel_key_prefix,
+    split_where,
 )
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import (
@@ -855,26 +863,38 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
     def scan_capabilities(self) -> ScanCapabilities:
         """Report what SQL actually provides.
 
-        ``KEY_ASC`` rests on the adapter contract: ``scan_by_key_parts`` must
-        yield rows in ascending ``key_fields`` order (the shipped SQLite adapter
-        emits ``ORDER BY`` on them). ``orderable_columns`` is the declared
-        column set, so an unknown column is rejected by name. ``resumable``
-        follows ``supports_paged_scan``: keyset pages + ``ScanCursor``.
+        ``KEY_ASC`` rests on the adapter contract: ``scan_by_key_parts`` and
+        ``select`` yield rows in ascending ``key_fields`` order unless told
+        otherwise. With ``select`` the adapter also takes the field tests on
+        the view's declared columns, ``order_by`` over them, and keyset pages
+        that a ``ScanCursor`` resumes; without it the store runs every filter
+        itself and ``order_by`` refuses.
         """
-        orderable: frozenset[str] | None = None
-        if self._adapter.supports_scan_ordering():
-            orderable = frozenset(self._sql_kvset.select_columns())
+        selects = self._adapter.supports_select()
+        pushdown: set[type] = {KeyPrefix}
+        if selects:
+            pushdown |= {FieldEq, FieldIn, FieldStartsWith, FieldContains, FieldIsNull}
         return ScanCapabilities(
-            pushdown=frozenset({KeyPrefix}),
+            pushdown=frozenset(pushdown),
             orders=frozenset({ScanOrder.UNORDERED, ScanOrder.KEY_ASC}),
-            resumable=self._adapter.supports_paged_scan(),
+            resumable=selects,
             # Only the ordered path fills ScanRow.stat; the default path goes
             # through compile_from_scan_entries, which has no stat to give.
             # Claiming True here would be the same wrong capability report this
             # change set out to fix.
             stats=False,
-            orderable_columns=orderable,
+            orderable_columns=frozenset(self._sql_kvset.select_columns()) if selects else None,
         )
+
+    def _peel_field_tests(
+        self, where: Predicate[K]
+    ) -> tuple[Predicate[K] | None, Predicate[K]]:
+        """The tests of this view's own columns, for SQL to run, and the rest."""
+        columns = {f.name for f in self._sql_kvset.fields}
+        taken, rest = split_where(
+            where, lambda p: isinstance(p, FieldTest) and p.of.name in columns
+        )
+        return (None if isinstance(taken, AlwaysTrue) else taken), rest
 
     def _resolve_order_by(self, order_by: Sequence[OrderBy]) -> list[OrderBy]:
         """Validate columns and append key fields ascending for a total order.
@@ -885,10 +905,10 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         direction is irrelevant for determinism, and fixing it means two
         implementations cannot disagree.
         """
-        if not self._adapter.supports_scan_ordering():
+        if not self._adapter.supports_select():
             raise KvStoreScanUnsupported(
                 f"{type(self._adapter).__name__} does not support order_by; "
-                "implement supports_scan_ordering() and scan_ordered()"
+                "implement supports_select() and select()"
             )
         allowed = frozenset(self._sql_kvset.select_columns())
         for item in order_by:
@@ -906,7 +926,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
 
     def compile_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
         if not spec.order_by:
-            if self._adapter.supports_paged_scan():
+            if self._adapter.supports_select():
                 return self._compile_keyset_scan(spec)
             return compile_from_scan_entries(
                 self.scan_entries, spec, backend=type(self).__name__
@@ -917,10 +937,13 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 f"(got {self.kvset.key_layout!r})"
             )
         order_by = self._resolve_order_by(spec.order_by)
-        user_prefix, residual = peel_key_prefix(spec.where)
+        user_prefix, rest = peel_key_prefix(spec.where)
+        tests, residual = self._peel_field_tests(rest)
         pushed = {"order_by"}
         if user_prefix is not None:
             pushed.add("KeyPrefix")
+        if tests is not None:
+            pushed.add("FieldTest")
         # Push LIMIT only when nothing is left to filter client-side; otherwise
         # a pushed LIMIT 20 plus residual filtering returns fewer than 20 rows.
         limit: int | None = None
@@ -933,6 +956,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             pushed.add("limit")
         rows = self._iter_ordered_rows(
             user_prefix=user_prefix,
+            tests=tests,
             order_by=order_by,
             limit=limit,
             include_values=spec.project is Projection.ENTRIES,
@@ -946,10 +970,13 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 "SqlDbKvStore scan requires KeyLayout.LITERAL "
                 f"(got {self.kvset.key_layout!r})"
             )
-        user_prefix, residual = peel_key_prefix(spec.where)
+        user_prefix, rest = peel_key_prefix(spec.where)
+        tests, residual = self._peel_field_tests(rest)
         pushed = {"keyset"}
         if user_prefix is not None:
             pushed.add("KeyPrefix")
+        if tests is not None:
+            pushed.add("FieldTest")
         if spec.cursor is not None:
             pushed.add("cursor")
         after_key = (
@@ -959,6 +986,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         )
         rows = self._iter_keyset_rows(
             user_prefix=user_prefix,
+            tests=tests,
             after_key=after_key,
             page_size=spec.page_size,
             include_values=spec.project is Projection.ENTRIES,
@@ -1008,6 +1036,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         self,
         *,
         user_prefix: K | None,
+        tests: Predicate[K] | None,
         after_key: SqlDbRow | None,
         page_size: int,
         include_values: bool,
@@ -1019,18 +1048,25 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         sk = self._sql_kvset
         exact = self._scope_key_row(require_all=False)
         prefixes = self._leaf_prefix_map(user_prefix)
+        key_order = tuple(OrderBy(f) for f in sk.key_fields)
         expired_keys: list[SqlDbRow] = []
         after = after_key
         yielded = 0
         while True:
-            page = self._adapter.scan_page_by_key_parts(
-                table=self._table,
-                columns=sk.select_columns(),
-                key_fields=sk.key_fields,
-                exact=exact,
-                prefixes=prefixes,
-                after_key=after,
-                page_size=page_size,
+            page = list(
+                self._adapter.select(
+                    SqlSelect(
+                        table=self._table,
+                        columns=sk.select_columns(),
+                        key_fields=sk.key_fields,
+                        order_by=key_order,
+                        exact=exact,
+                        prefixes=prefixes,
+                        where=tests,
+                        after=after,
+                        limit=page_size,
+                    )
+                )
             )
             if not page:
                 break
@@ -1063,8 +1099,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 # adapter ignored after_key. Looping would spin forever on the
                 # same rows, so say which adapter is at fault instead.
                 raise KvStoreError(
-                    f"{type(self._adapter).__name__}.scan_page_by_key_parts "
-                    "returned a page that does not advance after_key; "
+                    f"{type(self._adapter).__name__}.select "
+                    "returned a page that does not advance past after; "
                     "the scan would never terminate"
                 )
             after = advanced
@@ -1081,6 +1117,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         self,
         *,
         user_prefix: K | None,
+        tests: Predicate[K] | None,
         order_by: Sequence[OrderBy],
         limit: int | None,
         include_values: bool,
@@ -1096,16 +1133,18 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             expires_at_field=sk.expires_at_field,
             held_columns=self._held_by(),
         )
-        for row in self._adapter.scan_ordered(
+        query = SqlSelect(
             table=self._table,
             columns=sk.select_columns(),
             key_fields=sk.key_fields,
+            order_by=order_by,
             exact=self._scope_key_row(require_all=False),
             prefixes=self._leaf_prefix_map(user_prefix),
-            order_by=order_by,
+            where=tests,
             limit=limit,
             live=live,
-        ):
+        )
+        for row in self._adapter.select(query):
             # Defence in depth: SQL already excluded these.
             if self._row_expired(row) or not self._holds(row):
                 continue
@@ -1158,9 +1197,10 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 "SqlDbKvStore scan requires KeyLayout.LITERAL "
                 f"(got {self.kvset.key_layout!r})"
             )
-        if self._adapter.supports_paged_scan():
+        if self._adapter.supports_select():
             for row in self._iter_keyset_rows(
                 user_prefix=query.prefix,
+                tests=None,
                 after_key=None,
                 page_size=query.page_size,
                 include_values=query.include_values,
