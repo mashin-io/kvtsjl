@@ -702,6 +702,8 @@ store.update(k, lambda v: Remove() if v is not None and stale(v) else Keep())
 
 The decision is written only if the entry is still what `decide` saw. If another writer got there first, the entry is read again and `decide` asked again — so `decide` must depend only on what it is shown, and may run more than once. `update` returns what the entry holds afterwards, and raises `KvStoreConflict` if it loses every one of its `attempts`, having written nothing. An expired entry reads as `None` and is replaced in the same conditional step, so it never blocks an update.
 
+`decide` sees the value and nothing else — not the write clock, not the stat. So a guard must test something the value carries. A sweep that picks candidates by when they were written (`ModifiedBefore`) and then removes them with `lambda v: Remove() if v is not None and stale(v) else Keep()` deletes an entry refreshed between the scan and the update: a refresh that moves only the clock leaves the value as it was, `decide` cannot tell, and the swap succeeds because it reads after the refresh. Keep the time in the value — a field every refresh writes, `TOUCHED_AT = Field(…)` — pick candidates with `TOUCHED_AT.lt(cutoff)`, and decide on `v.touched_at < cutoff`.
+
 `batch_update` decides for many keys at once — `decide` sees every current value and returns a decision per key (one it leaves out is kept) — and costs one read and one conditional write per round; only the keys a concurrent writer changed are read and decided again. `update` is `batch_update` of one key. `get_or_set` and `batch_get_or_set` are a read, then an update of the misses: hits cost what a `get` costs, `compute` is asked once per batch, and a value another writer stored first is returned, not overwritten.
 
 ```python
