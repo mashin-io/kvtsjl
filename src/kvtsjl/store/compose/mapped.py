@@ -21,6 +21,7 @@ from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
+    Field,
     OrderBy,
     Projection,
     ScanOrder,
@@ -77,8 +78,10 @@ class MappedKvStore[K, V, U](
             else:
                 yield key, self._forward(value)
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        return self._src().pushes_order(order_by)
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        return self._src().pushes_order(order_by, distinct_on)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
         if self.sorts_in_process(spec):
@@ -168,8 +171,10 @@ class IMappedKvStore[K, V, U](
             else:
                 yield key, self._forward(value)
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        return self._src().pushes_order(order_by)
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        return self._src().pushes_order(order_by, distinct_on)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
         if self.sorts_in_process(spec):

@@ -88,6 +88,17 @@ class SqlSelect:
     ``live``
         The expiry and holding conditions, or ``None`` — see ``SqlLiveness``.
         Pushed whenever ``limit`` is.
+    ``distinct_on``
+        Columns to group by, or empty. With them, rank each group's rows —
+        those ``exact``, ``prefixes``, ``where`` and ``live`` admit — by
+        ``order_by`` and keep only the first; ``kept_where``, ``after`` and
+        ``limit`` then apply to the rows kept, which come in ``order_by``.
+        A NULL is a value of its own here: rows with NULL in a column group
+        together, as SQL's ``PARTITION BY`` does. Asked only of an adapter
+        whose ``supports_distinct_on`` is true.
+    ``kept_where``
+        Tests, as ``where`` takes them, of the rows ``distinct_on`` keeps;
+        ``None`` without ``distinct_on``.
     """
 
     table: str
@@ -100,6 +111,8 @@ class SqlSelect:
     after: SqlDbRow | None = None
     limit: int | None = None
     live: SqlLiveness | None = None
+    distinct_on: Sequence[str] = ()
+    kept_where: Predicate[Any] | None = None
 
 
 class SqlDbClientAdapter(ABC):
@@ -126,6 +139,9 @@ class SqlDbClientAdapter(ABC):
                                  drop ``live`` and a pushed ``LIMIT``
                                  counts rows that have expired or that a
                                  shared-table view has cleared
+    ``supports_distinct_on``     ``distinct_on`` in the database; without
+                                 it the store reads every row and keeps
+                                 each group's first itself
     ``supports_expiry_scan``     expiry pushdown; GC reads every row
     ``scan_expired``
     ``has_null_expires_at``      ``ExpiryBinding.EARLY``, which raises
@@ -347,6 +363,13 @@ class SqlDbClientAdapter(ABC):
 
         Default ``False``: the store streams ``scan_by_key_parts``, runs
         every filter itself, and sorts ``order_by`` in process.
+        """
+        return False
+
+    def supports_distinct_on(self) -> bool:
+        """Whether ``select`` takes ``SqlSelect.distinct_on`` (and ``kept_where``).
+
+        Default ``False``: the store keeps each group's first row itself.
         """
         return False
 

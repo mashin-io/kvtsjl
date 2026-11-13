@@ -142,3 +142,34 @@ def test_a_view_listing_another_store_s_keys_keeps_its_order() -> None:
     by_label = [OrderBy(Field[str, str]("label", lambda label: label), descending=True)]
     assert list(view.scan(order_by=by_label)) == ["a", "c", "b"]
     assert view.explain(order_by=by_label).root.name == "Sort"
+
+
+def test_a_record_ranks_its_own_records_for_distinct_on() -> None:
+    """Its commit part would rank rows whose records may not assemble: it ranks here."""
+    conn = sqlite3.connect(":memory:")
+    bodies = _bodies()
+    turns = _turns(conn, bodies=bodies, mandatory=[True, True])
+    turns.set("c0", Turn(core="4", body="body-c0"))  # ranks before d among the 4s
+    bodies.delete("c0")  # c0's row stays, its record no longer assembles
+    newest = [OrderBy(CORE, descending=True)]
+    assert turns.pushes_order(newest)
+    assert not turns.pushes_order(newest, [CORE])
+    assert list(turns.scan(order_by=newest, distinct_on=[CORE])) == ["d", "a", "c", "b"]
+    assert turns.explain(order_by=newest, distinct_on=[CORE]).root.name == "Sort"
+    turns.set("e", Turn(core="5", body="body-a"))  # a later turn with a's body
+    assert list(turns.scan(order_by=newest, distinct_on=[BODY])) == ["e", "d", "c", "b"]
+
+
+def test_a_view_listing_another_store_s_keys_ranks_its_own_values() -> None:
+    conn = sqlite3.connect(":memory:")
+    orders = _core(conn)
+    orders.batch_set({"a": "3", "b": "1", "c": "2"})
+    labels = MemoryKvStore(
+        KvSet.with_str_keys("labels", key_serde=SerDe.identity(str), value_serde=SerDe.identity(str))
+    )
+    labels.batch_set({"1": "odd", "2": "even", "3": "odd"})
+    view = orders.then(labels)
+    seq = Field[str, str]("value", lambda label: label)
+    assert view.pushes_order([OrderBy(seq)])
+    assert not view.pushes_order([OrderBy(seq)], [seq])
+    assert list(view.scan(order_by=[OrderBy(seq)], distinct_on=[seq])) == ["c", "a"]

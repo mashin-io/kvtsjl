@@ -21,6 +21,7 @@ from kvtsjl.store.capabilities import ExpiringMixin, ScannableMixin, ScopedMixin
 from kvtsjl.store.schema.layout import ScanQuery
 from kvtsjl.store.schema.scan import (
     AlwaysTrue,
+    Field,
     Needs,
     OrderBy,
     Projection,
@@ -204,6 +205,7 @@ def scan_values_through[K, V, U](
         order=spec.order,
         order_by=spec.order_by,
         after=spec.after,
+        distinct_on=spec.distinct_on,
         limit=spec.limit if unfiltered else None,
         page_size=spec.page_size,
         cursor=spec.cursor,
@@ -262,8 +264,11 @@ class ScanPassthroughMixin[K, V](ReadableKeyMap[K, V], ScannableMixin[K, V], ABC
             include_values=query.include_values,
         )
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        return self._scan_src.pushes_order(order_by)
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        """The source lists the keys in order; it cannot rank values it does not hold."""
+        return not distinct_on and self._scan_src.pushes_order(order_by)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         if self.sorts_in_process(spec):

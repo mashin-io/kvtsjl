@@ -16,6 +16,7 @@ from kvtsjl.store.schema.kvset import KvSet
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.scan import (
     CompiledScan,
+    Field,
     KeyPrefix,
     OrderBy,
     ScanCapabilities,
@@ -179,10 +180,20 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
             self._backend.scan_entries, spec, backend=type(self).__name__
         )
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        """The medium sorts when it keeps every field as a column it can order by."""
-        orderable = self.scan_capabilities().orderable_columns
-        return orderable is not None and all(item.column in orderable for item in order_by)
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        """The medium sorts when it keeps every field as a column it can order by.
+
+        And groups, for ``distinct_on``, when it can group by every one.
+        """
+        caps = self.scan_capabilities()
+        orderable, groupable = caps.orderable_columns, caps.distinct_columns
+        return (
+            orderable is not None
+            and all(item.column in orderable for item in order_by)
+            and all(f.name in (groupable or ()) for f in distinct_on)
+        )
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         if self.sorts_in_process(spec):

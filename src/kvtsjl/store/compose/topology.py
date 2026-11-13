@@ -39,6 +39,7 @@ from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
 from kvtsjl.store.schema.policy import SyncPolicy
 from kvtsjl.store.schema.scan import (
+    Field,
     OrderBy,
     Predicate,
     Projection,
@@ -251,13 +252,20 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
             include_values=query.include_values,
         )
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        """The one store whose rows are the record's gives the order, or it sorts here."""
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        """The one store whose rows are the record's gives the order, or it sorts here.
+
+        ``distinct_on`` goes only to a store that holds the whole record: a
+        commit part ranks rows whose records may not assemble, and a group
+        must rank only records that do.
+        """
         whole_record = self.topology().whole_authority
         if whole_record is not None:
-            return self._store_of(whole_record).pushes_order(order_by)
+            return self._store_of(whole_record).pushes_order(order_by, distinct_on)
         scanned = self._scanned()
-        return len(scanned) == 1 and scanned[0].pushes_order(order_by)
+        return not distinct_on and len(scanned) == 1 and scanned[0].pushes_order(order_by)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         topology = self.topology()

@@ -31,6 +31,8 @@ from kvtsjl.store.schema.scan import (
 )
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Not a valid identifier, so it cannot name one of the table's columns.
+_RANK = '"kvtsjl rank"'
 # Each retry needs another writer to insert the key and delete it again
 # between two statements; a bound turns a pathology into an error, not a hang.
 _KEY_RACE_ATTEMPTS = 8
@@ -553,6 +555,9 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
     def supports_select(self) -> bool:
         return True
 
+    def supports_distinct_on(self) -> bool:
+        return sqlite3.sqlite_version_info >= (3, 25)  # window functions
+
     def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
         cols = ", ".join(_quote_ident(c) for c in query.columns)
         clauses, params = self._key_parts_filters(
@@ -560,16 +565,30 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         )
         if query.where is not None:
             clauses.append(_where_sql(query.where, params))
-        if query.after is not None:
-            clauses.append(_after_sql(query.order_by, query.after, params))
         if query.live is not None:
             clauses.extend(_live_sql(query.live, params))
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         order = ", ".join(
             f"{_quote_ident(item.column)}{' DESC' if item.descending else ''}"
             for item in query.order_by
         )
-        sql = f"SELECT {cols} FROM {_quote_ident(query.table)}{where} ORDER BY {order}"
+        source = _quote_ident(query.table)
+        if query.distinct_on:
+            # Rank among the rows the conditions above admit, then filter the
+            # rows kept: a group's first row must be its first live one.
+            groups = ", ".join(_quote_ident(c) for c in query.distinct_on)
+            inner = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            source = (
+                f"(SELECT {cols}, ROW_NUMBER() OVER "
+                f"(PARTITION BY {groups} ORDER BY {order}) AS {_RANK} "
+                f"FROM {source}{inner})"
+            )
+            clauses = [f"{_RANK} = 1"]
+            if query.kept_where is not None:
+                clauses.append(_where_sql(query.kept_where, params))
+        if query.after is not None:
+            clauses.append(_after_sql(query.order_by, query.after, params))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT {cols} FROM {source}{where} ORDER BY {order}"
         if query.limit is not None:
             sql += " LIMIT ?"
             params.append(query.limit)

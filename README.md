@@ -47,6 +47,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Scope views** — prefix namespaces without copying data
 - **Field filters** — `Field(name, get).eq / is_in / startswith / contains / is_null` filter a scan on every store; SQL runs them in its `WHERE`
 - **Ordered scans** — `order_by=[OrderBy(field, descending=…)]` and `after=` resume the same order on every store; SQL sorts and pages in the database, any other store sorts in process
+- **First row per group** — `distinct_on=[field, …]` keeps each group's first row under the order, then filters; SQL ranks with a window function, any other store in process
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
 - **Store algebra** — `.map` / `.imap` / `.imap_keys`, `.zip` / `.zip_with` / `.zip_as`, `.then` / `.then_with`, `.expand` / `.expand_map`, `.coalesce`, plus `.mirror()`, `.indexed()`, `.readonly()`, `.scoped()`
@@ -232,6 +233,28 @@ ties fall in their own key order.
 scan resumes past every row with those values — the same place, when the
 order tells every row apart, as `NEWEST` does here — so a cursor can carry
 just the fields it orders by.
+
+### The first row of each group
+
+`distinct_on` keeps one row per group — the first under the order — such as
+the newest version of each file:
+
+```python
+latest = store.scan(order_by=NEWEST, distinct_on=[SPACE_ID, FILENAME],
+                    where=MIME.startswith("image/"), limit=50)
+```
+
+Ranking sees every live row, and `where`, `refine`, `after` and `limit` apply
+to the rows it keeps: this returns files whose newest version is an image,
+never an older version that happens to be one. A test of the group's own
+fields means the same on either side of the ranking, so a medium may run it
+first. Rows whose field is unset group together.
+
+A SQL view that declares every field as a column ranks in the database with
+a window function, where the adapter supports it (`supports_distinct_on`);
+any other store keeps the first row of each group as it reads, holding one
+per group. A record assembled from parts ranks its own records, since its
+commit part would rank rows whose records may not assemble.
 
 ---
 

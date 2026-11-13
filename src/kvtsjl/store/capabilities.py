@@ -19,6 +19,7 @@ from kvtsjl.store.schema.scan import (
     After,
     CompiledScan,
     Expired,
+    Field,
     OrderBy,
     Predicate,
     Projection,
@@ -150,8 +151,10 @@ class ScannableMixin[K, V](ABC):
         me = cast(Any, self)
         return cast("tuple[Scope, K] | None", me.kvset.rescope(me.scope, key))
 
-    def pushes_order(self, order_by: Sequence[OrderBy[Any]]) -> bool:
-        """Whether this store's own scan gives ``order_by``, so it never sorts here.
+    def pushes_order(
+        self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
+    ) -> bool:
+        """Whether this store's own scan gives ``order_by`` (and ``distinct_on``).
 
         False by default: the store sorts its rows in process. A medium that
         keeps every field as a column answers True; a view that lists one
@@ -162,11 +165,12 @@ class ScannableMixin[K, V](ABC):
 
     def sorts_in_process(self, spec: ScanSpec[K]) -> bool:
         """Whether a scan of ``spec`` here reads every row and sorts it."""
-        return bool(spec.order_by) and not self.pushes_order(spec.order_by)
+        return bool(spec.order_by) and not self.pushes_order(spec.order_by, spec.distinct_on)
 
     def scan_in_process_order(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """``spec`` by sorting every row this store's own scan keeps."""
-        return scan_sorted(self.scan_rows, spec, backend=type(self).__name__)
+        store = cast(Any, self) if hasattr(self, "batch_get") else None
+        return scan_sorted(self.scan_rows, spec, backend=type(self).__name__, store=store)
 
     def explain_in_process_order(self, spec: ScanSpec[K]) -> ScanPlanNode:
         return explain_sorted(self.explain_node(unordered(spec)), spec)
@@ -204,6 +208,7 @@ class ScannableMixin[K, V](ABC):
         limit: int | None = None,
         order_by: Sequence[OrderBy[V]] = (),
         after: After[K] | None = None,
+        distinct_on: Sequence[Field[V, Any]] = (),
         on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
     ) -> Iterator[K]: ...
 
@@ -218,6 +223,7 @@ class ScannableMixin[K, V](ABC):
         limit: int | None = None,
         order_by: Sequence[OrderBy[V]] = (),
         after: After[K] | None = None,
+        distinct_on: Sequence[Field[V, Any]] = (),
         on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
     ) -> Iterator[tuple[K, V]]: ...
 
@@ -237,6 +243,7 @@ class ScannableMixin[K, V](ABC):
         spec: ScanSpec[K] | None = None,
         order_by: Sequence[OrderBy[V]] = (),
         after: After[K] | None = None,
+        distinct_on: Sequence[Field[V, Any]] = (),
     ) -> Iterator[K] | Iterator[tuple[K, V]]:
         if prefix is not None and not supports_prefix_scan(self.key_layout()):
             raise KvStoreScanUnsupported(
@@ -256,6 +263,7 @@ class ScannableMixin[K, V](ABC):
                 on_unsupported=on_unsupported,
                 order_by=order_by,
                 after=after,
+                distinct_on=distinct_on,
             )
         if include_values or spec.project is Projection.ENTRIES:
             for row in self.scan_rows(spec):

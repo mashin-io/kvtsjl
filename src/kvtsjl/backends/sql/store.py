@@ -48,8 +48,10 @@ from kvtsjl.store.schema.scan import (
     ScanSpec,
     ScanStat,
     compile_from_scan_entries,
+    conjoin,
     enforce_strict,
     peel_key_prefix,
+    split_by_groups,
     split_where,
 )
 from kvtsjl.store.schema.stat import RecordStat
@@ -885,6 +887,11 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             # change set out to fix.
             stats=False,
             orderable_columns=frozenset(self._sql_kvset.select_columns()) if selects else None,
+            distinct_columns=(
+                frozenset(self._sql_kvset.select_columns())
+                if selects and self._adapter.supports_distinct_on()
+                else None
+            ),
         )
 
     def _peel_field_tests(
@@ -942,14 +949,26 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
                 f"(got {self.kvset.key_layout!r})"
             )
         order_by = self._resolve_order_by(spec.order_by)
-        user_prefix, rest = peel_key_prefix(spec.where)
-        tests, residual = self._peel_field_tests(rest)
         pushed = {"order_by"}
+        kept: Predicate[K] | None = None
+        if spec.distinct_on:
+            # Ranking sees every live row of the view: only a test of the
+            # group's columns runs before it; the rest tests the rows kept,
+            # in SQL where it can, and a key prefix in Python.
+            before, after_ranking = split_by_groups(spec)
+            user_prefix = None
+            tests, before_rest = self._peel_field_tests(before)
+            kept, residual = self._peel_field_tests(after_ranking)
+            residual = conjoin(before_rest, residual)
+            pushed.add("distinct_on")
+        else:
+            user_prefix, rest = peel_key_prefix(spec.where)
+            tests, residual = self._peel_field_tests(rest)
         if spec.after is not None:
             pushed.add("after")
         if user_prefix is not None:
             pushed.add("KeyPrefix")
-        if tests is not None:
+        if tests is not None or kept is not None:
             pushed.add("FieldTest")
         # Push LIMIT only when nothing is left to filter client-side; otherwise
         # a pushed LIMIT 20 plus residual filtering returns fewer than 20 rows.
@@ -966,6 +985,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             tests=tests,
             order_by=order_by,
             after=None if spec.after is None else self._after_row(spec.after, order_by),
+            distinct_on=[f.name for f in spec.distinct_on],
+            kept=kept,
             limit=limit,
             include_values=spec.project is Projection.ENTRIES,
         )
@@ -1128,6 +1149,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         tests: Predicate[K] | None,
         order_by: Sequence[SqlOrder],
         after: SqlDbRow | None,
+        distinct_on: Sequence[str],
+        kept: Predicate[K] | None,
         limit: int | None,
         include_values: bool,
     ) -> Iterator[ScanRow[K, V]]:
@@ -1153,6 +1176,8 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
             after=after,
             limit=limit,
             live=live,
+            distinct_on=distinct_on,
+            kept_where=kept,
         )
         for row in self._adapter.select(query):
             # Defence in depth: SQL already excluded these.

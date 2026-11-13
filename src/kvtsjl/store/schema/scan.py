@@ -80,6 +80,8 @@ class ScanCapabilities:
 
     An order on other fields is sorted in process (see ``pushes_order``).
     """
+    distinct_columns: frozenset[str] | None = None
+    """Columns the medium groups by, for ``ScanSpec.distinct_on``; ``None`` for none."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -537,8 +539,25 @@ class ScanSpec[K]:
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE
     order_by: Sequence[OrderBy[Any]] = ()
     after: After[K] | None = None
+    distinct_on: Sequence[Field[Any, Any]] = ()
+    """Keep only each group's first row under ``order_by``, then apply ``where``.
+
+    Rows group by these fields' values, an unset field being a value of its
+    own. Ranking sees every live row of the store, so ``where``, ``refine``,
+    ``after`` and ``limit`` all apply to the rows it keeps: the newest
+    version of each file, then those that match — never an older version
+    that happens to match. A test of the group's fields alone means the same
+    either side of the ranking, so a medium may run it first.
+    """
 
     def __post_init__(self) -> None:
+        if self.distinct_on:
+            if not isinstance(self.distinct_on, tuple):
+                object.__setattr__(self, "distinct_on", tuple(self.distinct_on))
+            if not self.order_by:
+                raise ValueError(
+                    "distinct_on keeps each group's first row; pass order_by to say which"
+                )
         if self.after is not None:
             if not self.order_by:
                 raise ValueError("after resumes an order_by; pass order_by too")
@@ -579,6 +598,7 @@ def sugar_to_spec[K](
     on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
     order_by: Sequence[OrderBy[Any]] = (),
     after: After[K] | None = None,
+    distinct_on: Sequence[Field[Any, Any]] = (),
 ) -> ScanSpec[K]:
     """Build a ``ScanSpec`` from sugar kwargs and/or an explicit ``where``."""
     pred: Predicate[K] = AlwaysTrue()
@@ -600,6 +620,7 @@ def sugar_to_spec[K](
         on_unsupported=on_unsupported,
         order_by=tuple(order_by),
         after=after,
+        distinct_on=tuple(distinct_on),
     )
 
 
@@ -623,8 +644,50 @@ def _compare_places[K](
 
 
 def unordered[K](spec: ScanSpec[K]) -> ScanSpec[K]:
-    """What a store that sorts in process asks of its own scan: every row ``spec`` keeps."""
-    return replace(spec, order_by=(), after=None, limit=None, project=Projection.ENTRIES)
+    """What a store that sorts in process asks of its own scan.
+
+    Every row ``spec`` keeps; with ``distinct_on``, every row the ranking
+    sees — only a test of the group's fields filters before it.
+    """
+    if not spec.distinct_on:
+        return replace(spec, order_by=(), after=None, limit=None, project=Projection.ENTRIES)
+    before, _ = split_by_groups(spec)
+    return replace(
+        spec,
+        where=before,
+        refine=None,
+        order_by=(),
+        after=None,
+        distinct_on=(),
+        limit=None,
+        project=Projection.ENTRIES,
+    )
+
+
+def split_by_groups[K](spec: ScanSpec[K]) -> tuple[Predicate[K], Predicate[K]]:
+    """``spec.where`` as what may run before ranking — tests of group fields — and the rest."""
+    groups = {f.name for f in spec.distinct_on}
+
+    def of_a_group_field(p: Predicate[K]) -> bool:
+        return isinstance(p, FieldTest) and cast(FieldTest[Any, Any], p).of.name in groups
+
+    return split_where(spec.where, of_a_group_field)
+
+
+def first_of_each_group[K](
+    rows: Iterable[ScanRow[K, Any]], spec: ScanSpec[K]
+) -> Iterator[ScanRow[K, Any]]:
+    """Each ``spec.distinct_on`` group's first row under ``spec.order_by``; holds one per group."""
+    firsts: dict[tuple[Any, ...], tuple[_Place[K], ScanRow[K, Any]]] = {}
+    for row in rows:
+        if row.value is None:
+            continue
+        group = tuple(f.get(row.value) for f in spec.distinct_on)
+        place: _Place[K] = (tuple(item.field.get(row.value) for item in spec.order_by), row.key)
+        held = firsts.get(group)
+        if held is None or _compare_places(spec.order_by, place, held[0], by_key=True) < 0:
+            firsts[group] = (place, row)
+    return (row for _, row in firsts.values())
 
 
 def sort_rows[K](
@@ -661,10 +724,14 @@ def sort_rows[K](
         yield _project_row(row, spec.project)
 
 
-def order_label(order_by: Sequence[OrderBy[Any]]) -> str:
-    return ", ".join(
-        f"{item.column} desc" if item.descending else item.column for item in order_by
-    )
+def order_label[K](spec: ScanSpec[K]) -> str:
+    """``order_by(…)``, and ``distinct_on(…)`` with it, as ``explain()`` shows them."""
+    label = "order_by(" + ", ".join(
+        f"{item.column} desc" if item.descending else item.column for item in spec.order_by
+    ) + ")"
+    if spec.distinct_on:
+        label += " distinct_on(" + ", ".join(f.name for f in spec.distinct_on) + ")"
+    return label
 
 
 def scan_sorted[K](
@@ -672,26 +739,37 @@ def scan_sorted[K](
     spec: ScanSpec[K],
     *,
     backend: str,
+    store: ReadableKeyMap[K, Any] | None = None,
 ) -> Iterator[ScanRow[K, Any]]:
     """``spec`` from a store that cannot give its order: ``scan`` every row, then sort.
 
+    With ``distinct_on``, keep each group's first row, then filter those by
+    ``where`` and ``refine`` — reading ``store`` for a row without its value.
     ``Pushdown.STRICT`` refuses, as it does a filter that would run here.
     """
     if spec.on_unsupported is Pushdown.STRICT:
         raise KvStoreScanUnsupported(
-            f"{backend} cannot push order_by ({order_label(spec.order_by)}); "
-            "it would sort in process"
+            f"{backend} cannot push {order_label(spec)}; it would sort in process"
         )
-    return sort_rows(scan(unordered(spec)), spec)
+    rows = scan(unordered(spec))
+    if spec.distinct_on:
+        _, kept = split_by_groups(spec)
+        rows = apply_cascade(
+            first_of_each_group(rows, spec),
+            residual=kept,
+            store=store,
+            refine=spec.refine,
+            project=Projection.ENTRIES,
+        )
+    return sort_rows(rows, spec)
 
 
 def explain_sorted[K](child: ScanPlanNode, spec: ScanSpec[K]) -> ScanPlanNode:
     """The plan of ``scan_sorted``: ``child`` lists every row, then a ``Sort`` here."""
-    return ScanPlanNode(
-        name="Sort",
-        residual=f"order_by({order_label(spec.order_by)})",
-        children=(child,),
-    )
+    residual = order_label(spec)
+    if spec.distinct_on:
+        residual += f" then {predicate_label(split_by_groups(spec)[1])}"
+    return ScanPlanNode(name="Sort", residual=residual, children=(child,))
 
 
 def compile_from_scan_entries[K, V](
@@ -801,13 +879,14 @@ def split_where[K](
     if isinstance(where, And):
         left_taken, left_rest = split_where(where.left, leaf)
         right_taken, right_rest = split_where(where.right, leaf)
-        return _conjoin(left_taken, right_taken), _conjoin(left_rest, right_rest)
+        return conjoin(left_taken, right_taken), conjoin(left_rest, right_rest)
     if made_of(where, leaf):
         return where, AlwaysTrue()
     return AlwaysTrue(), where
 
 
-def _conjoin[K](left: Predicate[K], right: Predicate[K]) -> Predicate[K]:
+def conjoin[K](left: Predicate[K], right: Predicate[K]) -> Predicate[K]:
+    """``left`` and ``right``, without an ``AlwaysTrue`` side."""
     if isinstance(left, AlwaysTrue):
         return right
     if isinstance(right, AlwaysTrue):
