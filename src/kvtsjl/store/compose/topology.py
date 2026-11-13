@@ -46,6 +46,7 @@ from kvtsjl.store.schema.scan import (
     ScanPlanNode,
     ScanRow,
     ScanSpec,
+    Tally,
     apply_cascade,
     is_gc_predicate,
     predicate_label,
@@ -266,6 +267,13 @@ class StoreTopologyMixin[K, V](RecordTopologyMixin[K, V], KvStore[K, V], ABC):
             return self._store_of(whole_record).pushes_order(order_by, distinct_on)
         scanned = self._scanned()
         return not distinct_on and len(scanned) == 1 and scanned[0].pushes_order(order_by)
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """A record held whole by one store is that store's row: tallied there."""
+        whole_record = self.topology().whole_authority
+        if whole_record is not None:
+            return self._store_of(whole_record).tally_rows(spec)
+        return super().tally_rows(spec)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         topology = self.topology()

@@ -47,6 +47,7 @@ Most KV libraries force you to choose early: either a thin dict wrapper around a
 - **Scope views** — prefix namespaces without copying data
 - **Field filters** — `Field(name, get).eq / is_in / startswith / contains / is_null` filter a scan on every store; SQL runs them in its `WHERE`
 - **Ordered scans** — `order_by=[OrderBy(field, descending=…)]` and `after=` resume the same order on every store; SQL sorts and pages in the database, any other store sorts in process
+- **Tally** — `store.tally(where)` counts what a scan lists and its latest write: a cheap change token; SQL answers in one statement
 - **First row per group** — `distinct_on=[field, …]` keeps each group's first row under the order, then filters; SQL ranks with a window function, any other store in process
 - **Multi-index search** — attach several indexes; `store.search(index, query)` returns keys or hydrated values
 - **Vector indexes** — `MemoryVectorIndex` (exact L2) or optional **`ChromaVectorIndex`**
@@ -255,6 +256,29 @@ a window function, where the adapter supports it (`supports_distinct_on`);
 any other store keeps the first row of each group as it reads, holding one
 per group. A record assembled from parts ranks its own records, since its
 commit part would rank rows whose records may not assemble.
+
+---
+
+## Has this scope changed? `tally()`
+
+```python
+t = catalog.scoped(space_kind="assets").tally()   # Tally(count, newest)
+etag = f"{t.count}:{t.newest}"
+```
+
+`tally(where)` counts the entries `scan(where)` would list and gives the
+latest `modified_at` among them, so it moves when an entry is added, removed
+or expires, and on a write that moves the time — not on one that keeps or
+backdates the clock (`set(..., created_at=…)`). Redis keeps no write time, so
+there `newest` is `None` and only the count moves.
+
+SQL answers with one `COUNT(*)` / `MAX(updated_at)` statement where it can
+run the whole of `where`; any other store lists the keys and their stats,
+never reading a value unless `where` does. `Pushdown.STRICT` refuses wherever
+it would list. A view whose rows are its store's — `readonly()`, `map` and
+`imap` (with key tests), `imap_keys` and `beneath()` (with none), a record
+held whole by one store — tallies on that store. Combining several stores'
+tallies into one token is the caller's.
 
 ---
 

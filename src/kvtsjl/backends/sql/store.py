@@ -47,9 +47,11 @@ from kvtsjl.store.schema.scan import (
     ScanRow,
     ScanSpec,
     ScanStat,
+    Tally,
     compile_from_scan_entries,
     conjoin,
     enforce_strict,
+    lists_rows_alone,
     peel_key_prefix,
     split_by_groups,
     split_where,
@@ -993,6 +995,51 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         enforce_strict(spec, residual, backend=type(self).__name__)
         return CompiledScan(rows=rows, residual=residual, pushed=frozenset(pushed))
 
+    def tally(self, spec: ScanSpec[K]) -> Tally | None:
+        """One ``COUNT`` / ``MAX`` statement, where SQL can answer for every row.
+
+        ``None`` — so the store lists instead — for an adapter without
+        ``tally``, or a scan with anything left for Python: a test it cannot
+        run, ``refine``, an order or a limit.
+        """
+        adapter = self._adapter
+        if not (
+            adapter.supports_tally()
+            and adapter.supports_select()
+            and self.kvset.key_layout is KeyLayout.LITERAL
+            and lists_rows_alone(spec, lambda where: True)
+        ):
+            return None
+        user_prefix, rest = peel_key_prefix(spec.where)
+        tests, residual = self._peel_field_tests(rest)
+        if not isinstance(residual, AlwaysTrue):
+            return None
+        sk = self._sql_kvset
+        counted = adapter.tally(
+            SqlSelect(
+                table=self._table,
+                columns=sk.select_columns(),
+                key_fields=sk.key_fields,
+                order_by=tuple(SqlOrder(f) for f in sk.key_fields),
+                exact=self._scope_key_row(require_all=False),
+                prefixes=self._leaf_prefix_map(user_prefix),
+                where=tests,
+                live=self._liveness(),
+            ),
+            clock=sk.updated_at_field,
+        )
+        return Tally(counted.count, _utc_from_epoch(_as_timestamp(counted.newest)))
+
+    def _liveness(self) -> SqlLiveness:
+        sk = self._sql_kvset
+        return SqlLiveness(
+            now=time.time(),
+            ttl_seconds=self.ttl_seconds(),
+            updated_at_field=sk.updated_at_field,
+            expires_at_field=sk.expires_at_field,
+            held_columns=self._held_by(),
+        )
+
     def _compile_keyset_scan(self, spec: ScanSpec[K]) -> CompiledScan[K]:
         if self.kvset.key_layout is not KeyLayout.LITERAL:
             raise KvStoreScanUnsupported(
@@ -1158,13 +1205,7 @@ class SqlDbKvBackend[K, V](KvBackend[K, V, str, SqlDbRow, str]):
         # Liveness must be pushed with LIMIT: expired rows live in the table
         # until GC runs, so filtering them in Python after a pushed LIMIT n
         # under-fills (and returns nothing when the newest n have expired).
-        live = SqlLiveness(
-            now=time.time(),
-            ttl_seconds=self.ttl_seconds(),
-            updated_at_field=sk.updated_at_field,
-            expires_at_field=sk.expires_at_field,
-            held_columns=self._held_by(),
-        )
+        live = self._liveness()
         query = SqlSelect(
             table=self._table,
             columns=sk.select_columns(),

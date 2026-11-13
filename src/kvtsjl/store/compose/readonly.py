@@ -11,7 +11,7 @@ from kvtsjl.scope import Scope
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.readable import ReadableKvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
-from kvtsjl.store.schema.scan import Field, OrderBy, ScanPlanNode, ScanRow, ScanSpec
+from kvtsjl.store.schema.scan import Field, OrderBy, ScanPlanNode, ScanRow, ScanSpec, Tally
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 from kvtsjl.store.streaming import StreamSource
@@ -143,6 +143,9 @@ class ReadonlyKvStore[K, V](ReadableKvStore[K, V]):
 
     def explain_node(self, spec: ScanSpec[K]) -> ScanPlanNode:
         return self._underlying.explain_node(spec)
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        return self._underlying.tally_rows(spec)
 
     def clone_with_scope(self, scope: Scope) -> ReadableKvStore[K, V]:
         return ReadonlyKvStore(self._underlying.clone_with_scope(scope))

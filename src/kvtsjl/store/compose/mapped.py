@@ -27,7 +27,11 @@ from kvtsjl.store.schema.scan import (
     ScanOrder,
     ScanRow,
     ScanSpec,
+    Tally,
     apply_cascade,
+    is_key_only_predicate,
+    is_unfiltered,
+    lists_rows_alone,
     spec_to_scan_query,
 )
 from kvtsjl.store.schema.stat import RecordStat
@@ -82,6 +86,12 @@ class MappedKvStore[K, V, U](
         self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
     ) -> bool:
         return self._src().pushes_order(order_by, distinct_on)
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """Its rows are its store's under the same keys: tallied there, unless a value is read."""
+        if lists_rows_alone(spec, is_key_only_predicate):
+            return self._src().tally_rows(spec)
+        return super().tally_rows(spec)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
         if self.sorts_in_process(spec):
@@ -175,6 +185,12 @@ class IMappedKvStore[K, V, U](
         self, order_by: Sequence[OrderBy[Any]], distinct_on: Sequence[Field[Any, Any]] = ()
     ) -> bool:
         return self._src().pushes_order(order_by, distinct_on)
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """Its rows are its store's under the same keys: tallied there, unless a value is read."""
+        if lists_rows_alone(spec, is_key_only_predicate):
+            return self._src().tally_rows(spec)
+        return super().tally_rows(spec)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, U]]:
         if self.sorts_in_process(spec):
@@ -285,6 +301,18 @@ class IMappedKeysKvStore[K, SK, V](
         )
         for sk, value in self._src().scan_entries(src_query):
             yield from_store(sk), value
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """The store's rows under other keys: tallied there, unless a key is tested."""
+        if lists_rows_alone(spec, is_unfiltered):
+            return self._src().tally_rows(
+                ScanSpec[SK](
+                    project=spec.project,
+                    page_size=spec.page_size,
+                    on_unsupported=spec.on_unsupported,
+                )
+            )
+        return super().tally_rows(spec)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         """The store's rows under the caller's keys.

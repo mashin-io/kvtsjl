@@ -85,6 +85,21 @@ class ScanCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class Tally:
+    """How many entries a scan lists, and the latest write among them.
+
+    ``newest`` is the latest ``modified_at`` — the medium's write time, or
+    its clock where it keeps no other — or ``None`` for no entries, or on a
+    medium that keeps no write time (Redis). Together they change whenever
+    an entry is added, removed or expires, and on a write that moves the
+    time: a cheap token for "has this scope changed".
+    """
+
+    count: int
+    newest: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CompiledScan[K]:
     rows: Iterator[ScanRow[K, Any]]
     residual: Predicate[K]
@@ -641,6 +656,26 @@ def _compare_places[K](
         if c := _compare(x, y):
             return -c if item.descending else c
     return _compare(a[1], b[1]) if by_key else 0
+
+
+def lists_rows_alone[K](spec: ScanSpec[K], where: Callable[[Predicate[K]], bool]) -> bool:
+    """Whether ``spec`` asks only which rows there are, filtered as ``where`` allows.
+
+    No ``refine``, order or limit: what a tally can take wherever the rows
+    are. A view whose rows are its store's tallies such a spec there.
+    """
+    return (
+        spec.refine is None
+        and not spec.order_by
+        and not spec.distinct_on
+        and spec.order is ScanOrder.UNORDERED
+        and spec.limit is None
+        and where(spec.where)
+    )
+
+
+def is_unfiltered[K](where: Predicate[K]) -> bool:
+    return isinstance(where, AlwaysTrue)
 
 
 def unordered[K](spec: ScanSpec[K]) -> ScanSpec[K]:

@@ -14,7 +14,15 @@ from kvtsjl.store.backend import KvBackend, by_clone, per_clone
 from kvtsjl.store.leaf import LeafKvStore
 from kvtsjl.store.logical import KvStore
 from kvtsjl.store.schema.layout import KeyLayout, ScanQuery
-from kvtsjl.store.schema.scan import Needs, Predicate, ScanRow
+from kvtsjl.store.schema.scan import (
+    Needs,
+    Predicate,
+    ScanRow,
+    ScanSpec,
+    Tally,
+    is_unfiltered,
+    lists_rows_alone,
+)
 from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy
 from kvtsjl.store.streaming import StreamSource
@@ -245,6 +253,19 @@ class BeneathKvStore[K, V](KvStore[Scoped[K], V]):
 
     def supports_scoped_scan(self) -> bool:
         return self._store.supports_scoped_scan()
+
+    def tally_rows(self, spec: ScanSpec[Scoped[K]]) -> Tally:
+        """It lists every entry of its store, each under its scope: tallied there."""
+        if lists_rows_alone(spec, is_unfiltered):
+            self._require_scoped_scan("a tally")
+            return self._store.tally_rows(
+                ScanSpec[K](
+                    project=spec.project,
+                    page_size=spec.page_size,
+                    on_unsupported=spec.on_unsupported,
+                )
+            )
+        return super().tally_rows(spec)
 
     def expired_keys(self, *, now: datetime | None = None, limit: int) -> list[Scoped[K]]:
         self._require_scoped_scan("listing expired keys")

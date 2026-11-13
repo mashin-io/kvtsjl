@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
+from itertools import islice
 from typing import Any, Literal, Self, cast, overload
 
 from kvtsjl.exceptions import (
@@ -30,6 +32,7 @@ from kvtsjl.store.schema.scan import (
     ScanPlanNode,
     ScanRow,
     ScanSpec,
+    Tally,
     explain_sorted,
     is_gc_predicate,
     peel_key_prefix,
@@ -38,6 +41,7 @@ from kvtsjl.store.schema.scan import (
     sugar_to_spec,
     unordered,
 )
+from kvtsjl.store.schema.stat import RecordStat
 from kvtsjl.store.schema.ttl import TtlPolicy, require_write_clock_supported
 
 
@@ -340,6 +344,49 @@ class ScannableMixin[K, V](ABC):
         """Count keys matching ``where`` (KEYS projection + residual)."""
         spec = sugar_to_spec(where=where, project=Projection.KEYS, **kwargs)
         return sum(1 for _ in self.scan_rows(spec))
+
+    def tally(
+        self,
+        where: Predicate[K] | None = None,
+        *,
+        on_unsupported: Pushdown = Pushdown.CLIENT_SIDE,
+        **kwargs: Any,
+    ) -> Tally:
+        """How many entries ``scan`` would list, and the latest write among them.
+
+        A cheap change token for a scope: SQL answers it with one
+        ``COUNT`` / ``MAX`` statement; any other store lists the scope's
+        keys and their stats, never reading a value unless ``where`` does.
+        ``Pushdown.STRICT`` refuses wherever it would list.
+        """
+        spec = sugar_to_spec(
+            where=where, project=Projection.STATS, on_unsupported=on_unsupported, **kwargs
+        )
+        return self.tally_rows(spec)
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """``tally`` of ``spec``: here, by listing; a medium or view that can, pushes it."""
+        if spec.on_unsupported is Pushdown.STRICT:
+            raise KvStoreScanUnsupported(
+                f"{type(self).__name__} cannot push a tally; it would list the scope"
+            )
+        me = cast(Any, self)
+        count, newest = 0, None
+        rows = iter(self.scan_rows(replace(spec, project=Projection.STATS)))
+        while page := list(islice(rows, max(spec.page_size, 1))):
+            unstated = [row.key for row in page if row.stat is None]
+            stats: Mapping[K, RecordStat] = me.batch_stat(unstated) if unstated else {}
+            for row in page:
+                if row.stat is not None:
+                    written = row.stat.modified_at
+                elif row.key in stats:
+                    written = stats[row.key].modified_at
+                else:
+                    continue  # gone since it was listed
+                count += 1
+                if written is not None and (newest is None or written > newest):
+                    newest = written
+        return Tally(count, newest)
 
     def explain(
         self,

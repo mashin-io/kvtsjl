@@ -115,6 +115,15 @@ class SqlSelect:
     kept_where: Predicate[Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SqlTally:
+    """``COUNT(*)`` and ``MAX(clock)`` over the rows of a ``SqlSelect``."""
+
+    count: int
+    newest: Any = None
+    """The clock column's largest value, as stored; ``None`` for no rows."""
+
+
 class SqlDbClientAdapter(ABC):
     """Caller-owned DB access. The store never passes SQL text.
 
@@ -139,6 +148,8 @@ class SqlDbClientAdapter(ABC):
                                  drop ``live`` and a pushed ``LIMIT``
                                  counts rows that have expired or that a
                                  shared-table view has cleared
+    ``supports_tally``           ``tally`` in one statement; without it
+    ``tally``                    the store lists the rows to count them
     ``supports_distinct_on``     ``distinct_on`` in the database; without
                                  it the store reads every row and keeps
                                  each group's first itself
@@ -372,6 +383,21 @@ class SqlDbClientAdapter(ABC):
         Default ``False``: the store keeps each group's first row itself.
         """
         return False
+
+    def supports_tally(self) -> bool:
+        """Whether this adapter implements ``tally``.
+
+        Default ``False``: the store lists the rows to count them.
+        """
+        return False
+
+    def tally(self, query: SqlSelect, *, clock: str) -> SqlTally:
+        """Count the rows ``select(query)`` would return, and their largest ``clock``.
+
+        One statement, reading no row out: a change token is asked for on
+        every request. Implement together with ``supports_tally``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement tally")
 
     def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
         """Run one ``SqlSelect``: rows matching all of its conditions, in its order.

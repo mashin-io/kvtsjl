@@ -23,6 +23,7 @@ from kvtsjl.store.schema.scan import (
     ScanOrder,
     ScanRow,
     ScanSpec,
+    Tally,
     apply_cascade,
     compile_from_scan_entries,
 )
@@ -194,6 +195,15 @@ class LeafKvStore[K, V, KBLOB, VBLOB, COLL](KvStore[K, V]):
             and all(item.column in orderable for item in order_by)
             and all(f.name in (groupable or ()) for f in distinct_on)
         )
+
+    def tally_rows(self, spec: ScanSpec[K]) -> Tally:
+        """The medium's own count where it has one, else a listing."""
+        tally_fn = getattr(self._backend, "tally", None)
+        if callable(tally_fn):
+            pushed = cast("Tally | None", tally_fn(spec))
+            if pushed is not None:
+                return pushed
+        return super().tally_rows(spec)
 
     def scan_rows(self, spec: ScanSpec[K]) -> Iterator[ScanRow[K, V]]:
         if self.sorts_in_process(spec):

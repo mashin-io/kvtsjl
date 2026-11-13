@@ -13,6 +13,7 @@ from kvtsjl.backends.sql.adapter import (
     SqlLiveness,
     SqlOrder,
     SqlSelect,
+    SqlTally,
 )
 from kvtsjl.backends.sql.schema import SqlDbRow
 from kvtsjl.exceptions import KvStoreError
@@ -559,6 +560,21 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         return sqlite3.sqlite_version_info >= (3, 25)  # window functions
 
     def select(self, query: SqlSelect) -> Iterator[SqlDbRow]:
+        sql, params = self._select_sql(query)
+        for row in self._conn.execute(sql, params):
+            yield _row_from_sqlite(row)
+
+    def supports_tally(self) -> bool:
+        return True
+
+    def tally(self, query: SqlSelect, *, clock: str) -> SqlTally:
+        sql, params = self._select_sql(query)
+        count, newest = self._conn.execute(
+            f"SELECT COUNT(*), MAX({_quote_ident(clock)}) FROM ({sql})", params
+        ).fetchone()
+        return SqlTally(int(count), newest)
+
+    def _select_sql(self, query: SqlSelect) -> tuple[str, list[Any]]:
         cols = ", ".join(_quote_ident(c) for c in query.columns)
         clauses, params = self._key_parts_filters(
             key_fields=query.key_fields, exact=query.exact, prefixes=query.prefixes
@@ -592,8 +608,7 @@ class SqliteSqlDbClientAdapter(SqlDbClientAdapter):
         if query.limit is not None:
             sql += " LIMIT ?"
             params.append(query.limit)
-        for row in self._conn.execute(sql, params):
-            yield _row_from_sqlite(row)
+        return sql, params
 
     def supports_expiry_scan(self) -> bool:
         return True
